@@ -3434,10 +3434,25 @@ class DodgeEngine:
             for dy in range(2):
                 for dx in range(b[2]):
                     put_px(buf, b[0] + dx, b[1] + dy, col)
+        # Draw the runner across the full height of its own hitbox. The
+        # collision band is rows 58-63 (see tick), but this used to draw a
+        # 3x2 sliver at rows 61-62 -- so a block could kill you while it
+        # still looked a body-length short, which reads as the game
+        # cheating. A figure that fills the box it actually occupies is both
+        # fairer to read and far easier to find: it was previously the
+        # smallest thing on a screen full of wide bold bars.
         col = self.DEAD if flashing else self.YOU
-        for dy in range(2):
-            for dx in range(-1, 2):
-                put_px(buf, self.x + dx, HEIGHT - 3 + dy, col)
+        top = HEIGHT - 6
+        put_px(buf, self.x, top, col)                      # head
+        for dy in (1, 2):
+            for dx in (-1, 0, 1):
+                put_px(buf, self.x + dx, top + dy, col)    # shoulders + torso
+        stride = (self.ticks // 3) & 1                     # legs pump when running
+        put_px(buf, self.x - 1, top + 3, col)
+        put_px(buf, self.x + 1, top + 3, col)
+        put_px(buf, self.x - (1 if stride else 0), top + 4, col)
+        put_px(buf, self.x + (0 if stride else 1), top + 4, col)
+        put_px(buf, self.x, top, (255, 255, 255))          # bright crown
         return bytes(buf)
 
 
@@ -4978,9 +4993,20 @@ class ChaseEngine:
     DOT = (255, 205, 150)
     PELLET = (255, 255, 255)
     YOU = (255, 226, 60)
-    GHOST_COLS = [(255, 60, 60), (255, 145, 205), (80, 220, 255), (255, 170, 60)]
+    # The fourth chaser is traditionally orange, which at 3px sat only 56
+    # colour-units from the player's yellow -- every other chaser is 165+
+    # away. Deepened toward true orange so no chaser can be mistaken for
+    # you at a glance; the silhouettes differ too, but colour should not be
+    # doing the opposite of what shape is saying.
+    GHOST_COLS = [(255, 60, 60), (255, 145, 205), (80, 220, 255), (255, 125, 25)]
     EYE = (245, 250, 255)
-    FRIGHT = (55, 75, 255)
+    # Pale ice blue, not a saturated one. The maze walls are filled blue
+    # blocks, and the obvious "scared ghosts are blue" choice landed at
+    # luminance 84 against a wall highlight of 85 -- identical brightness,
+    # so the one moment you are meant to give chase was the one moment the
+    # ghosts stopped reading as actors. Every other actor here sits above
+    # 210, so vulnerability is signalled by hue while staying legible.
+    FRIGHT = (140, 185, 255)
     FRIGHT_END = (235, 240, 255)
     DEAD = (255, 45, 60)
 
@@ -5063,36 +5089,86 @@ class ChaseEngine:
         self.press(cmd)
 
     def auto(self):
-        # BFS to the most valuable reachable target, treating the squares
-        # around an active chaser as walls so it genuinely dodges instead
-        # of walking into them.
+        """Flood out once, recording the first step toward the nearest of
+        each KIND of prize separately, then choose between them.
+
+        A plain nearest-goal search looks reasonable and plays badly: dots
+        outnumber power pellets about fifty to one and the pellets sit in
+        the far corners, so the closest goal is essentially always a dot.
+        The result is that a pellet never gets eaten, frightened mode never
+        fires, and an entire system of the game is invisible in ambient
+        mode. Pellets therefore have to be worth a deliberate detour --
+        a long one when something is closing in.
+        """
         danger = set()
+        nearest_ghost = 99
         for g in self.ghosts:
             if g["fright"] > 0:
                 continue
+            nearest_ghost = min(nearest_ghost,
+                                abs(g["cx"] - self.pcx) + abs(g["cy"] - self.pcy))
             for dx in range(-2, 3):
                 for dy in range(-2, 3):
                     danger.add((g["cx"] + dx, g["cy"] + dy))
-        goals = set(self.pellets) | self.dots
-        if any(g["fright"] > 0 for g in self.ghosts):
-            goals |= {(g["cx"], g["cy"]) for g in self.ghosts if g["fright"] > 0}
-        start = (self.pcx, self.pcy)
-        seen = {start}
-        queue = deque([(start, None)])
-        while queue:
-            (cx, cy), first = queue.popleft()
-            if (cx, cy) in goals and first:
-                self.pnext = first
-                return
-            for d in ((0, -1), (0, 1), (-1, 0), (1, 0)):
-                nx, ny = cx + d[0], cy + d[1]
-                if self._wall(nx, ny):
-                    continue
-                nx %= self.GW
-                if (nx, ny) in seen or (nx, ny) in danger:
-                    continue
-                seen.add((nx, ny))
-                queue.append(((nx, ny), first or d))
+
+        edible = {(g["cx"], g["cy"]) for g in self.ghosts if g["fright"] > 0}
+        # Shuffled expansion order breaks equal-distance ties differently
+        # each run; a fixed order made every ambient run byte-identical.
+        dirs = [(0, -1), (0, 1), (-1, 0), (1, 0)]
+        random.shuffle(dirs)
+
+        def search(avoid):
+            best = {}
+            start = (self.pcx, self.pcy)
+            seen = {start}
+            queue = deque([(start, None, 0)])
+            while queue:
+                (cx, cy), first, dist = queue.popleft()
+                if first:
+                    if (cx, cy) in edible:
+                        best.setdefault("hunt", (dist, first))
+                    elif (cx, cy) in self.pellets:
+                        best.setdefault("pellet", (dist, first))
+                    elif (cx, cy) in self.dots:
+                        best.setdefault("dot", (dist, first))
+                    if len(best) == 3:
+                        break
+                for d in dirs:
+                    nx, ny = cx + d[0], cy + d[1]
+                    if self._wall(nx, ny):
+                        continue
+                    nx %= self.GW
+                    if (nx, ny) in seen or (nx, ny) in avoid:
+                        continue
+                    seen.add((nx, ny))
+                    queue.append(((nx, ny), first or d, dist + 1))
+            return best
+
+        best = search(danger) or search(set())
+        if not best:
+            # Every route blocked. Take the legal move that puts the most
+            # room between us and the closest chaser instead of silently
+            # keeping a stale direction that walks into a wall.
+            opts = [d for d in dirs if self._legal(self.pcx, self.pcy, d)]
+            if opts and self.ghosts:
+                def clearance(d):
+                    nx, ny = (self.pcx + d[0]) % self.GW, self.pcy + d[1]
+                    return min(abs(g["cx"] - nx) + abs(g["cy"] - ny)
+                               for g in self.ghosts)
+                self.pnext = max(opts, key=clearance)
+            elif opts:
+                self.pnext = opts[0]
+            return
+
+        if "hunt" in best:                      # edible ghost: worth the most
+            self.pnext = best["hunt"][1]
+            return
+        pel, dot = best.get("pellet"), best.get("dot")
+        detour = 14 if nearest_ghost <= 6 else 7
+        if pel and (not dot or pel[0] <= dot[0] + detour):
+            self.pnext = pel[1]
+        else:
+            self.pnext = (dot or pel)[1]
 
     # ---- simulation ----------------------------------------------------
     def _legal(self, cx, cy, d):
