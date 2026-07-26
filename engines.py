@@ -4263,8 +4263,19 @@ class TunnelEngine:
 
         color = self.DEAD if self.death_flash and self.death_flash % 4 < 2 else self.PLAYER
         px, py = int(round(self.px)), self.PLAYER_ROW
+        # A wake first, so the craft reads as travelling rather than parked.
+        put_px(buf, px, py + 2, tuple(v // 2 for v in color))
+        put_px(buf, px, py + 3, tuple(v // 4 for v in color))
+        # Punch a dark socket before drawing the craft: the corridor floor is
+        # black but the walls are purple, and when you are hugging an edge a
+        # bare sprite melts into the wall. The socket guarantees separation
+        # against either background.
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                put_px(buf, px + dx, py + dy, self.BG)
         for dx, dy in ((0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)):
             put_px(buf, px + dx, py + dy, color)
+        put_px(buf, px, py, (255, 255, 255))          # hot core
         if self.boost > 0:
             for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
                 put_px(buf, px + dx, py + dy, self.BOOST_GLOW)
@@ -4316,6 +4327,9 @@ class PowderEngine:
         self.ticks = 0
         self.score = 0
         self._auto_cd = 0
+        self._auto_hold = 0
+        self._auto_x = WIDTH // 2
+        self._auto_drift = 0
 
     def pointer(self, fx, fy, down):
         self.px, self.py = fx, fy
@@ -4351,12 +4365,30 @@ class PowderEngine:
                         self.grid[y][x] = kind
 
     def auto(self):
+        # Sustained pours from one nozzle, not a fresh random x every few
+        # ticks. A nozzle that teleports sprays loose pixels across the
+        # whole box and never builds anything; holding position lets a real
+        # stream form, pile up and slump, which is the entire appeal of
+        # watching sand. A slow drift keeps the dunes from stacking into one
+        # identical cone every time.
         self._auto_cd -= 1
         if self._auto_cd <= 0:
-            self._auto_cd = 3
-            x = random.randint(4, WIDTH - 5)
-            self.material = random.choice((self.SAND, self.WATER))
-            self._place(x, 2, radius=1)
+            self._auto_hold = random.randint(45, 110)
+            self._auto_cd = self._auto_hold + random.randint(20, 60)
+            self._auto_x = random.randint(6, WIDTH - 7)
+            self._auto_drift = random.choice((-1, 0, 0, 1))
+            # Only materials that actually fall. STONE is inert, so pouring
+            # it from the top just paints a bar hanging in mid-air instead
+            # of building anything.
+            self.material = random.choice((self.SAND, self.SAND, self.WATER))
+        if self._auto_hold > 0:
+            self._auto_hold -= 1
+            if self._auto_hold % 6 == 0:
+                self._auto_x = max(4, min(WIDTH - 5,
+                                          self._auto_x + self._auto_drift))
+            # Single pixel, so it falls as a stream of grains rather than a
+            # 5px clump that drops as one coherent blob.
+            self._place(self._auto_x, 2, radius=0)
 
     def tick(self):
         self.ticks += 1
@@ -4415,11 +4447,20 @@ class PowderEngine:
                 c = row[x]
                 if c != self.VOID:
                     put_px(buf, x, y, self.COLORS[c])
-        # Cursor ring so the touchpad feels connected to the panel.
+        # Cursor: an open crosshair with a lit centre, in the colour of the
+        # material about to be laid down. Against a box that fills up with
+        # busy sand and water, four lone pixels vanish -- the arms give it a
+        # shape that survives a cluttered background, and tinting it by
+        # material means you never have to guess what will pour.
         cx, cy = int(self.px * WIDTH), int(self.py * HEIGHT)
-        ring = (255, 255, 255) if not self.erase else (255, 80, 80)
-        for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2)):
-            put_px(buf, cx + dx, cy + dy, ring)
+        ring = (255, 90, 90) if self.erase else self.COLORS[self.material]
+        for d in (2, 3):
+            put_px(buf, cx - d, cy, ring)
+            put_px(buf, cx + d, cy, ring)
+            put_px(buf, cx, cy - d, ring)
+            put_px(buf, cx, cy + d, ring)
+        core = (255, 255, 255) if self.pointer_down else ring
+        put_px(buf, cx, cy, core)
         return bytes(buf)
 
 
@@ -4449,6 +4490,7 @@ class BrawlerEngine:
     ENEMY_FLIP = (255, 215, 65)
     DEAD = (255, 45, 60)
     INK = (150, 160, 185)
+    EYE = (245, 250, 255)
 
     GRAVITY = 0.34
     JUMP_V = -3.35            # v^2/2g ~= 16.5px -> just clears one 14px tier
@@ -4838,16 +4880,38 @@ class BrawlerEngine:
             else:
                 col = self.ENEMY_ANGRY if e["angry"] else self.ENEMY
             ex, ey = int(e["x"]), int(e["y"])
-            for dx in range(-1, 2):
-                for dy in range(-2, 1):
-                    put_px(buf, ex + dx, ey + dy, col)
+            if e["flip"] > 0:
+                # Belly-up with its legs kicking in the air. The flipped
+                # state is the only window in which you can score, so it
+                # gets its own silhouette rather than just a colour swap.
+                put_px(buf, ex - 1, ey - 2, col)
+                put_px(buf, ex + 1, ey - 2, col)
+                for dx in (-1, 0, 1):
+                    put_px(buf, ex + dx, ey - 1, col)
+                    put_px(buf, ex + dx, ey, col)
+            else:
+                for dx in (-1, 0, 1):
+                    put_px(buf, ex + dx, ey - 2, col)      # shell
+                    put_px(buf, ex + dx, ey - 1, col)      # body
+                put_px(buf, ex - 1, ey, col)               # feet, notched
+                put_px(buf, ex + 1, ey, col)
+                lead = 1 if e["dir"] >= 0 else -1          # eyes lead the walk
+                put_px(buf, ex + (1 if lead > 0 else -1), ey - 1, self.EYE)
+                put_px(buf, ex, ey - 1, self.EYE)
 
+        # A figure, not a bar: narrow head offset toward the way you're
+        # facing, wide shoulders, split legs. At 3x5 the silhouette is the
+        # only thing that can carry "this one is me".
         col = self.DEAD if self.death_flash and self.death_flash % 4 < 2 else self.YOU
         px, py = int(self.x), int(self.y)
-        for dy in range(-4, 1):
-            for dx in range(-1, 2):
-                put_px(buf, px + dx, py + dy, col)
-        put_px(buf, px + self.face, py - 3, (255, 255, 255))   # facing pip
+        put_px(buf, px, py - 4, col)
+        put_px(buf, px + self.face, py - 4, col)            # head
+        for dy in (-3, -2, -1):
+            for dx in (-1, 0, 1):
+                put_px(buf, px + dx, py + dy, col)          # shoulders + torso
+        put_px(buf, px - 1, py, col)                        # legs, split
+        put_px(buf, px + 1, py, col)
+        put_px(buf, px + self.face, py - 4, self.EYE)       # face
 
         draw_text3x5(buf, 2, 2, str(self.score), self.INK)
         for i in range(self.lives):
@@ -4915,6 +4979,7 @@ class ChaseEngine:
     PELLET = (255, 255, 255)
     YOU = (255, 226, 60)
     GHOST_COLS = [(255, 60, 60), (255, 145, 205), (80, 220, 255), (255, 170, 60)]
+    EYE = (245, 250, 255)
     FRIGHT = (55, 75, 255)
     FRIGHT_END = (235, 240, 255)
     DEAD = (255, 45, 60)
@@ -4978,6 +5043,9 @@ class ChaseEngine:
             })
         self.mode_i = 0
         self.mode_t = 0
+        # Steady animation clock. mode_t resets on every scatter/chase flip,
+        # so driving the chomp off it would stutter at phase boundaries.
+        self.anim = 0
         self.combo = 0
 
     # ---- input ---------------------------------------------------------
@@ -5052,6 +5120,7 @@ class ChaseEngine:
             self._place_actors()
 
     def _advance_mode(self):
+        self.anim += 1
         self.mode_t += 1
         if self.mode_t >= self.PHASES[self.mode_i % len(self.PHASES)][0]:
             self.mode_t = 0
@@ -5199,6 +5268,11 @@ class ChaseEngine:
                 for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                     put_px(buf, x + dx, y + dy, self.PELLET)
 
+        # Ghosts: domed top, eyed body, notched "skirt" feet. The notch is
+        # the whole point -- at 3px a plus-shape ghost and a plus-shape
+        # player are the same silhouette in different hues, so from across
+        # the room you cannot tell which one is you. Shape carries the
+        # meaning here; colour only says *which* ghost.
         for g in self.ghosts:
             if g["fright"] > 0:
                 ending = g["fright"] < 40 and (g["fright"] // 4) % 2 == 0
@@ -5206,13 +5280,30 @@ class ChaseEngine:
             else:
                 col = self.GHOST_COLS[g["kind"]]
             gx, gy = self._px(g["cx"], g["cy"], g["dir"], g["t"])
-            for dx, dy in ((0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)):
-                put_px(buf, gx + dx, gy + dy, col)
+            for dx in (-1, 0, 1):
+                put_px(buf, gx + dx, gy - 1, col)      # dome
+                put_px(buf, gx + dx, gy, col)          # body
+            put_px(buf, gx - 1, gy + 1, col)           # left foot
+            put_px(buf, gx + 1, gy + 1, col)           # right foot
+            if g["fright"] <= 0:
+                # Eyes look the way it's travelling, so you can read a
+                # ghost's intent a beat before it turns.
+                ex = g["dir"][0]
+                put_px(buf, gx - 1 + (1 if ex > 0 else 0), gy, self.EYE)
+                put_px(buf, gx + 1 - (1 if ex < 0 else 0), gy, self.EYE)
 
+        # Player: a solid round body with an animated wedge bite on the
+        # side being faced -- a filled silhouette against notched ones.
         col = self.DEAD if self.death_flash and self.death_flash % 4 < 2 else self.YOU
         px, py = self._px(self.pcx, self.pcy, self.pdir, self.pt)
-        for dx, dy in ((0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)):
-            put_px(buf, px + dx, py + dy, col)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                put_px(buf, px + dx, py + dy, col)
+        d = self.pdir if self.pdir != (0, 0) else (1, 0)
+        if (self.anim // 4) % 2 == 0:
+            perp = (d[1], d[0])
+            put_px(buf, px + d[0], py + d[1], self.BG)
+            put_px(buf, px + d[0] + perp[0], py + d[1] + perp[1], self.BG)
 
         for i in range(max(0, self.lives)):
             put_px(buf, 1 + i * 3, 0, self.YOU)
