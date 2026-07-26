@@ -1,0 +1,764 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0a0a0a">
+<title>Henderburgh Arcade</title>
+<style>
+  :root{
+    --tc:#e6342c;
+    --bg:#0e0d0b;
+    --cab:#181511;
+    --cab2:#211d17;
+    --ink:#f3ecd9;
+    --ink-dim:#9a917e;
+    --safe-t: env(safe-area-inset-top, 0px);
+    --safe-b: env(safe-area-inset-bottom, 0px);
+    --safe-l: env(safe-area-inset-left, 0px);
+    --safe-r: env(safe-area-inset-right, 0px);
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{
+    height:100%; margin:0; overflow:hidden; overscroll-behavior:none;
+    background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    -webkit-user-select:none; user-select:none;
+    touch-action:none;
+  }
+  /* Flat cabinet-black, no colour bloom -- this is a real machine, not a
+     sci-fi console. A very faint centre vignette is the only "atmosphere". */
+  body{ background: radial-gradient(ellipse 90% 60% at 50% 40%, #16140f, var(--bg) 75%); }
+
+  /* ================= layout shell =================
+     No screen on the phone: the panel is the screen. Portrait stacks the
+     marquee then controls; landscape ("hold it sideways") moves to a real
+     cabinet-control-panel layout -- dpad/joystick left, buttons right. */
+  #app{
+    position:fixed; inset:0; display:grid; row-gap:12px; column-gap:8px;
+    padding:calc(var(--safe-t) + 8px) calc(var(--safe-r) + 10px) calc(var(--safe-b) + 8px) calc(var(--safe-l) + 10px);
+    grid-template-columns:1fr;
+    grid-template-rows:auto auto 1fr auto auto;
+    grid-template-areas:"top" "marquee" "action" "dpad" "note";
+  }
+  #dpadzone{grid-area:dpad; align-self:end; justify-self:center;}
+  #actionzone{grid-area:action; align-self:end; justify-self:center; margin-bottom:4px;}
+
+  @media (orientation:landscape) and (min-aspect-ratio: 3/2){
+    #app{
+      grid-template-columns:210px 1fr 210px;
+      grid-template-rows:auto 1fr auto;
+      grid-template-areas:
+        "top      top      top"
+        "dpad     marquee  action"
+        "note     note     note";
+      align-items:center;
+    }
+    #dpadzone{grid-area:dpad; margin-top:0; justify-self:center;}
+    #actionzone{grid-area:action; margin-top:0; justify-self:center;}
+    #marquee{align-self:center;}
+    #note{max-width:340px; margin:0 auto;}
+    .cab-bg{opacity:1;}
+  }
+
+  /* faint cabinet-panel backdrop, only really reads in landscape */
+  .cab-bg{
+    position:fixed; inset:8% 3%; border-radius:20px; z-index:-1; opacity:0;
+    background:linear-gradient(180deg,#1a1712,#0d0c0a);
+    border:1px solid #ffffff08;
+    box-shadow:inset 0 1px 0 #ffffff10, inset 0 -20px 40px -20px #000, 0 30px 60px -30px #000c;
+    transition:opacity .3s;
+  }
+
+  /* ---------- top bar ---------- */
+  #topbar{grid-area:top; display:flex; align-items:center; justify-content:space-between; padding:2px 4px 2px;}
+  .brand{display:flex; align-items:center; gap:8px;}
+  .brand .dot{width:7px; height:7px; border-radius:50%; background:#3a3630;}
+  .brand .dot.live{background:#4fce6c;}
+  .brand h1{font-size:12px; letter-spacing:.2em; margin:0; font-weight:700; color:var(--ink-dim); text-transform:uppercase;}
+  .iconbtn{
+    width:36px; height:36px; border-radius:50%; border:2px solid #35302a; background:var(--cab2);
+    color:var(--ink-dim); font-size:13px; display:flex; align-items:center; justify-content:center;
+    box-shadow:0 3px 0 #0000006a; transition:transform .08s;
+  }
+  #topbtns{display:flex; gap:8px;}
+  #pwr{background:linear-gradient(160deg,#c93a30,#7e211a); border-color:#4a1310; color:#ffe6d9;
+       box-shadow:0 3px 0 #4a1310, 0 5px 10px -4px #000a;}
+  #pwr.on{background:linear-gradient(160deg,#ff5a4a,#c0281f); box-shadow:0 3px 0 #6e1c15, 0 0 0 3px #ff5a4a33;}
+  #pwr.pressed{transform:translateY(2px);}
+
+  /* ---------- marquee: this replaces a mirrored screen. The panel IS the
+     screen; the phone only needs to say what's playing and the score, like
+     a cabinet's own marquee glass + scoreboard, not a second display. ---- */
+  #marquee{grid-area:marquee; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; min-height:0;}
+  #sign{
+    position:relative; padding:14px 22px; border-radius:10px; text-align:center;
+    background:linear-gradient(180deg,#221d16,#141210);
+    border:3px solid #3a332a; box-shadow:inset 0 2px 0 #ffffff0d, inset 0 -6px 14px #00000080, 0 6px 0 #08070650;
+  }
+  #sign::before, #sign::after{
+    content:''; position:absolute; top:6px; bottom:6px; width:4px; border-radius:2px;
+    background:repeating-linear-gradient(#4a423580 0 6px, transparent 6px 12px);
+  }
+  #sign::before{left:8px;} #sign::after{right:8px;}
+  #gtitle{
+    font-family:'Arial Black', Impact, sans-serif; font-weight:900; letter-spacing:.05em;
+    font-size:26px; text-transform:uppercase; color:var(--tc);
+    text-shadow:0 2px 0 #00000090, 0 -1px 0 #ffffff30;
+    padding:0 14px;
+  }
+  #subline{display:flex; align-items:center; justify-content:center; gap:10px; margin-top:2px;}
+  #modepill{
+    font-family:'Arial Black', Impact, sans-serif; font-size:10.5px; letter-spacing:.14em;
+    color:var(--ink-dim); text-transform:uppercase;
+  }
+  #modepill.manual{color:var(--tc);}
+  #home-btn{
+    font-size:10px; font-weight:800; letter-spacing:.1em; color:#1a1712; padding:6px 12px; border-radius:8px;
+    background:linear-gradient(180deg,#e8c85a,#b9922c); border:2px solid #7a5f1c; display:none; text-transform:uppercase;
+    box-shadow:0 3px 0 #6b5217;
+  }
+  #home-btn.show{display:inline-flex;}
+
+  /* LED scoreboard -- red 7-seg look, flat (no neon blur) */
+  #scoreboard{
+    display:flex; align-items:center; gap:8px; padding:6px 14px; border-radius:6px;
+    background:#0b0a09; border:2px solid #2a2620; box-shadow:inset 0 2px 6px #000a;
+  }
+  #scoreboard .lbl{font-size:9px; letter-spacing:.2em; color:#6b6255; font-weight:700;}
+  #scoreval{
+    font-family:'Courier New', monospace; font-weight:700; font-size:20px; letter-spacing:.06em;
+    color:#ff3b30; text-shadow:0 0 1px #ff3b3080;
+  }
+
+  #note{grid-area:note; text-align:center; color:var(--ink-dim); font-size:11px; padding:0 16px 2px; line-height:1.5;}
+
+  /* ================= real cross joystick D-pad =================
+     Matte black plastic, no colour glow -- a proper cabinet joystick
+     housing, not a glowing sci-fi pad. */
+  .dpad-shell{
+    position:relative; width:168px; height:168px;
+    background:linear-gradient(145deg,#2a2620 0%,#18160f 45%,#0a0906 100%);
+    clip-path:polygon(36% 0,64% 0,64% 36%,100% 36%,100% 64%,64% 64%,64% 100%,36% 100%,36% 64%,0 64%,0 36%,36% 36%);
+    box-shadow:inset 0 2px 3px #ffffff14, inset 0 -10px 16px #00000090, 0 8px 0 #000, 0 10px 18px -8px #000c;
+  }
+  /* Segments are now pure visual feedback (pointer-events:none) -- the
+     actual hit-testing happens on .dpad-hit below, one continuous surface
+     with no gaps, so there is no dead zone between arms to miss. */
+  .dseg{
+    position:absolute; display:flex; align-items:center; justify-content:center;
+    color:#8a8070; font-size:17px; transition:color .06s, background .06s;
+    pointer-events:none;
+  }
+  .dseg.up{left:36%; top:0; width:28%; height:36%;}
+  .dseg.down{left:36%; top:64%; width:28%; height:36%;}
+  .dseg.left{left:0; top:36%; width:36%; height:28%;}
+  .dseg.right{left:64%; top:36%; width:36%; height:28%;}
+  .dseg.pressed{color:#f3ecd9; background:#00000030;}
+  .dboss{
+    position:absolute; left:36%; top:36%; width:28%; height:28%; border-radius:50%;
+    background:radial-gradient(circle at 35% 30%, #33302a, #0d0c0a 75%);
+    box-shadow:inset 0 1px 2px #ffffff1a, inset 0 -2px 4px #000a; pointer-events:none;
+  }
+  /* One continuous hit surface covering the whole housing, deliberately
+     bigger than the visible cross (touch targets are allowed to extend
+     past the visible control -- the corners the clip-path cuts away
+     visually still register a direction, they just never render). This
+     is what a real virtual joystick does: any touch anywhere on the pad
+     resolves to a direction by angle, so nothing can ever "miss". */
+  .dpad-hit{
+    position:absolute; inset:-14px; touch-action:none; z-index:2;
+  }
+
+  /* Touchpad for mouse-driven carts -- same matte-cabinet material as the
+     joystick housing, sized to the TIC-80 canvas's own 240:136 aspect so a
+     touch position maps onto the panel without visible distortion. A thin
+     crosshair-style corner marks give it an "instrument surface" feel
+     without adding any neon glow. */
+  .touchpad{
+    position:relative; width:208px; height:118px; border-radius:8px;
+    background:linear-gradient(145deg,#211d17 0%,#15130e 50%,#0a0906 100%);
+    border:2px solid #3a332a; touch-action:none;
+    box-shadow:inset 0 2px 3px #ffffff10, inset 0 -8px 14px #00000090, 0 6px 0 #000, 0 8px 16px -6px #000c;
+    transition:border-color .1s;
+  }
+  .touchpad::before, .touchpad::after{
+    content:''; position:absolute; width:10px; height:10px; border:1px solid #4a4235; opacity:.6;
+  }
+  .touchpad::before{left:4px; top:4px; border-right:none; border-bottom:none;}
+  .touchpad::after{right:4px; bottom:4px; border-left:none; border-top:none;}
+  .touchpad.active{border-color:var(--tc);}
+
+  /* axis (2-button) rockers, for games that only move one way */
+  .rocker{display:flex; gap:10px;}
+  .rocker.vertical{flex-direction:column;}
+  .rbtn{
+    -webkit-user-select:none; user-select:none;
+    width:96px; height:96px; border-radius:20px; font-size:26px; color:#c9c0ac;
+    background:linear-gradient(150deg,#2a2620 0%,#18160f 50%,#0a0906 100%);
+    border:1px solid #ffffff10; display:flex; align-items:center; justify-content:center;
+    box-shadow:inset 0 2px 3px #ffffff14, inset 0 -8px 14px #00000090, 0 6px 0 #000, 0 8px 16px -8px #000c;
+    transition:transform .08s;
+  }
+  .rocker.vertical .rbtn{width:130px; height:70px;}
+  .rbtn.pressed{transform:translateY(4px); color:#fff;
+                box-shadow:inset 0 4px 10px #000a, 0 2px 0 #000;}
+
+  /* ============= classic candy-colour cabinet buttons ================
+     Real arcade buttons: a black bezel ring set into the panel, a glossy
+     coloured dome with one hard highlight (not a diffuse neon bloom), and a
+     flat drop shadow like plastic actually casts, not coloured light. */
+  .action-cluster{position:relative; width:186px; height:186px;}
+  .abtn{
+    position:absolute; -webkit-user-select:none; user-select:none; touch-action:none;
+    border-radius:50%; display:flex; align-items:center; justify-content:center; text-align:center;
+    font-family:'Arial Black', Impact, sans-serif; font-weight:900; letter-spacing:.02em;
+    color:#1a1712; line-height:1.1;
+    background:
+      radial-gradient(circle at 34% 26%, #ffffffb0, transparent 32%),
+      radial-gradient(circle at 50% 55%, var(--tc), color-mix(in srgb, var(--tc) 55%, #000) 100%);
+    box-shadow:0 0 0 6px #0b0a09, 0 0 0 8px #2a2620, 0 6px 0 color-mix(in srgb, var(--tc) 30%, #000), 0 9px 10px -6px #000a;
+    transition:transform .08s, box-shadow .08s;
+  }
+  .abtn.pressed{transform:translateY(5px);
+                box-shadow:0 0 0 6px #0b0a09, 0 0 0 8px #2a2620, 0 1px 0 color-mix(in srgb, var(--tc) 30%, #000), 0 2px 4px -2px #000a;}
+  /* True ABXY-diamond ergonomics (the actual reason Apple's/Xbox's face-
+     button layout works): the most-used action sits closest to the thumb's
+     natural rest position (bottom), the other two fan out to the side and
+     top rather than stacking as a pair of shoulder buttons above a center
+     button. With only 1-3 actions per game we never need the 4th (left/X)
+     slot, so the cluster reads as a deliberate rotated triangle, not a
+     truncated diamond missing a piece. */
+  .abtn.only-one{width:112px; height:112px; font-size:13px; left:37px; top:37px;}
+
+  .abtn.primary{width:88px; height:88px; font-size:12px; left:49px; top:98px;}     /* A: bottom */
+  .abtn.secondary{width:62px; height:62px; font-size:9px;}
+  .abtn.sec-y{left:62px; top:0;}        /* Y: top-center */
+  .abtn.sec-b{left:124px; top:62px;}    /* B: right-middle */
+
+  .abtn.two-a{width:88px; height:88px; font-size:12px; left:49px; top:98px;}       /* A: bottom */
+  .abtn.two-b{width:74px; height:74px; font-size:10.5px; left:112px; top:38px;}    /* B: right, diagonal reach from A */
+  .abtn .glyph{font-size:1.5em; display:block; margin-bottom:1px;}
+
+  .giant-wrap{width:100%; height:100%; display:flex; align-items:center; justify-content:center;}
+  .giant-btn{
+    width:min(78vw, 44vh, 320px); height:min(30vh, 130px); border-radius:20px;
+    font-family:'Arial Black', Impact, sans-serif; font-size:17px; font-weight:900; letter-spacing:.05em;
+    color:#1a1712;
+    background:
+      radial-gradient(circle at 30% 20%, #ffffffa8, transparent 34%),
+      radial-gradient(circle at 50% 60%, var(--tc), color-mix(in srgb, var(--tc) 55%, #000));
+    box-shadow:0 0 0 6px #0b0a09, 0 0 0 8px #2a2620, 0 8px 0 color-mix(in srgb, var(--tc) 30%, #000), 0 14px 16px -8px #000a;
+    display:flex; align-items:center; justify-content:center; transition:transform .08s, box-shadow .08s;
+  }
+  .giant-btn.pressed{transform:translateY(6px);
+                     box-shadow:0 0 0 6px #0b0a09, 0 0 0 8px #2a2620, 0 2px 0 color-mix(in srgb, var(--tc) 30%, #000), 0 3px 6px -3px #000a;}
+
+  /* ---- fx drawer ---- */
+  #fxtab{position:fixed; left:0; right:0; bottom:0; z-index:20; transform:translateY(100%);
+         transition:transform .28s cubic-bezier(.2,.8,.2,1); pointer-events:none;}
+  #fxtab.open{transform:translateY(0); pointer-events:auto;}
+  #fxsheet{
+    margin:0 calc(var(--safe-r) + 10px) calc(var(--safe-b) + 10px) calc(var(--safe-l) + 10px);
+    background:var(--cab); border:2px solid #2a2620; border-radius:16px; padding:16px;
+    box-shadow:0 -10px 40px -10px #000c; max-width:420px; margin-left:auto; margin-right:auto;
+  }
+  #fxsheet .handle{width:36px; height:4px; border-radius:3px; background:#3a3630; margin:0 auto 12px;}
+  #fxsheet select{
+    width:100%; background:var(--cab2); color:var(--ink); border:1px solid #35302a; border-radius:8px;
+    padding:10px; font-size:13px;
+  }
+  #fxsheet input[type=range]{width:100%;}
+  #scrim{position:fixed; inset:0; background:#000a; opacity:0; pointer-events:none; transition:opacity .28s; z-index:15;}
+  #scrim.open{opacity:1; pointer-events:auto;}
+  .fxrowline{display:flex; align-items:center; justify-content:space-between; margin:10px 0 4px;}
+  .fxrowline span{font-size:10.5px; letter-spacing:.12em; color:var(--ink-dim); text-transform:uppercase;}
+</style>
+</head>
+<body>
+<div class="cab-bg"></div>
+<div id="app">
+
+  <div id="topbar">
+    <div class="brand"><span class="dot" id="livedot"></span><h1>Henderburgh Arcade</h1></div>
+    <div id="topbtns">
+      <button class="iconbtn" id="fxbtn">✦</button>
+      <button class="iconbtn" id="pwr">⏻</button>
+    </div>
+  </div>
+
+  <div id="marquee">
+    <div id="sign">
+      <div id="gtitle">SYSTEM</div>
+      <div id="subline">
+        <div id="modepill">OFF</div>
+        <button id="home-btn">⌂ MENU</button>
+      </div>
+    </div>
+    <div id="scoreboard"><span class="lbl">SCORE</span><span id="scoreval">0000</span></div>
+  </div>
+
+  <div id="dpadzone"></div>
+  <div id="actionzone"></div>
+  <div id="note"></div>
+</div>
+
+<div id="scrim"></div>
+<div id="fxtab">
+  <div id="fxsheet">
+    <div class="handle"></div>
+    <div class="fxrowline"><span>Ambient effect (behind the game)</span></div>
+    <select id="fx-select"></select>
+    <div class="fxrowline"><span>Speed</span><span id="fx-speed-val">50</span></div>
+    <input type="range" id="fx-speed" min="1" max="100" value="50">
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// Control scheme + button colour per game -- classic cabinet candy-button
+// colours (red/yellow/blue/green/orange), not neon. The phone never lists
+// or picks games itself: that happens on the panel, via the dpad below,
+// exactly like a real cabinet control panel. This table only describes HOW
+// to drive whatever is currently on screen.
+const BOOT_SCHEME = {
+  color:'#e8c23a', giant:{cmd:'rotate', label:'TAP TO SKIP'},
+};
+const MENU_SCHEME = {
+  color:'#e6342c', dpad:true,
+  actions:[{cmd:'rotate', label:'SELECT', glyph:'◉'}, {cmd:'drop', label:'AUTO', glyph:'▶'}],
+};
+const GAMES = {
+  snake:    {name:'SNAKE',     color:'#3aa855', dpad:true},
+  tetris:   {name:'TETRIS',    color:'#2f6fe0', dpad:true,
+    actions:[{cmd:'rotate',label:'ROTATE',glyph:'⟳'},{cmd:'drop',label:'DROP',glyph:'⬇'},{cmd:'hold',label:'HOLD',glyph:'⏸'}]},
+  pong:     {name:'PONG',      color:'#e8e4d8', axis:'vertical'},
+  breakout: {name:'BREAKOUT',  color:'#e6342c', axis:'horizontal',
+    actions:[{cmd:'rotate',label:'LAUNCH',glyph:'●'}]},
+  tron:     {name:'TRON',      color:'#2fb8c4', dpad:true,
+    actions:[{cmd:'drop',label:'BOOST',glyph:'⚡'}]},
+  flappy:   {name:'FLAPPY',    color:'#e8c23a', giant:{cmd:'rotate', label:'TAP TO FLAP'}},
+  invaders: {name:'INVADERS',  color:'#c23aa0', axis:'horizontal',
+    actions:[{cmd:'rotate',label:'FIRE',glyph:'●'}]},
+  dodge:    {name:'DODGE',     color:'#e89a2a', axis:'horizontal'},
+  '2048':   {name:'2048',      color:'#8a4ae0', dpad:true},
+  life:     {name:'LIFE',      color:'#4ac48a', ambientOnly:true, actions:[{cmd:'drop',label:'RESEED',glyph:'⟲'}]},
+  // Native rebuilds of the fantasy-console carts. Each gets the control
+  // surface its own mechanic actually needs rather than a generic pad:
+  // a platformer wants big left/right + one jump, a maze wants a true
+  // 4-way, a rail runner wants steering + boost, and the sandbox is
+  // genuinely pointer-driven so it keeps the touchpad.
+  brawler:  {name:'BRAWLER',   color:'#3aa855', axis:'horizontal',
+    actions:[{cmd:'rotate',label:'JUMP',glyph:'▲'}]},
+  chase:    {name:'CHASE',     color:'#e8c23a', dpad:true},
+  tunnel:   {name:'TUNNEL',    color:'#5a5ae0', axis:'horizontal',
+    actions:[{cmd:'rotate',label:'BOOST',glyph:'⚡'}]},
+  powder:   {name:'POWDER',    color:'#e89a2a', pointer:true,
+    actions:[{cmd:'rotate',label:'ERASE',glyph:'⌫'},
+             {cmd:'hold',label:'MATERIAL',glyph:'◆'},
+             {cmd:'drop',label:'CLEAR',glyph:'⟲'}]},
+};
+
+let curMode = null, curBase = null, isDemo = false, panelOn = false;
+let builtFor = null;   // last key we rendered controls for
+
+// Any dropped-in fantasy-console cart gets a generic layout matched to how
+// the server detected it actually takes input (see detect_cart_control_
+// scheme in engines.py): a d-pad + 3 face buttons for gamepad-style carts,
+// or a touchpad + erase/size controls for mouse-driven ones like a drawing
+// toy. We can't know a cart's exact needs ahead of time, but this covers
+// the two real input paradigms TIC-80 carts are built around.
+function cartScheme(base, cartInput){
+  const raw = base.slice(4).replace(/\.tic$/i, '');
+  const name = raw.toUpperCase().slice(0, 10);
+  if (cartInput === 'pointer'){
+    return {name, color:'#ffbf00', pointer:true};
+  }
+  return {
+    name, color: '#ffbf00', dpad: true,
+    actions: [{cmd:'rotate',label:'A',glyph:'●'}, {cmd:'drop',label:'B',glyph:'●'}, {cmd:'hold',label:'X',glyph:'●'}],
+  };
+}
+function schemeFor(base, cartInput){
+  if (base === 'boot') return BOOT_SCHEME;
+  if (base === 'menu') return MENU_SCHEME;
+  if (base.startsWith('tic:')) return cartScheme(base, cartInput);
+  return GAMES[base] || null;
+}
+function applyTheme(scheme){
+  document.documentElement.style.setProperty('--tc', (scheme && scheme.color) || '#e6342c');
+}
+
+let missed = 0;
+async function poll(){
+  try{
+    const j = await (await fetch('/api/state', {cache:'no-store'})).json();
+    missed = 0;
+    $('livedot').classList.add('live');
+    $('scoreval').textContent = String(j.score).padStart(4, '0');
+    panelOn = j.on;
+    $('pwr').classList.toggle('on', panelOn);
+
+    curMode = j.mode || 'off';
+    curBase = curMode.split('-')[0];
+    isDemo = curMode.endsWith('-demo');
+    const scheme = schemeFor(curBase, j.cart_input);
+    const isChrome = curBase === 'menu' || curBase === 'boot';   // system UI, not a game
+
+    $('gtitle').textContent = curBase === 'menu' ? 'SYSTEM MENU'
+      : curBase === 'boot' ? 'STARTING UP'
+      : (scheme ? scheme.name : (panelOn ? curMode.toUpperCase() : 'ARCADE'));
+    $('modepill').textContent = !panelOn ? 'OFF'
+      : curBase === 'menu' ? 'BROWSING'
+      : curBase === 'boot' ? 'BOOTING'
+      : (isDemo ? 'AUTO' : (scheme ? 'MANUAL' : '—'));
+    $('modepill').classList.toggle('manual', !isDemo && !!scheme && !isChrome);
+    $('home-btn').classList.toggle('show', panelOn && !isChrome && !!scheme);
+
+    applyTheme(scheme);
+
+    const key = curBase + '|' + isDemo + '|' + panelOn;
+    if (key !== builtFor){
+      builtFor = key;
+      buildControls(curBase, scheme, isDemo);
+    }
+  }catch(e){
+    missed++;
+    if (missed > 3) $('livedot').classList.remove('live');
+  }
+}
+setInterval(poll, 200);
+poll();
+
+// ------------------------------------------------------------- input plumbing
+function setMode(m){ return fetch('/api/mode/' + encodeURIComponent(m), {method:'POST'}); }
+function rawInput(c){ return fetch('/api/input/' + c, {method:'POST'}); }
+function rawPress(c){ return fetch('/api/press/' + c, {method:'POST'}); }
+function rawRelease(c){ return fetch('/api/release/' + c, {method:'POST'}); }
+
+// Pressing any control while the panel is auto-playing (mode "<game>-demo")
+// takes it over into manual play first -- the server silently drops input()
+// calls during a "-demo" mode (see Arcade.send_input), so without this a
+// press here would just do nothing and look broken.
+async function takeOverDemo(){
+  if (isDemo && curBase !== 'menu'){
+    isDemo = false;
+    await setMode(curBase);
+  }
+}
+async function sendInput(cmd){ await takeOverDemo(); return rawInput(cmd); }
+async function sendPress(cmd){ await takeOverDemo(); return rawPress(cmd); }
+function sendRelease(cmd){ return rawRelease(cmd); }
+function buzz(pattern){ if (navigator.vibrate) navigator.vibrate(pattern); }
+
+// Real digital-button state, the way an actual controller works -- the
+// server sees exactly "held" or "not held", not a synthetic tap-and-repeat
+// timer standing in for a hold. This is what a fantasy-console cart needs
+// (a platformer jump has to see a genuine hold), and it's a strict upgrade
+// for the native games too: a repeat interval is still fired alongside it
+// so their existing tap-driven behaviour is untouched.
+function bindHold(el, cmd, repeatMs, heavy){
+  let timer = null;
+  const down = () => { buzz(heavy ? 14 : 7); sendPress(cmd); el.classList.add('pressed'); };
+  const up = () => {
+    el.classList.remove('pressed');
+    sendRelease(cmd);
+    if (timer){ clearInterval(timer); timer = null; }
+  };
+  el.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    el.setPointerCapture(e.pointerId);   // a sliding thumb still releases on THIS element, never a stray leave
+    down();
+    if (repeatMs) timer = setInterval(() => sendInput(cmd), repeatMs);
+  });
+  ['pointerup','pointercancel'].forEach(ev => el.addEventListener(ev, up));
+}
+
+// A real virtual joystick, not four separate buttons with gaps between
+// them: one continuous surface, direction resolved by angle from center.
+// A thumb can land anywhere on the pad (even past its visible edge -- see
+// .dpad-hit's negative inset) and still always resolves to a direction;
+// the only place that registers as "nothing" is a small deliberate
+// deadzone at dead center, so a resting thumb doesn't fire a phantom press.
+function buildJoypad(zone){
+  const shell = document.createElement('div');
+  shell.className = 'dpad-shell';
+  const segs = {};
+  shell.innerHTML = '<div class="dboss"></div>';
+  for (const [cls, glyph] of [['up','▲'],['down','▼'],['left','◀'],['right','▶']]){
+    const d = document.createElement('div');
+    d.className = 'dseg ' + cls;
+    d.textContent = glyph;
+    shell.appendChild(d);
+    segs[cls] = d;
+  }
+  const hit = document.createElement('div');
+  hit.className = 'dpad-hit';
+  shell.appendChild(hit);
+  zone.appendChild(shell);
+
+  const DEADZONE = 0.22;   // fraction of half-width -- resting-thumb safe zone
+  let dir = null, timer = null, pid = null;
+
+  function resolve(clientX, clientY){
+    const r = shell.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const dx = (clientX - cx) / (r.width / 2), dy = (clientY - cy) / (r.height / 2);
+    const mag = Math.hypot(dx, dy);
+    if (mag < DEADZONE) return null;
+    const angle = Math.atan2(dy, dx) * 180 / Math.PI;   // -180..180, 0 = right, 90 = down
+    if (angle > -45 && angle <= 45) return 'right';
+    if (angle > 45 && angle <= 135) return 'down';
+    if (angle > 135 || angle <= -135) return 'left';
+    return 'up';
+  }
+
+  function setDir(next){
+    if (next === dir) return;
+    if (dir){ segs[dir].classList.remove('pressed'); sendRelease(dir); }
+    if (timer){ clearInterval(timer); timer = null; }
+    dir = next;
+    if (dir){
+      segs[dir].classList.add('pressed');
+      buzz(7);
+      sendPress(dir);
+      timer = setInterval(() => sendInput(dir), 130);
+    }
+  }
+
+  hit.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    pid = e.pointerId;
+    hit.setPointerCapture(pid);          // finger can slide anywhere and never "leave" the control
+    setDir(resolve(e.clientX, e.clientY));
+  });
+  hit.addEventListener('pointermove', (e) => {
+    if (e.pointerId !== pid) return;
+    setDir(resolve(e.clientX, e.clientY));
+  });
+  const release = (e) => {
+    if (e.pointerId !== pid) return;
+    pid = null;
+    setDir(null);
+  };
+  hit.addEventListener('pointerup', release);
+  hit.addEventListener('pointercancel', release);
+}
+
+// Mouse-driven carts (a drawing/painting toy, point-and-click) don't want
+// a d-pad at all -- they want an absolute pointing surface. The panel is
+// still the only screen; this is exactly the same relationship as using a
+// graphics tablet while looking at an external monitor, not a mirrored
+// touchscreen. Sends server-side absolute position (fx, fy as fractions
+// of the touchpad) 1:1 onto the cart's real drawable canvas.
+function buildTouchpad(zone){
+  const pad = document.createElement('div');
+  pad.className = 'touchpad';
+  zone.appendChild(pad);
+
+  let pid = null;
+  function send(clientX, clientY, down){
+    const r = pad.getBoundingClientRect();
+    const fx = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+    const fy = Math.max(0, Math.min(1, (clientY - r.top) / r.height));
+    fetch('/api/pointer', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({fx, fy, down}),
+    });
+  }
+  pad.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    pid = e.pointerId;
+    pad.setPointerCapture(pid);
+    pad.classList.add('active');
+    buzz(7);
+    send(e.clientX, e.clientY, true);
+  });
+  pad.addEventListener('pointermove', (e) => {
+    if (e.pointerId !== pid) return;
+    send(e.clientX, e.clientY, true);
+  });
+  const up = (e) => {
+    if (e.pointerId !== pid) return;
+    pid = null;
+    pad.classList.remove('active');
+    send(e.clientX, e.clientY, false);
+  };
+  pad.addEventListener('pointerup', up);
+  pad.addEventListener('pointercancel', up);
+}
+
+function buildDpad(scheme){
+  const zone = $('dpadzone');
+  zone.innerHTML = '';
+  if (scheme.giant) return;                       // one-button games: nothing on this side
+  if (scheme.pointer){
+    buildTouchpad(zone);
+  } else if (scheme.dpad){
+    buildJoypad(zone);
+  } else if (scheme.axis === 'vertical'){
+    const r = document.createElement('div');
+    r.className = 'rocker vertical';
+    r.appendChild(mkRocker('▲', 'up')); r.appendChild(mkRocker('▼', 'down'));
+    zone.appendChild(r);
+  } else if (scheme.axis === 'horizontal'){
+    const r = document.createElement('div');
+    r.className = 'rocker';
+    r.appendChild(mkRocker('◀', 'left')); r.appendChild(mkRocker('▶', 'right'));
+    zone.appendChild(r);
+  }
+  function mkRocker(glyph, cmd){
+    const b = document.createElement('div');
+    b.className = 'rbtn'; b.textContent = glyph;
+    bindHold(b, cmd, 110);
+    return b;
+  }
+}
+
+function mkAction(a, cls){
+  const b = document.createElement('div');
+  b.className = 'abtn ' + cls;
+  b.innerHTML = `<div><span class="glyph">${a.glyph || ''}</span>${a.label}</div>`;
+  bindHold(b, a.cmd, null, true);
+  return b;
+}
+
+// A toggle (stays lit until pressed again) for ERASE -- this is a mode
+// switch, not a hold, since a single phone touch is already busy driving
+// the touchpad itself and can't also hold a second physical button down.
+function mkToggle(label, glyph, cls, onToggle){
+  const b = document.createElement('div');
+  b.className = 'abtn ' + cls;
+  b.innerHTML = `<div><span class="glyph">${glyph}</span>${label}</div>`;
+  let on = false;
+  b.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    on = !on;
+    b.classList.toggle('pressed', on);
+    buzz(on ? 14 : 7);
+    onToggle(on);
+  });
+  return b;
+}
+
+// A one-shot tap (pen size +/-), not a hold-and-repeat.
+function mkTap(label, glyph, cls, onTap){
+  const b = document.createElement('div');
+  b.className = 'abtn ' + cls;
+  b.innerHTML = `<div><span class="glyph">${glyph}</span>${label}</div>`;
+  b.addEventListener('pointerdown', (e) => { e.preventDefault(); b.classList.add('pressed'); buzz(7); onTap(); });
+  ['pointerup','pointerleave','pointercancel'].forEach(ev => b.addEventListener(ev, () => b.classList.remove('pressed')));
+  return b;
+}
+
+function buildPointerActions(zone){
+  const cluster = document.createElement('div');
+  cluster.className = 'action-cluster';
+  cluster.appendChild(mkToggle('ERASE', '⌫', 'primary',
+    (on) => fetch('/api/mouseright/' + (on ? 'press' : 'release'), {method:'POST'})));
+  cluster.appendChild(mkTap('SIZE+', '+', 'secondary sec-b', () => fetch('/api/wheel/up', {method:'POST'})));
+  cluster.appendChild(mkTap('SIZE-', '-', 'secondary sec-y', () => fetch('/api/wheel/down', {method:'POST'})));
+  zone.appendChild(cluster);
+}
+
+function buildActions(scheme){
+  const zone = $('actionzone');
+  zone.innerHTML = '';
+  // A pointer scheme with no actions of its own is an imported mouse cart,
+  // where all we can offer is the generic mouse surrogate (right-click +
+  // wheel). A native pointer game names its own buttons, so use those.
+  if (scheme.pointer && !scheme.actions){
+    buildPointerActions(zone);
+    return;
+  }
+  if (scheme.giant){
+    const wrap = document.createElement('div');
+    wrap.className = 'giant-wrap';
+    const b = document.createElement('div');
+    b.className = 'giant-btn';
+    b.textContent = scheme.giant.label;
+    bindHold(b, scheme.giant.cmd, null, true);
+    wrap.appendChild(b);
+    zone.appendChild(wrap);
+    return;
+  }
+  const actions = scheme.actions || [];
+  if (!actions.length) return;
+  const cluster = document.createElement('div');
+  cluster.className = 'action-cluster';
+  if (actions.length === 1){
+    cluster.appendChild(mkAction(actions[0], 'only-one'));
+  } else if (actions.length === 2){
+    cluster.appendChild(mkAction(actions[0], 'two-a'));   // A: bottom, most-used
+    cluster.appendChild(mkAction(actions[1], 'two-b'));   // B: diagonal reach
+  } else {
+    cluster.appendChild(mkAction(actions[0], 'primary'));       // A: bottom
+    cluster.appendChild(mkAction(actions[1], 'secondary sec-b'));  // B: right
+    cluster.appendChild(mkAction(actions[2], 'secondary sec-y'));  // Y: top
+  }
+  zone.appendChild(cluster);
+}
+
+function buildControls(base, scheme, demo){
+  $('note').textContent = '';
+  if (!panelOn){ $('dpadzone').innerHTML=''; $('actionzone').innerHTML=''; $('note').textContent = 'Press the power button to start the system.'; return; }
+  if (!scheme){ $('dpadzone').innerHTML=''; $('actionzone').innerHTML=''; return; }
+
+  if (base === 'boot'){
+    $('note').textContent = 'Watch on the panel, or tap to jump straight to the menu.';
+  } else if (base === 'menu'){
+    $('note').textContent = 'Browse on the panel with the dpad. SELECT plays it yourself, AUTO watches the built-in AI.';
+  } else if (scheme.ambientOnly){
+    $('note').textContent = 'This one runs itself — tap RESEED for something new, or go ⌂ MENU for another game.';
+  } else if (demo){
+    $('note').textContent = 'Watching the built-in AI. Any control takes over instantly.';
+  }
+
+  buildDpad(scheme);
+  buildActions(scheme);
+}
+
+// ------------------------------------------------------------- home / power
+$('home-btn').addEventListener('click', () => { buzz(12); setMode('menu'); });
+$('pwr').addEventListener('pointerdown', () => $('pwr').classList.add('pressed'));
+['pointerup','pointerleave'].forEach(ev => $('pwr').addEventListener(ev, () => $('pwr').classList.remove('pressed')));
+$('pwr').addEventListener('click', () => { buzz([10,30,10]); setMode(panelOn ? 'off' : 'on'); });
+
+// ------------------------------------------------------------- FX drawer
+function setFxOpen(v){
+  $('fxtab').classList.toggle('open', v);
+  $('scrim').classList.toggle('open', v);
+}
+$('fxbtn').addEventListener('click', () => setFxOpen(true));
+$('scrim').addEventListener('click', () => setFxOpen(false));
+
+async function loadFx(){
+  try{
+    const j = await (await fetch('/api/backgrounds')).json();
+    const sel = $('fx-select');
+    sel.innerHTML = '';
+    for (const m of (j.modes || [])){
+      const opt = document.createElement('option');
+      opt.value = m.id != null ? m.id : m; opt.textContent = (m.label || m).toString();
+      sel.appendChild(opt);
+    }
+    if (j.background != null) sel.value = j.background;
+    if (j.bg_speed != null){ $('fx-speed').value = j.bg_speed; $('fx-speed-val').textContent = j.bg_speed; }
+  }catch(e){}
+}
+loadFx();
+
+function pushFx(){
+  fetch('/api/background', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({id: $('fx-select').value, speed: +$('fx-speed').value})});
+}
+$('fx-select').addEventListener('change', pushFx);
+$('fx-speed').addEventListener('input', () => { $('fx-speed-val').textContent = $('fx-speed').value; });
+$('fx-speed').addEventListener('change', pushFx);
+</script>
+</body>
+</html>

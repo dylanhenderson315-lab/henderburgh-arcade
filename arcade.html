@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0a0a0b">
+<title>HENDERBURGH ARCADE</title>
+<style>
+  :root{--bg:#0a0a0b;--panel:#141416;--line:#26262b;--ink:#e8e8ea;--dim:#8a8a92;
+        --accent:#3ddc84;--red:#ff6b6b;}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+       padding:18px 16px calc(28px + env(safe-area-inset-bottom));min-height:100vh;}
+  h1{font-size:14px;letter-spacing:.32em;font-weight:600;margin:2px 0 0;text-align:center;}
+  .sub{font-size:10.5px;color:var(--dim);letter-spacing:.16em;margin-top:4px;text-align:center;}
+
+  .shell{display:flex;gap:16px;align-items:flex-start;justify-content:center;
+         max-width:780px;margin:14px auto 0;flex-wrap:wrap;}
+  .main{display:flex;flex-direction:column;align-items:center;gap:14px;flex:1;min-width:min(100%,280px);}
+  .side{width:min(100%,220px);position:sticky;top:14px;}
+
+  .screen{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px;}
+  canvas#c{width:min(72vw,320px);height:min(72vw,320px);image-rendering:pixelated;
+           border-radius:5px;display:block;background:#000;}
+  .status{font-size:11.5px;color:var(--dim);letter-spacing:.1em;display:flex;gap:16px;}
+  .status b{color:var(--accent);font-weight:600;}
+
+  button{font-family:inherit;font-size:12px;letter-spacing:.07em;color:var(--ink);
+         background:var(--panel);border:1px solid var(--line);border-radius:10px;
+         padding:9px 13px;cursor:pointer;transition:.15s;}
+  button:hover{border-color:var(--accent);color:var(--accent);}
+  button.active{background:var(--accent);color:#08210f;border-color:var(--accent);font-weight:700;}
+  .power{font-size:14px;letter-spacing:.14em;font-weight:700;padding:13px 32px;border-radius:14px;}
+  .power.on{background:var(--accent);color:#08210f;border-color:var(--accent);}
+  .power.off{background:transparent;color:var(--red);border-color:#5c2b2b;}
+  .pstate{font-size:10px;letter-spacing:.12em;color:var(--dim);text-transform:uppercase;margin-top:-6px;}
+
+  .modes{display:flex;flex-wrap:wrap;gap:7px;justify-content:center;max-width:420px;}
+  .modes.dim{opacity:.42;}
+  .pad{display:grid;grid-template-columns:repeat(3,56px);grid-template-rows:repeat(3,56px);gap:7px;}
+  .pad button{font-size:19px;padding:0;}
+  .pad .sp{visibility:hidden;}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+        padding:14px;width:100%;max-width:420px;}
+  .side .card{max-width:none;}
+  .card h2{font-size:10.5px;letter-spacing:.18em;color:var(--dim);margin:0 0 11px;
+           text-transform:uppercase;font-weight:600;}
+  .row{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:9px;}
+  .row:last-child{margin-bottom:0;}
+  label{font-size:11px;color:var(--dim);letter-spacing:.05em;min-width:74px;}
+  .side label{min-width:0;display:block;margin-bottom:5px;}
+  select,input[type=range]{font-family:inherit;font-size:11.5px;background:#101012;
+    color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 8px;flex:1;min-width:0;}
+  .side select,.side input[type=range]{width:100%;flex:none;}
+  input[type=range]{padding:0;accent-color:var(--accent);}
+  input[type=file]{font-family:inherit;font-size:11px;color:var(--dim);max-width:100%;}
+  video#src{width:100%;border-radius:9px;background:#000;margin-top:9px;display:none;}
+  video#src.show{display:block;}
+  .hint{font-size:10px;color:var(--dim);letter-spacing:.05em;line-height:1.65;}
+  .shotwrap{position:relative;width:100%;border:1px solid var(--line);border-radius:9px;
+            overflow:hidden;background:#000;min-height:74px;touch-action:none;}
+  .shotwrap img{width:100%;display:block;opacity:.85;}
+  #sel{position:absolute;border:1.5px solid var(--accent);background:rgba(61,220,132,.18);
+       display:none;pointer-events:none;}
+  .shothint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+            font-size:10px;color:var(--dim);letter-spacing:.08em;text-align:center;padding:8px;}
+  .err{font-size:10.5px;color:var(--red);line-height:1.55;max-width:420px;text-align:center;}
+  .hide{display:none!important;}
+  .badge{font-size:9.5px;letter-spacing:.1em;color:var(--accent);}
+  .vlist{display:flex;flex-direction:column;gap:5px;max-height:160px;overflow-y:auto;}
+  .vlist button{width:100%;text-align:left;font-size:11px;padding:8px 10px;}
+  .vlist .empty{font-size:10.5px;color:var(--dim);padding:4px 0;}
+  @media (max-width:640px){
+    .side{position:static;width:100%;order:-1;}
+    .shell{flex-direction:column;}
+  }
+</style>
+</head>
+<body>
+  <h1>HENDERBURGH&nbsp;ARCADE</h1>
+  <div class="sub">apollo m-1 · 64×64</div>
+
+  <div class="shell">
+  <div class="main">
+  <div class="screen"><canvas id="c" width="64" height="64"></canvas></div>
+  <div class="status"><span>MODE&nbsp;<b id="mode">—</b></span><span>SCORE&nbsp;<b id="score">0</b></span>
+    <span>BG&nbsp;<b id="bg-label">NONE</b></span></div>
+
+  <button id="power" class="power off">⏻&nbsp;&nbsp;TURN ON</button>
+  <div class="pstate" id="pstate">panel released</div>
+
+  <div class="modes" id="modes">
+    <button data-mode="snake">▶ Snake</button>
+    <button data-mode="tetris">▶ Tetris</button>
+    <button data-mode="pong">▶ Pong</button>
+    <button data-mode="breakout">▶ Breakout</button>
+    <button data-mode="tron">▶ Tron</button>
+    <button data-mode="flappy">▶ Flappy</button>
+    <button data-mode="invaders">▶ Invaders</button>
+    <button data-mode="dodge">▶ Dodge</button>
+    <button data-mode="2048">▶ 2048</button>
+    <button data-mode="life">▶ Life</button>
+    <button data-mode="snake-demo">🤖 Snake auto</button>
+    <button data-mode="tetris-demo">🤖 Tetris auto</button>
+    <button data-mode="pong-demo">🤖 Pong auto</button>
+    <button data-mode="breakout-demo">🤖 Breakout auto</button>
+    <button data-mode="tron-demo">🤖 Tron auto</button>
+    <button data-mode="flappy-demo">🤖 Flappy auto</button>
+    <button data-mode="invaders-demo">🤖 Invaders auto</button>
+    <button data-mode="dodge-demo">🤖 Dodge auto</button>
+    <button data-mode="2048-demo">🤖 2048 auto</button>
+    <button data-mode="life-demo">🤖 Life auto</button>
+    <button data-mode="mirror">🖥 Mirror</button>
+    <button data-mode="video">🎬 Video</button>
+    <button data-mode="cast">📱 Cast</button>
+  </div>
+
+  <div id="err" class="err hide"></div>
+
+  <!-- Game controls -->
+  <div id="gamepad" class="hide" style="display:flex;flex-direction:column;align-items:center;gap:8px;">
+    <div class="pad">
+      <div class="sp"></div><button data-in="up">▲</button><div class="sp"></div>
+      <button data-in="left">◀</button><button data-in="rotate">⟳</button><button data-in="right">▶</button>
+      <div class="sp"></div><button data-in="down">▼</button><div class="sp"></div>
+    </div>
+    <button data-in="drop">⤓ DROP</button>
+    <div class="hint">Keyboard: arrows / WASD · ↑ rotate · Space drop</div>
+  </div>
+
+  <!-- Mirror settings -->
+  <div id="mirrorcard" class="card hide">
+    <h2>Mirror — screen → panel</h2>
+
+    <!-- Panel display: the square virtual screen. Sending a window here beats
+         dragging it off the edge of the desktop onto a 512px target. -->
+    <div class="row"><label>Panel screen</label><span id="pw-size" class="badge">—</span></div>
+    <div class="row"><label>Pixels</label><select id="pw-preset"></select></div>
+    <div class="hint" style="margin:0 0 9px;">Fewer pixels = bigger text and UI on the
+      panel. Makes no difference to fullscreen video. Below 512 app windows stop fitting.</div>
+    <div class="row"><label>Send app</label><select id="pw-app"></select></div>
+    <div class="row">
+      <button id="pw-send">📺 Put on panel</button>
+      <button id="pw-back">↩︎ Bring back</button>
+    </div>
+    <div id="pw-msg" class="hint" style="margin:6px 0 12px;"></div>
+
+    <div class="row"><label>Display</label><select id="m-display"></select></div>
+
+    <div class="row" style="margin-bottom:6px;">
+      <label>Capture</label><span id="m-region" class="badge">whole display</span>
+    </div>
+    <div class="shotwrap" id="shotwrap">
+      <img id="shot" alt="">
+      <div id="sel"></div>
+      <div class="shothint" id="shothint">tap “Pick area” to load your screen</div>
+    </div>
+    <div class="row" style="margin-top:9px;">
+      <button id="m-shot">🔄 Pick area</button>
+      <button id="m-full">⛶ Whole display</button>
+    </div>
+    <div class="hint" style="margin:6px 0 11px;">Drag a box around the video/emulator
+      window. A whole desktop shrunk to 64×64 is unreadable — pick just the content.</div>
+
+    <div class="row"><label>Framing</label>
+      <select id="m-fit">
+        <option value="fill">Fill (crop to square)</option>
+        <option value="fit">Fit (letterbox)</option>
+      </select></div>
+    <div class="row"><label>Colour</label><input type="range" id="m-sat" min="1" max="2.5" step="0.05"></div>
+    <div class="row"><label>Contrast</label><input type="range" id="m-con" min="0.8" max="2" step="0.05"></div>
+
+    <div class="row"><label>Pointer</label>
+      <select id="m-cursor">
+        <option value="ring">Ring — visible marker</option>
+        <option value="crosshair">Crosshair — easiest to find</option>
+        <option value="off">Off — real cursor only</option>
+      </select></div>
+    <div class="row"><label>Size</label><input type="range" id="m-cursize" min="0.03" max="0.12" step="0.005"></div>
+    <div class="hint" style="margin-top:6px;">The real cursor is smaller than one
+      panel pixel and averages away to nothing, so a marker is drawn in its place.</div>
+  </div>
+
+  <!-- Video: a file already on the Mac, decoded & looped directly (no capture/permissions) -->
+  <div id="videocard" class="card hide">
+    <h2>Video — loop a file on this Mac</h2>
+    <div id="vlist" class="vlist"></div>
+    <input type="file" id="vfile" accept="video/*,.gif">
+    <div id="vupload" class="hint" style="margin-top:6px;"></div>
+    <div class="row" style="margin-top:10px;">
+      <label>Framing</label>
+      <select id="v-fit">
+        <option value="fill">Fill (crop to square)</option>
+        <option value="fit">Fit (letterbox)</option>
+      </select>
+    </div>
+    <div class="row"><label>Colour</label><input type="range" id="v-sat" min="1" max="2.5" step="0.05"></div>
+    <div class="hint">No screen capture, no permissions — the file is decoded and streamed
+      directly, so this can't grab the wrong window. Loops forever until you switch modes.</div>
+  </div>
+
+  <!-- Cast from this device -->
+  <div id="castcard" class="card hide">
+    <h2>Cast — video from this device <span id="cast-live" class="badge hide">● LIVE</span></h2>
+    <input type="file" id="file" accept="video/*,image/*">
+    <video id="src" playsinline webkit-playsinline controls loop></video>
+    <div class="row" style="margin-top:10px;">
+      <label>Framing</label>
+      <select id="c-fit">
+        <option value="fill">Fill (crop to square)</option>
+        <option value="fit">Fit (letterbox)</option>
+      </select>
+    </div>
+    <div class="row"><label>Colour</label><input type="range" id="c-sat" min="1" max="2.5" step="0.05" value="1.35"></div>
+    <div class="hint">Pick a video from your phone and press play — it streams straight
+      to the LED panel. Keep this page open and the screen awake while it plays.</div>
+  </div>
+  </div><!-- /.main -->
+
+  <!-- Right rail: Home Assistant dynamic backgrounds -->
+  <aside class="side">
+    <div class="card" id="bgcard">
+      <h2>Background</h2>
+      <div class="badge" id="bg-source" style="display:block;margin-bottom:8px;">Apollo M-1 effects</div>
+      <label for="bg-mode">WLED effect</label>
+      <select id="bg-mode" style="margin-bottom:10px;max-height:none;" size="1"></select>
+      <label for="bg-speed">Speed <span id="bg-spd-val" class="badge">50</span></label>
+      <input type="range" id="bg-speed" min="1" max="100" value="50" style="margin-bottom:10px;">
+      <div class="hint" id="bg-hint">All <b>255 Apollo M-1 / WLED effects</b> (live from the panel). Pick one with no game = <b>real</b> effect on the matrix. With a game running, a matching animation fills black pixels under the sprites (DDP has to own the full frame).</div>
+    </div>
+  </aside>
+  </div><!-- /.shell -->
+
+<script>
+const $ = id => document.getElementById(id);
+const cv = $('c'), ctx = cv.getContext('2d');
+const img = ctx.createImageData(64, 64);
+let curMode = null, cfgTouched = 0;
+
+/* ---------- live preview ---------- */
+function draw(b64){
+  const bin = atob(b64), d = img.data;
+  for (let p = 0, j = 0; p < 4096; p++){
+    d[j++] = bin.charCodeAt(p*3);
+    d[j++] = bin.charCodeAt(p*3+1);
+    d[j++] = bin.charCodeAt(p*3+2);
+    d[j++] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+let curBg = 'none', bgTouched = 0;
+async function poll(){
+  try{
+    const j = await (await fetch('/api/state', {cache:'no-store'})).json();
+    draw(j.rgb);
+    $('mode').textContent = j.mode.toUpperCase();
+    $('score').textContent = j.score;
+    if (j.background != null){
+      const lab = (j.background || 'none').toUpperCase();
+      $('bg-label').textContent = lab;
+      if (Date.now() - bgTouched > 2000){
+        if ($('bg-mode').value !== j.background) $('bg-mode').value = j.background || 'none';
+        if (j.bg_speed != null && +$('bg-speed').value !== +j.bg_speed){
+          $('bg-speed').value = j.bg_speed;
+          $('bg-spd-val').textContent = j.bg_speed;
+        }
+      }
+      curBg = j.background || 'none';
+    }
+    const e = $('err');
+    if (j.mode === 'mirror' && j.err){
+      e.classList.remove('hide');
+      e.textContent = '⚠ Mirror needs Screen Recording permission — System Settings → '
+        + 'Privacy & Security → Screen Recording → enable your terminal, then restart the server.';
+    } else e.classList.add('hide');
+    $('cast-live').classList.toggle('hide', !j.cast_active);
+    if (j.mode !== curMode){ curMode = j.mode; syncUI(); }
+    if (Date.now() - cfgTouched > 2500){ applyMirrorCfg(j.mirror_cfg); applyVideoCfg(j.video_cfg); }
+    if (j.video_file !== curVideoFile){ curVideoFile = j.video_file; highlightVideo(); }
+  }catch(_){}
+}
+setInterval(poll, 60);
+
+/* ---------- background (HA dynamic modes) ---------- */
+async function loadBackgrounds(){
+  try{
+    const j = await (await fetch('/api/backgrounds')).json();
+    const sel = $('bg-mode');
+    const groups = {};
+    const order = [];
+    (j.modes || []).forEach(m => {
+      if (!groups[m.group]){ groups[m.group] = []; order.push(m.group); }
+      groups[m.group].push(m);
+    });
+    sel.innerHTML = '';
+    order.forEach(g => {
+      const og = document.createElement('optgroup');
+      og.label = g + (g === '—' ? '' : ` (${groups[g].length})`);
+      groups[g].forEach(m => {
+        const o = document.createElement('option');
+        o.value = m.id; o.textContent = m.label;
+        og.appendChild(o);
+      });
+      sel.appendChild(og);
+    });
+    if (j.background != null) sel.value = String(j.background);
+    if (j.bg_speed != null){
+      $('bg-speed').value = j.bg_speed;
+      $('bg-spd-val').textContent = j.bg_speed;
+    }
+    if (j.source) $('bg-source').textContent = j.source + ' · ' + (j.count || 0) + ' effects';
+    if (j.name && j.name !== 'none')
+      $('bg-hint').innerHTML = 'Selected: <b>' + j.name + '</b>. Ambient runs the real Apollo effect; with a game it fills black pixels underneath.';
+  }catch(e){
+    $('bg-source').textContent = 'Could not load Apollo effects';
+  }
+}
+function pushBackground(){
+  bgTouched = Date.now();
+  const id = $('bg-mode').value;
+  const speed = +$('bg-speed').value;
+  $('bg-spd-val').textContent = speed;
+  $('bg-label').textContent = (id || 'none').toUpperCase();
+  fetch('/api/background', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({id, speed})
+  });
+}
+$('bg-mode').addEventListener('change', pushBackground);
+$('bg-speed').addEventListener('input', () => {
+  $('bg-spd-val').textContent = $('bg-speed').value;
+});
+$('bg-speed').addEventListener('change', pushBackground);
+loadBackgrounds();
+
+/* ---------- power + modes ---------- */
+function syncUI(){
+  const on = curMode && curMode !== 'off';
+  document.querySelectorAll('[data-mode]').forEach(b =>
+    b.classList.toggle('active', b.dataset.mode === curMode));
+  const p = $('power');
+  p.classList.toggle('on', on); p.classList.toggle('off', !on);
+  p.innerHTML = on ? '⏻&nbsp;&nbsp;TURN OFF' : '⏻&nbsp;&nbsp;TURN ON';
+  $('pstate').textContent = on ? 'panel live · arcade in control'
+                               : 'panel released · normal lighting';
+  $('modes').classList.toggle('dim', !on);
+  // Playable engines only (not *-demo and not media modes).
+  const base = (curMode || '').split('-')[0];
+  const PLAYABLE = new Set(['snake','tetris','pong','breakout','tron','flappy',
+                            'invaders','dodge','2048','life']);
+  const playing = PLAYABLE.has(base) && curMode && !curMode.endsWith('-demo');
+  $('gamepad').classList.toggle('hide', !playing);
+  const mirroring = curMode === 'mirror';
+  // Refresh the app list on the way in — which apps have windows changes while
+  // the page sits open, and a stale list is worse than useless here.
+  if (mirroring && $('mirrorcard').classList.contains('hide')) loadPanelWindow();
+  $('mirrorcard').classList.toggle('hide', !mirroring);
+  $('videocard').classList.toggle('hide', curMode !== 'video');
+  $('castcard').classList.toggle('hide', curMode !== 'cast');
+}
+const setMode = m => fetch('/api/mode/' + m, {method:'POST'});
+const sendInput = c => fetch('/api/input/' + c, {method:'POST'});
+
+$('power').addEventListener('click', () =>
+  setMode(curMode && curMode !== 'off' ? 'off' : 'on'));
+document.querySelectorAll('[data-mode]').forEach(b =>
+  b.addEventListener('click', () => setMode(b.dataset.mode)));
+document.querySelectorAll('[data-in]').forEach(b =>
+  b.addEventListener('click', () => sendInput(b.dataset.in)));
+
+const KEYS = {ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',
+              w:'up',s:'down',a:'left',d:'right',' ':'drop',
+              Enter:'rotate', e:'rotate', q:'rotate'};
+const PLAYABLE = new Set(['snake','tetris','pong','breakout','tron','flappy',
+                          'invaders','dodge','2048','life']);
+addEventListener('keydown', e => {
+  let c = KEYS[e.key];
+  // Tetris-style rotate also on ArrowUp when not using WASD up for movement games —
+  // engines that don't care about "rotate" simply ignore it.
+  if (!c && e.key === 'ArrowUp') c = 'up';
+  const base = (curMode || '').split('-')[0];
+  if (c && PLAYABLE.has(base) && curMode && !curMode.endsWith('-demo')){
+    e.preventDefault(); sendInput(c);
+  }
+});
+
+/* ---------- mirror settings ---------- */
+function applyMirrorCfg(cfg){
+  if (!cfg) return;
+  $('m-fit').value = cfg.fit;
+  $('m-sat').value = cfg.saturation;
+  $('m-con').value = cfg.contrast;
+  $('m-cursor').value = cfg.cursor ? (cfg.cursor_style || 'ring') : 'off';
+  $('m-cursize').value = cfg.cursor_size;
+  const r = cfg.region;
+  $('m-region').textContent = r ? `${r.width}×${r.height} @ ${r.left},${r.top}`
+                                : 'whole display';
+}
+function pushMirror(){
+  cfgTouched = Date.now();
+  const cur = $('m-cursor').value;
+  fetch('/api/mirror', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({fit:$('m-fit').value, saturation:+$('m-sat').value,
+                          contrast:+$('m-con').value, monitor:+($('m-display').value||1),
+                          cursor: cur !== 'off',
+                          cursor_style: cur === 'off' ? undefined : cur,
+                          cursor_size: +$('m-cursize').value})});
+}
+['m-fit','m-sat','m-con','m-display','m-cursor','m-cursize'].forEach(id =>
+  $(id).addEventListener('change', pushMirror));
+$('m-cursize').addEventListener('input', pushMirror);
+
+/* ---------- panel display: send a window to the square virtual screen ---------- */
+async function loadPanelWindow(){
+  try{
+    const j = await (await fetch('/api/panel-window')).json();
+    $('pw-size').textContent = j.panel
+      ? `${j.panel.width}×${j.panel.height}` : (j.error || 'not found');
+    const preset = $('pw-preset');
+    if (!preset.options.length && j.sizes){
+      preset.innerHTML = j.sizes.map(s =>
+        `<option value="${s.size}" title="${s.note}">${s.label}</option>`).join('');
+    }
+    if (j.size) preset.value = j.size;
+    const sel = $('pw-app'), keep = sel.value;
+    // Apps we can drive without an Accessibility grant come first; the rest are
+    // still listed but flagged, since moving them may fail.
+    sel.innerHTML = (j.apps || []).map(a =>
+      `<option value="${a.name}">${a.name}${a.native ? '' : ' (needs permission)'}</option>`
+    ).join('');
+    if (keep) sel.value = keep;
+  }catch(e){ $('pw-size').textContent = 'error'; }
+}
+async function panelWindow(action){
+  const msg = $('pw-msg');
+  msg.textContent = 'working…';
+  try{
+    const r = await (await fetch('/api/panel-window/' + action, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({app: $('pw-app').value})})).json();
+    if (!r.ok) throw new Error(r.error);
+    msg.textContent = action === 'send'
+      ? (r.clamped
+          ? `${r.app} moved, but it refused to shrink below ${r.window.width}×${r.window.height} — use a bigger panel size or fullscreen it.`
+          : `${r.app} is on the panel. Fullscreen it for the best result.`)
+      : `${r.app} is back on your main screen.`;
+  }catch(e){ msg.textContent = 'Failed: ' + e.message; }
+}
+$('pw-send').addEventListener('click', () => panelWindow('send'));
+$('pw-back').addEventListener('click', () => panelWindow('back'));
+$('pw-preset').addEventListener('change', async () => {
+  const msg = $('pw-msg');
+  msg.textContent = 'resizing panel screen…';
+  try{
+    const r = await (await fetch('/api/panel-size', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({size: $('pw-preset').value})})).json();
+    if (!r.ok) throw new Error(r.error);
+    msg.textContent = `Panel screen is now ${r.size}.`;
+    loadPanelWindow(); loadDisplays();
+  }catch(e){ msg.textContent = 'Failed: ' + e.message; }
+});
+
+/* ---------- region picker: drag a box over a still of your screen ---------- */
+let shotGeom = null, dragging = false, dragStart = null;
+const shot = $('shot'), sel = $('sel'), wrap = $('shotwrap');
+
+async function loadShot(){
+  $('shothint').textContent = 'loading screen…';
+  try{
+    const mon = +($('m-display').value || 1);
+    const j = await (await fetch('/api/screenshot?monitor=' + mon)).json();
+    if (j.error) throw new Error(j.error);
+    shotGeom = j;
+    shot.src = j.thumb;
+    $('shothint').style.display = 'none';
+  }catch(e){
+    $('shothint').textContent = 'could not read screen — check Screen Recording permission';
+  }
+}
+$('m-shot').addEventListener('click', loadShot);
+$('m-full').addEventListener('click', () => {
+  sel.style.display = 'none';
+  $('m-region').textContent = 'whole display';
+  cfgTouched = Date.now();
+  fetch('/api/mirror', {method:'POST', headers:{'Content-Type':'application/json'},
+                        body: JSON.stringify({region: null})});
+});
+
+const pt = e => {
+  const r = shot.getBoundingClientRect();
+  const s = e.touches ? e.touches[0] : e;
+  return {x: Math.min(Math.max(s.clientX - r.left, 0), r.width),
+          y: Math.min(Math.max(s.clientY - r.top, 0), r.height), r};
+};
+function startDrag(e){
+  if (!shotGeom || !shot.src) return;
+  e.preventDefault(); dragging = true; dragStart = pt(e);
+  sel.style.display = 'block';
+  sel.style.left = dragStart.x + 'px'; sel.style.top = dragStart.y + 'px';
+  sel.style.width = sel.style.height = '0px';
+}
+function moveDrag(e){
+  if (!dragging) return;
+  e.preventDefault();
+  const p = pt(e);
+  sel.style.left = Math.min(p.x, dragStart.x) + 'px';
+  sel.style.top = Math.min(p.y, dragStart.y) + 'px';
+  sel.style.width = Math.abs(p.x - dragStart.x) + 'px';
+  sel.style.height = Math.abs(p.y - dragStart.y) + 'px';
+}
+function endDrag(e){
+  if (!dragging) return;
+  dragging = false;
+  const p = pt(e.changedTouches ? {touches: e.changedTouches} : e);
+  const x0 = Math.min(p.x, dragStart.x), y0 = Math.min(p.y, dragStart.y);
+  const w = Math.abs(p.x - dragStart.x), h = Math.abs(p.y - dragStart.y);
+  if (w < 8 || h < 8){ sel.style.display = 'none'; return; }      // stray tap
+  const k = shotGeom.width / p.r.width;                            // thumb -> real px
+  const region = {left: Math.round(shotGeom.left + x0 * k),
+                  top:  Math.round(shotGeom.top  + y0 * k),
+                  width: Math.round(w * k), height: Math.round(h * k)};
+  $('m-region').textContent = `${region.width}×${region.height} @ ${region.left},${region.top}`;
+  cfgTouched = Date.now();
+  fetch('/api/mirror', {method:'POST', headers:{'Content-Type':'application/json'},
+                        body: JSON.stringify({region})});
+}
+wrap.addEventListener('mousedown', startDrag);
+addEventListener('mousemove', moveDrag);
+addEventListener('mouseup', endDrag);
+wrap.addEventListener('touchstart', startDrag, {passive:false});
+wrap.addEventListener('touchmove', moveDrag, {passive:false});
+wrap.addEventListener('touchend', endDrag);
+function loadDisplays(){
+  return fetch('/api/displays').then(r => r.json()).then(j => {
+    const sel = $('m-display'), keep = sel.value;
+    sel.innerHTML = (j.displays||[])
+      .filter(d => d.index > 0)
+      .map(d => `<option value="${d.index}">${d.label}</option>`).join('');
+    if (keep) sel.value = keep;
+  }).catch(()=>{});
+}
+loadDisplays();
+loadPanelWindow();
+
+/* ---------- video: files already on this Mac, decoded server-side ---------- */
+let curVideoFile = null;
+function applyVideoCfg(cfg){
+  if (!cfg) return;
+  $('v-fit').value = cfg.fit;
+  $('v-sat').value = cfg.saturation;
+}
+function pushVideoCfg(){
+  cfgTouched = Date.now();
+  fetch('/api/video', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({fit:$('v-fit').value, saturation:+$('v-sat').value})});
+}
+['v-fit','v-sat'].forEach(id => $(id).addEventListener('change', pushVideoCfg));
+
+function highlightVideo(){
+  document.querySelectorAll('#vlist button').forEach(b =>
+    b.classList.toggle('active', b.dataset.name === curVideoFile));
+}
+async function loadVideoList(){
+  const j = await (await fetch('/api/videos')).json();
+  const list = $('vlist');
+  if (!j.videos || !j.videos.length){
+    list.innerHTML = '<div class="empty">No videos yet — choose a file below to add one.</div>';
+    return;
+  }
+  list.innerHTML = j.videos.map(name =>
+    `<button data-name="${name}">▶ ${name}</button>`).join('');
+  list.querySelectorAll('button').forEach(b =>
+    b.addEventListener('click', () => selectVideo(b.dataset.name)));
+  highlightVideo();
+}
+function selectVideo(name){
+  fetch('/api/video-select/' + encodeURIComponent(name), {method:'POST'});
+}
+$('vfile').addEventListener('change', async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const status = $('vupload');
+  status.textContent = 'uploading ' + f.name + '…';
+  try{
+    const r = await fetch('/api/upload-video?name=' + encodeURIComponent(f.name),
+                          {method:'POST', body:f});
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'upload failed');
+    status.textContent = '';
+    await loadVideoList();
+    selectVideo(j.filename);
+  }catch(err){
+    status.textContent = '⚠ ' + err.message;
+  }
+});
+loadVideoList();
+
+/* ---------- cast: video on THIS device -> panel ----------
+   Draws the playing video into a 64x64 canvas, applies gamma + saturation so it
+   reads well on LEDs, and POSTs raw RGB frames to the arcade server. Works on
+   iOS Safari because it uses a picked file (no screen-capture API needed).      */
+const video = $('src');
+const off = document.createElement('canvas'); off.width = 64; off.height = 64;
+const octx = off.getContext('2d', {willReadFrequently:true});
+const GAMMA = new Uint8Array(256);
+for (let i = 0; i < 256; i++) GAMMA[i] = Math.round(Math.pow(i/255, 2.2) * 255);
+let casting = false, inflight = false, lastCast = 0;
+
+$('file').addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  video.src = URL.createObjectURL(f);
+  video.classList.add('show');
+  if (curMode !== 'cast') setMode('cast');
+  video.play().catch(()=>{});
+});
+
+function castLoop(){
+  if (!casting) return;
+  requestAnimationFrame(castLoop);
+  const now = performance.now();
+  if (now - lastCast < 66 || inflight) return;      // ~15 fps, no overlap
+  if (video.readyState < 2 || video.paused || video.ended) return;
+  lastCast = now;
+
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return;
+  octx.fillStyle = '#000'; octx.fillRect(0, 0, 64, 64);
+  if ($('c-fit').value === 'fill'){
+    const s = Math.min(vw, vh);
+    octx.drawImage(video, (vw-s)/2, (vh-s)/2, s, s, 0, 0, 64, 64);
+  } else {
+    const r = Math.min(64/vw, 64/vh), w = vw*r, h = vh*r;
+    octx.drawImage(video, 0, 0, vw, vh, (64-w)/2, (64-h)/2, w, h);
+  }
+
+  const px = octx.getImageData(0, 0, 64, 64).data;
+  const sat = +$('c-sat').value;
+  const out = new Uint8Array(12288);
+  for (let p = 0, j = 0; p < 4096; p++){
+    let r = px[p*4], g = px[p*4+1], b = px[p*4+2];
+    if (sat !== 1){                                  // pull colour away from grey
+      const l = 0.299*r + 0.587*g + 0.114*b;
+      r = l + (r-l)*sat; g = l + (g-l)*sat; b = l + (b-l)*sat;
+      r = r<0?0:r>255?255:r; g = g<0?0:g>255?255:g; b = b<0?0:b>255?255:b;
+    }
+    out[j++] = GAMMA[r|0]; out[j++] = GAMMA[g|0]; out[j++] = GAMMA[b|0];
+  }
+  inflight = true;
+  fetch('/api/cast', {method:'POST', body:out})
+    .catch(()=>{}).finally(()=>{ inflight = false; });
+}
+video.addEventListener('play', () => { casting = true; castLoop(); });
+video.addEventListener('pause', () => { casting = false; });
+video.addEventListener('ended', () => { casting = false; });
+</script>
+</body>
+</html>
