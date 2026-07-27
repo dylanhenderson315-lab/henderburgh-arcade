@@ -34,6 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
+import engines
 from engines import ENGINES, WIDTH, HEIGHT, TicCartEngine, CARTS_DIR
 from wled_ddp import WledDDP
 import backgrounds
@@ -74,6 +75,9 @@ class Arcade:
         # keeps pushing the last frame, because the panel must never be left
         # without traffic -- see the PANEL_FPS/dedup notes at the top.
         self.paused = False
+        self.pause_sel = 0          # index into engines.PAUSE_ITEMS
+        self.pause_bg = None        # last live frame, shown under the overlay
+        self.pause_pulse = 0
         self.latest = self.engine.frame()
         self.mirror = None
         self.mirror_error = None
@@ -235,23 +239,71 @@ class Arcade:
             if self.mode in ("off",) or base in ("menu", "boot"):
                 self.paused = False
             else:
+                was = self.paused
                 self.paused = (not self.paused) if value is None else bool(value)
+                if self.paused and not was:
+                    # Freeze the board as it stood, so the overlay always has
+                    # the exact moment you paused underneath it.
+                    self.pause_bg = bytes(self.latest)
+                    self.pause_sel = 0
             return self.paused
 
+    def _pause_action(self):
+        """Act on the highlighted pause item. Returns a mode to switch to
+        after the lock is released, or None."""
+        item = engines.PAUSE_ITEMS[self.pause_sel]
+        if item == "RESUME":
+            self.paused = False
+        elif item == "RESTART":
+            self.paused = False
+            return self.mode                 # re-entering rebuilds the engine
+        elif item == "MENU":
+            self.paused = False
+            return "menu"
+        return None
+
+    def _pause_input(self, cmd):
+        """Drive the pause menu. Returns (handled, mode_to_switch_to)."""
+        n = len(engines.PAUSE_ITEMS)
+        if cmd in ("up", "left"):
+            self.pause_sel = (self.pause_sel - 1) % n
+        elif cmd in ("down", "right"):
+            self.pause_sel = (self.pause_sel + 1) % n
+        elif cmd == "rotate":
+            return True, self._pause_action()
+        elif cmd in ("drop", "hold"):
+            self.paused = False              # secondary button = just resume
+        return True, None
+
     def send_input(self, cmd):
+        switch = None
         with self.lock:
-            if self._input_allowed():
+            if self.paused:
+                _, switch = self._pause_input(cmd)
+            elif self._input_allowed():
                 self.engine.input(cmd)
+        # set_mode takes the same lock, so it has to happen outside it.
+        if switch:
+            self.set_mode(switch)
 
     def send_press(self, cmd):
+        switch = None
         with self.lock:
-            if self._input_allowed() and hasattr(self.engine, "press"):
+            if self.paused:
+                # While paused the controller drives the pause menu, not the
+                # frozen game -- otherwise the phone's d-pad would appear dead.
+                _, switch = self._pause_input(cmd)
+            elif self._input_allowed() and hasattr(self.engine, "press"):
                 self.engine.press(cmd)
             elif self._input_allowed():
                 self.engine.input(cmd)
+        if switch:
+            self.set_mode(switch)
 
     def send_release(self, cmd):
         with self.lock:
+            if self.paused:
+                return                       # pause menu acts on press only
             if self._input_allowed() and hasattr(self.engine, "release"):
                 self.engine.release(cmd)
 
@@ -490,6 +542,18 @@ class Arcade:
                 if launch_to:
                     eng.launch = None
             frame = eng.frame() if eng else None
+            if self.paused:
+                # Composite the menu over the board as it stood when you
+                # paused, not over a live frame -- some engines animate in
+                # frame() and the background would keep twitching.
+                self.pause_pulse += 1
+                base = self.pause_bg or frame
+                if base:
+                    frame = engines.draw_pause_overlay(
+                        base, self.pause_sel, self.pause_pulse)
+            # Assign AFTER compositing: self.latest is what /api/state serves
+            # and what both pages preview, so setting it to the raw frame
+            # first would show the panel and the UI two different things.
             if frame:
                 self.latest = frame
         if launch_to:

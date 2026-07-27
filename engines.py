@@ -3947,6 +3947,12 @@ class MenuEngine:
         self.bump = 0
         self._auto_ticks = 0
         self.view_row = 0
+        # Two-stage selection, like a console: browse the shelf, then decide
+        # how to run the thing you picked. Previously SELECT and AUTO were
+        # two different buttons on the grid, which meant the choice was
+        # invisible until after you had already committed to a game.
+        self.stage = "grid"        # "grid" -> browsing, "pick" -> play/watch
+        self.pick = 0              # 0 = PLAY, 1 = WATCH
         # Floating cursor position (icon-grid pixel space) that tick() eases
         # toward the selected tile -- a snap-to-cell highlight reads as static
         # UI, but a cursor that glides between tiles is what makes browsing
@@ -3990,6 +3996,22 @@ class MenuEngine:
             self.view_row = r - self.ROWS_VISIBLE + 1
 
     def input(self, cmd):
+        if self.stage == "pick":
+            gid = self.GAMES[self.cur][0]
+            if cmd in ("left", "right", "up", "down"):
+                self.pick ^= 1
+                self.bump = 8
+            elif cmd == "rotate":
+                # Cartridges have no self-playing mode, so WATCH falls back
+                # to a normal launch rather than a mode that cannot exist.
+                self.launch = (gid + "-demo"
+                               if self.pick == 1 and not gid.startswith("tic:")
+                               else gid)
+            elif cmd in ("drop", "hold"):
+                self.stage = "grid"                       # back to the shelf
+                self.bump = 8
+            return
+
         if cmd == "left":
             start, end = self._row_bounds(self.cur)
             self._move(start + (self.cur - start - 1) % (end - start))
@@ -4000,16 +4022,20 @@ class MenuEngine:
             self._move(self._vert_move(-1))
         elif cmd == "down":
             self._move(self._vert_move(1))
-        elif cmd == "rotate":
-            self.launch = self.GAMES[self.cur][0]         # manual
-        elif cmd == "drop":
-            gid = self.GAMES[self.cur][0]
-            # Cartridges have no self-playing demo mode -- DROP just launches.
-            self.launch = gid if gid.startswith("tic:") else gid + "-demo"
+        elif cmd in ("rotate", "drop"):
+            self.stage = "pick"                           # ask how to run it
+            self.pick = 0
+            self.bump = 8
 
     def auto(self):
         # Idle screensaver sweep when nobody's touched the controller --
         # never actually launches anything, just keeps the menu alive to look at.
+        # If it was left sitting on the play/watch prompt, back out first:
+        # an unattended panel should drift across the shelf, not sit on a
+        # half-finished decision nobody is going to make.
+        if self.stage == "pick":
+            self.stage = "grid"
+            return
         self._auto_ticks += 1
         if self._auto_ticks >= 14:
             self._auto_ticks = 0
@@ -4106,7 +4132,63 @@ class MenuEngine:
             block(3, 0, 4, 1, dim and c or tuple(v * 2 // 3 for v in color))
             block(1, 6, 8, 1, w)
 
+    def _frame_pick(self):
+        """The play/watch prompt: the chosen game shown large, then the one
+        decision left to make. Two options side by side, because the d-pad
+        axis you use to choose should match the way they are laid out."""
+        buf = blank()
+        fill(buf, self.BG)
+        gid, label, color = self.GAMES[self.cur]
+        is_cart = gid.startswith("tic:")
+
+        # The picked game's icon at 2x, so it is unmistakably the subject.
+        icon = blank()
+        self._icon(icon, gid, 0, 0, color, dim=False)
+        for y in range(self.ICON):
+            for x in range(self.ICON):
+                i = (y * WIDTH + x) * 3
+                px = (icon[i], icon[i + 1], icon[i + 2])
+                if px == (0, 0, 0):
+                    continue
+                bx, by = 22 + x * 2, 5 + y * 2
+                for dy in range(2):
+                    for dx in range(2):
+                        put_px(buf, bx + dx, by + dy, px)
+
+        tw = 4 * len(label) - 1
+        draw_text3x5(buf, (WIDTH - tw) // 2, 28, label, color)
+
+        glow = 0.55 + 0.45 * abs((self.pulse % 24) - 12) / 12
+        for idx, text in enumerate(("PLAY", "WATCH")):
+            x0 = 3 + idx * 31
+            x1 = x0 + 27
+            y0, y1 = 38, 52
+            on = (idx == self.pick)
+            # WATCH is meaningless for a cartridge, so it is drawn muted --
+            # still selectable, but it reads as the lesser option.
+            muted = (idx == 1 and is_cart)
+            base = color if on else self.INK_DIM
+            edge = tuple(min(255, int(v * glow)) for v in base) if on else self.INK_DIM
+            if muted and not on:
+                edge = tuple(v // 2 for v in self.INK_DIM)
+            for x in range(x0, x1 + 1):
+                put_px(buf, x, y0, edge)
+                put_px(buf, x, y1, edge)
+            for y in range(y0, y1 + 1):
+                put_px(buf, x0, y, edge)
+                put_px(buf, x1, y, edge)
+            tw2 = 4 * len(text) - 1
+            ink = color if on else self.INK_DIM
+            draw_text3x5(buf, x0 + (28 - tw2) // 2, y0 + 5, text, ink)
+
+        hint = "BACK"
+        draw_text3x5(buf, (WIDTH - (4 * len(hint) - 1)) // 2, HEIGHT - 7,
+                     hint, self.INK_DIM)
+        return bytes(buf)
+
     def frame(self):
+        if self.stage == "pick":
+            return self._frame_pick()
         buf = blank()
         fill(buf, self.BG)
         lo, hi = self.view_row * self.COLS, (self.view_row + self.ROWS_VISIBLE) * self.COLS
@@ -4140,9 +4222,9 @@ class MenuEngine:
         tw = 4 * len(label) - 1
         draw_text3x5(buf, (WIDTH - tw) // 2, y_name, label, color)
 
-        # Control legend -- ties the on-panel cursor to the two physical
-        # buttons the phone always shows in menu mode.
-        hint = "SELECT  AUTO"
+        # Control legend. Both face buttons now open the play/watch prompt,
+        # so advertising a separate AUTO button here would be a lie.
+        hint = "SELECT"
         tw2 = 4 * len(hint) - 1
         draw_text3x5(buf, (WIDTH - tw2) // 2, y_name + 8, hint, self.INK_DIM)
 
@@ -5567,6 +5649,61 @@ class ChaseEngine:
             put_px(buf, 1 + i * 3, 0, self.YOU)
             put_px(buf, 2 + i * 3, 0, self.YOU)
         return bytes(buf)
+
+
+PAUSE_ITEMS = ("RESUME", "RESTART", "MENU")
+
+
+def draw_pause_overlay(frame, sel, pulse):
+    """Dim the live game and lay the pause menu over it.
+
+    The frozen game stays visible underneath on purpose: you pause to look
+    at the board, so covering it with an opaque card would defeat the point.
+    Dimming rather than blanking also makes it obvious at a glance that the
+    panel is paused and not simply stuck on a still image.
+    """
+    buf = bytearray(frame)
+    for i in range(0, len(buf), 3):
+        buf[i] = (buf[i] * 45) >> 8
+        buf[i + 1] = (buf[i + 1] * 45) >> 8
+        buf[i + 2] = (buf[i + 2] * 45) >> 8
+
+    x0, x1 = 5, WIDTH - 6
+    y0, y1 = 9, HEIGHT - 10
+    for x in range(x0, x1 + 1):          # card, so the text never fights the art
+        for y in range(y0, y1 + 1):
+            i = (y * WIDTH + x) * 3
+            buf[i] = buf[i] // 3
+            buf[i + 1] = buf[i + 1] // 3
+            buf[i + 2] = buf[i + 2] // 3
+    edge = (120, 130, 155)
+    for x in range(x0, x1 + 1):
+        put_px(buf, x, y0, edge)
+        put_px(buf, x, y1, edge)
+    for y in range(y0, y1 + 1):
+        put_px(buf, x0, y, edge)
+        put_px(buf, x1, y, edge)
+
+    title = "PAUSED"
+    draw_text3x5(buf, (WIDTH - (4 * len(title) - 1)) // 2, y0 + 4,
+                 title, (235, 240, 255))
+
+    glow = 0.55 + 0.45 * abs((pulse % 24) - 12) / 12
+    for i, text in enumerate(PAUSE_ITEMS):
+        ty = y0 + 14 + i * 9
+        on = (i == sel)
+        ink = (tuple(min(255, int(v * glow)) for v in (255, 226, 60))
+               if on else (140, 148, 170))
+        tw = 4 * len(text) - 1
+        tx = (WIDTH - tw) // 2
+        if on:
+            for x in range(tx - 3, tx + tw + 3):
+                put_px(buf, x, ty - 2, (70, 62, 20))
+                put_px(buf, x, ty + 6, (70, 62, 20))
+            put_px(buf, tx - 3, ty + 2, ink)
+            put_px(buf, tx + tw + 2, ty + 2, ink)
+        draw_text3x5(buf, tx, ty, text, ink)
+    return bytes(buf)
 
 
 def detect_cart_control_scheme(cart_bytes):

@@ -336,9 +336,11 @@ const $ = id => document.getElementById(id);
 const BOOT_SCHEME = {
   color:'#e8c23a', giant:{cmd:'rotate', label:'TAP TO SKIP'},
 };
+// Selecting a game now opens a play/watch prompt on the panel, so the
+// second face button is BACK rather than a rival launch button.
 const MENU_SCHEME = {
   color:'#e6342c', dpad:true,
-  actions:[{cmd:'rotate', label:'SELECT', glyph:'◉'}, {cmd:'drop', label:'AUTO', glyph:'▶'}],
+  actions:[{cmd:'rotate', label:'SELECT', glyph:'◉'}, {cmd:'drop', label:'BACK', glyph:'↩'}],
 };
 const GAMES = {
   snake:    {name:'SNAKE',     color:'#3aa855', dpad:true},
@@ -740,7 +742,7 @@ function buildControls(base, scheme, demo){
   if (base === 'boot'){
     $('note').textContent = 'Watch on the panel, or tap to jump straight to the menu.';
   } else if (base === 'menu'){
-    $('note').textContent = 'Browse on the panel with the dpad. SELECT plays it yourself, AUTO watches the built-in AI.';
+    $('note').textContent = 'Browse on the panel with the dpad, then SELECT to choose PLAY or WATCH.';
   } else if (scheme.ambientOnly){
     $('note').textContent = 'This one runs itself — tap RESEED for something new, or go ⌂ MENU for another game.';
   } else if (demo){
