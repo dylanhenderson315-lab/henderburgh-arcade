@@ -4195,7 +4195,11 @@ class MenuEngine:
     def input(self, cmd):
         if self.stage == "pick":
             gid = self.GAMES[self.cur][0]
-            if cmd in ("left", "right", "up", "down"):
+            if cmd in ("left", "right"):
+                # PLAY/WATCH are laid out side by side (see _frame_pick), so
+                # only the horizontal axis should switch between them --
+                # up/down used to flip it too, which read as a misfire to
+                # anyone navigating vertically out of habit.
                 self.pick ^= 1
                 self.bump = 8
             elif cmd == "rotate":
