@@ -122,6 +122,13 @@
     box-shadow:0 3px 0 #6b5217;
   }
   #home-btn.show{display:inline-flex;}
+  #pause-btn{
+    font-size:11px; font-weight:800; color:#1a1712; padding:6px 10px; border-radius:8px;
+    background:linear-gradient(180deg,#cfc7b4,#8e8674); border:2px solid #5c5646; display:none;
+    box-shadow:0 3px 0 #4b463a;
+  }
+  #pause-btn.show{display:inline-flex;}
+  #pause-btn.on{background:linear-gradient(180deg,#e8c85a,#b9922c); border-color:#7a5f1c;}
 
   /* LED scoreboard -- red 7-seg look, flat (no neon blur) */
   #scoreboard{
@@ -295,6 +302,7 @@
       <div id="gtitle">SYSTEM</div>
       <div id="subline">
         <div id="modepill">OFF</div>
+        <button id="pause-btn">⏸</button>
         <button id="home-btn">⌂ MENU</button>
       </div>
     </div>
@@ -418,6 +426,10 @@ async function poll(){
       : (isDemo ? 'AUTO' : (scheme ? 'MANUAL' : '—'));
     $('modepill').classList.toggle('manual', !isDemo && !!scheme && !isChrome);
     $('home-btn').classList.toggle('show', panelOn && !isChrome && !!scheme);
+    $('pause-btn').classList.toggle('show', panelOn && !isChrome && !!scheme);
+    $('pause-btn').classList.toggle('on', !!j.paused);
+    $('pause-btn').textContent = j.paused ? '▶' : '⏸';
+    if (j.paused) $('modepill').textContent = 'PAUSED';
 
     applyTheme(scheme);
 
@@ -769,6 +781,8 @@ addEventListener('keydown', (ev) => {
   const t = ev.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return;
   if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  if (ev.key === 'p' || ev.key === 'P'){ ev.preventDefault(); togglePause(); return; }
+  if (ev.key === 'Escape' || ev.key === 'Backspace'){ ev.preventDefault(); buzz(12); setMode('menu'); return; }
   const cmd = KEYMAP[ev.key];
   if (!cmd) return;
   ev.preventDefault();
@@ -806,6 +820,8 @@ addEventListener('blur', () => {
 });
 
 // ------------------------------------------------------------- home / power
+function togglePause(){ buzz(12); return fetch('/api/pause', {method:'POST'}); }
+$('pause-btn').addEventListener('click', togglePause);
 $('home-btn').addEventListener('click', () => { buzz(12); setMode('menu'); });
 $('pwr').addEventListener('pointerdown', () => $('pwr').classList.add('pressed'));
 ['pointerup','pointerleave'].forEach(ev => $('pwr').addEventListener(ev, () => $('pwr').classList.remove('pressed')));

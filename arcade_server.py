@@ -70,6 +70,10 @@ class Arcade:
         self.engine = ENGINES["snake"]()
         self.mode = DEFAULT_MODE
         self.last_game = RESUME_GAME
+        # Pause freezes game logic only. The render loop keeps running and
+        # keeps pushing the last frame, because the panel must never be left
+        # without traffic -- see the PANEL_FPS/dedup notes at the top.
+        self.paused = False
         self.latest = self.engine.frame()
         self.mirror = None
         self.mirror_error = None
@@ -165,6 +169,7 @@ class Arcade:
                 if mode not in ("background", "menu", "boot"):
                     self.last_game = mode
             self.mode = mode
+            self.paused = False        # never land in a new mode already frozen
             base = mode.split("-")[0]
             if mode.startswith("tic:"):
                 # Fantasy-console cart -- same launch pipeline as every
@@ -220,6 +225,18 @@ class Arcade:
         return self.engine and not self.mode.endswith("-demo") and (
             self.mode.startswith("tic:") or base in ENGINES
         )
+
+    def set_paused(self, value):
+        """value: True/False/None -- None toggles."""
+        with self.lock:
+            # Only a running game can be paused; pausing the menu or the boot
+            # sequence would strand the system with no way back.
+            base = self.mode.split("-")[0]
+            if self.mode in ("off",) or base in ("menu", "boot"):
+                self.paused = False
+            else:
+                self.paused = (not self.paused) if value is None else bool(value)
+            return self.paused
 
     def send_input(self, cmd):
         with self.lock:
@@ -440,6 +457,7 @@ class Arcade:
                 "on": live,
                 "score": self.engine.score if self.engine else 0,
                 "cart_input": getattr(self.engine, "control_scheme", None),
+                "paused": self.paused,
                 "err": err,
                 "cast_active": bool(cast_age is not None and cast_age < CAST_TIMEOUT),
                 "mirror_cfg": dict(self.mirror_cfg),
@@ -455,7 +473,7 @@ class Arcade:
     def _game_frame(self, mode, eng, now, last_tick):
         launch_to = None
         with self.lock:
-            if eng and now - last_tick >= eng.tick_rate:
+            if eng and not self.paused and now - last_tick >= eng.tick_rate:
                 if mode.endswith("-demo"):
                     eng.auto()
                 eng.tick()
@@ -826,6 +844,11 @@ class Handler(BaseHTTPRequestHandler):
         elif len(parts) == 3 and parts[:2] == ["api", "release"]:
             ARCADE.send_release(parts[2])
             self._json({"ok": True})
+        elif parsed.path == "/api/pause" or (
+                len(parts) == 3 and parts[:2] == ["api", "pause"]):
+            arg = parts[2] if len(parts) == 3 else ""
+            want = {"on": True, "off": False}.get(arg)   # anything else toggles
+            self._json({"ok": True, "paused": ARCADE.set_paused(want)})
         elif parsed.path == "/api/pointer":
             # Absolute touch position for mouse-driven carts (e.g. a
             # drawing/painting toy) -- fx, fy are fractions 0..1 of the

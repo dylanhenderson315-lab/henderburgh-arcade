@@ -92,6 +92,13 @@
   <button id="power" class="power off">⏻&nbsp;&nbsp;TURN ON</button>
   <div class="pstate" id="pstate">panel released</div>
 
+  <!-- Pause / Home. Key bindings alone are not discoverable, so the two
+       functions that interrupt a game get real buttons on both surfaces. -->
+  <div class="modes" id="gamectl">
+    <button id="pausebtn">⏸ Pause <span class="hint">P</span></button>
+    <button id="homebtn">⌂ Home <span class="hint">Esc</span></button>
+  </div>
+
   <div class="modes" id="modes">
     <button data-mode="snake">▶ Snake</button>
     <button data-mode="tetris">▶ Tetris</button>
@@ -265,8 +272,10 @@ async function poll(){
   try{
     const j = await (await fetch('/api/state', {cache:'no-store'})).json();
     draw(j.rgb);
-    $('mode').textContent = j.mode.toUpperCase();
+    $('mode').textContent = j.mode.toUpperCase() + (j.paused ? ' · PAUSED' : '');
     $('score').textContent = j.score;
+    $('pausebtn').textContent = j.paused ? '▶ Resume' : '⏸ Pause';
+    $('pausebtn').classList.toggle('on', !!j.paused);
     if (j.background != null){
       const lab = (j.background || 'none').toUpperCase();
       $('bg-label').textContent = lab;
@@ -421,16 +430,70 @@ const PLAYABLE = new Set(['snake','tetris','pong','breakout','tron','flappy',
   cv.style.cursor = 'crosshair';
 })();
 
-addEventListener('keydown', e => {
-  let c = KEYS[e.key];
-  // Tetris-style rotate also on ArrowUp when not using WASD up for movement games —
-  // engines that don't care about "rotate" simply ignore it.
-  if (!c && e.key === 'ArrowUp') c = 'up';
+/* This page only ever sent taps, so "holding" a direction depended on the
+   OS auto-repeat: ~500ms dead, then a stutter at whatever the system rate
+   is. That is why steering felt broken here while the controller felt
+   fine. Keys now drive the same press / hold-repeat / release pipeline the
+   phone uses, so both surfaces play identically. */
+const pendingPress = {};
+function rawPress(c){ return fetch('/api/press/' + c, {method:'POST'}); }
+function rawRelease(c){ return fetch('/api/release/' + c, {method:'POST'}); }
+function kPress(c){
+  const p = rawPress(c);
+  pendingPress[c] = p;
+  return p;
+}
+async function kRelease(c){
+  const p = pendingPress[c];
+  if (p){ delete pendingPress[c]; try { await p; } catch (_) {} }
+  return rawRelease(c);
+}
+const REPEATABLE = {up:1, down:1, left:1, right:1};
+const keyHeld = {};
+const playable = () => {
   const base = (curMode || '').split('-')[0];
-  if (c && PLAYABLE.has(base) && curMode && !curMode.endsWith('-demo')){
-    e.preventDefault(); sendInput(c);
+  return PLAYABLE.has(base) && curMode && !curMode.endsWith('-demo');
+};
+
+addEventListener('keydown', e => {
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+  if (e.key === 'p' || e.key === 'P'){ e.preventDefault(); togglePause(); return; }
+  if (e.key === 'Escape' || e.key === 'Backspace'){ e.preventDefault(); goHome(); return; }
+
+  const c = KEYS[e.key];
+  if (!c || !playable()) return;
+  e.preventDefault();
+  if (e.repeat || keyHeld[c]) return;      // OS repeat must not re-fire press
+  kPress(c);
+  keyHeld[c] = REPEATABLE[c] ? setInterval(() => sendInput(c), 130) : true;
+});
+
+addEventListener('keyup', e => {
+  const c = KEYS[e.key];
+  if (!c || !keyHeld[c]) return;
+  e.preventDefault();
+  if (keyHeld[c] !== true) clearInterval(keyHeld[c]);
+  delete keyHeld[c];
+  kRelease(c);
+});
+
+// A key still down when the tab loses focus never gets a keyup, and would
+// otherwise stay held on the panel forever.
+addEventListener('blur', () => {
+  for (const c of Object.keys(keyHeld)){
+    if (keyHeld[c] !== true) clearInterval(keyHeld[c]);
+    delete keyHeld[c];
+    kRelease(c);
   }
 });
+
+function togglePause(){ fetch('/api/pause', {method:'POST'}); }
+function goHome(){ setMode('menu'); }
+$('pausebtn').addEventListener('click', togglePause);
+$('homebtn').addEventListener('click', goHome);
 
 /* ---------- mirror settings ---------- */
 function applyMirrorCfg(cfg){
