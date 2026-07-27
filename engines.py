@@ -4319,6 +4319,9 @@ class PowderEngine:
     STONE = 3
     FIRE = 4
     STEAM = 5
+    OIL = 6
+    PLANT = 7
+    LAVA = 8
 
     COLORS = {
         SAND: (230, 190, 90),
@@ -4326,8 +4329,20 @@ class PowderEngine:
         STONE: (120, 120, 130),
         FIRE: (255, 110, 30),
         STEAM: (150, 160, 175),
+        OIL: (150, 80, 190),
+        PLANT: (70, 210, 90),
+        LAVA: (255, 80, 20),
     }
-    MATERIALS = [SAND, WATER, STONE, FIRE]  # cycled by the HOLD button
+    # Order the HOLD button cycles through. Fire sits after the two things
+    # that actually burn, so the obvious experiment (lay fuel, then light
+    # it) is the one the button order walks you into.
+    MATERIALS = [SAND, WATER, OIL, PLANT, FIRE, LAVA, STONE]
+
+    # Heavier sinks through lighter. Without this, water poured onto sand
+    # just perched on top of it, which is the one behaviour everybody tests
+    # first and the one that told you the simulation was fake.
+    DENSITY = {SAND: 3, WATER: 2, OIL: 1, LAVA: 2}
+    FLAMMABLE = {OIL, PLANT}
 
     def __init__(self):
         self.score = 0
@@ -4418,37 +4433,88 @@ class PowderEngine:
                 c = g[y][x]
                 if c == self.VOID or c == self.STONE:
                     continue
-                if c == self.SAND:
-                    if g[y + 1][x] == self.VOID:
-                        g[y][x], g[y + 1][x] = self.VOID, self.SAND
-                    elif x > 0 and g[y + 1][x - 1] == self.VOID:
-                        g[y][x], g[y + 1][x - 1] = self.VOID, self.SAND
-                    elif x < WIDTH - 1 and g[y + 1][x + 1] == self.VOID:
-                        g[y][x], g[y + 1][x + 1] = self.VOID, self.SAND
-                elif c == self.WATER:
-                    if g[y + 1][x] == self.VOID:
-                        g[y][x], g[y + 1][x] = self.VOID, self.WATER
-                    else:
+                if c == self.SAND or c == self.WATER or c == self.OIL or c == self.LAVA:
+                    dens = self.DENSITY[c]
+                    below = g[y + 1][x]
+                    # Fall into empty space, or sink through anything lighter
+                    # (sand through water, water under oil).
+                    if below == self.VOID:
+                        g[y][x], g[y + 1][x] = self.VOID, c
+                    elif self.DENSITY.get(below, 9) < dens:
+                        g[y][x], g[y + 1][x] = below, c
+                    elif c == self.SAND:
                         d = random.choice((-1, 1))
-                        if 0 <= x + d < WIDTH and g[y][x + d] == self.VOID:
-                            g[y][x], g[y][x + d] = self.VOID, self.WATER
+                        for nx in (x + d, x - d):
+                            if 0 <= nx < WIDTH and g[y + 1][nx] == self.VOID:
+                                g[y][x], g[y + 1][nx] = self.VOID, self.SAND
+                                break
+                    else:
+                        # Liquids seek their own level: look a few tiles out
+                        # so a pool actually flattens instead of stacking
+                        # into lumps the way a single-step spread does.
+                        d = random.choice((-1, 1))
+                        moved = False
+                        for step in (1, 2, 3):
+                            nx = x + d * step
+                            if not (0 <= nx < WIDTH) or g[y][nx] != self.VOID:
+                                break
+                            if y + 1 < HEIGHT and g[y + 1][nx] == self.VOID:
+                                g[y][x], g[y + 1][nx] = self.VOID, c
+                                moved = True
+                                break
+                        if not moved:
+                            nx = x + d
+                            if 0 <= nx < WIDTH and g[y][nx] == self.VOID:
+                                g[y][x], g[y][nx] = self.VOID, c
+
+                    if c == self.LAVA:
+                        # Lava is the counterpart to fire: it sets solid when
+                        # quenched and lights anything that burns.
+                        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                            nx, ny = x + dx, y + dy
+                            if not (0 <= nx < WIDTH and 0 <= ny < HEIGHT):
+                                continue
+                            n = g[ny][nx]
+                            if n == self.WATER:
+                                g[ny][nx] = self.STEAM
+                                g[y][x] = self.STONE
+                            elif n in self.FLAMMABLE and random.random() < 0.25:
+                                g[ny][nx] = self.FIRE
+
+                elif c == self.PLANT:
+                    # Grows along water, which gives fire something worth
+                    # burning and makes a pond slowly come alive.
+                    if random.random() < 0.03:
+                        dx, dy = random.choice(((0, 1), (0, -1), (1, 0), (-1, 0)))
+                        nx, ny = x + dx, y + dy
+                        if 0 <= nx < WIDTH and 0 <= ny < HEIGHT and g[ny][nx] == self.WATER:
+                            g[ny][nx] = self.PLANT
+
                 elif c == self.FIRE:
-                    spread = False
+                    burned = False
                     for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
                         nx, ny = x + dx, y + dy
-                        if 0 <= nx < WIDTH and 0 <= ny < HEIGHT:
-                            if g[ny][nx] in (self.SAND,):
-                                pass  # sand doesn't burn -- only feeds water->steam
-                            if g[ny][nx] == self.WATER:
-                                g[ny][nx] = self.STEAM
-                                spread = True
-                    if random.random() < 0.12:
-                        g[y][x] = self.VOID if not spread else self.STEAM
+                        if not (0 <= nx < WIDTH and 0 <= ny < HEIGHT):
+                            continue
+                        n = g[ny][nx]
+                        if n in self.FLAMMABLE and random.random() < 0.30:
+                            g[ny][nx] = self.FIRE      # fire finally has fuel
+                            burned = True
+                        elif n == self.WATER:
+                            g[y][x] = self.STEAM       # doused
+                            burned = True
+                            break
+                    if g[y][x] == self.FIRE and random.random() < (0.10 if burned else 0.22):
+                        g[y][x] = self.STEAM if random.random() < 0.3 else self.VOID
+
                 elif c == self.STEAM:
-                    if random.random() < 0.08:
-                        g[y][x] = self.VOID
-                    elif y > 0 and g[y - 1][x] == self.VOID:
-                        g[y][x], g[y - 1][x] = self.VOID, self.STEAM
+                    if random.random() < 0.06:
+                        g[y][x] = self.WATER if random.random() < 0.25 else self.VOID
+                    elif y > 0:
+                        nx = x + random.choice((-1, 0, 0, 1))
+                        nx = nx if 0 <= nx < WIDTH else x
+                        if g[y - 1][nx] == self.VOID:
+                            g[y][x], g[y - 1][nx] = self.VOID, self.STEAM
 
         self.score = sum(1 for row in g for c in row if c not in (self.VOID,))
 
@@ -4467,6 +4533,33 @@ class PowderEngine:
         # busy sand and water, four lone pixels vanish -- the arms give it a
         # shape that survives a cluttered background, and tinting it by
         # material means you never have to guess what will pour.
+        # Material selector, drawn as a swatch strip along the top with the
+        # active one raised and boxed in white. Cycling with a button and
+        # showing the result only as a faint cursor tint meant you had to
+        # pour something to find out what you had picked -- the selector
+        # existed but was effectively invisible.
+        n = len(self.MATERIALS)
+        sw, pad = 5, 2
+        total = n * sw + (n - 1) * pad
+        sx0 = (WIDTH - total) // 2
+        for i, m in enumerate(self.MATERIALS):
+            x0 = sx0 + i * (sw + pad)
+            sel = (m == self.material and not self.erase)
+            top = 1 if sel else 2
+            col = self.COLORS[m]
+            for dx in range(sw):
+                for dy in range(3 if sel else 2):
+                    put_px(buf, x0 + dx, top + dy, col)
+            if sel:
+                for dx in range(-1, sw + 1):
+                    put_px(buf, x0 + dx, top - 1, (255, 255, 255))
+                    put_px(buf, x0 + dx, top + 3, (255, 255, 255))
+                put_px(buf, x0 - 1, top + 1, (255, 255, 255))
+                put_px(buf, x0 + sw, top + 1, (255, 255, 255))
+        if self.erase:
+            for dx in range(6):
+                put_px(buf, WIDTH - 8 + dx, 2, (255, 90, 90))
+
         cx, cy = int(self.px * WIDTH), int(self.py * HEIGHT)
         ring = (255, 90, 90) if self.erase else self.COLORS[self.material]
         for d in (2, 3):
@@ -5016,6 +5109,7 @@ class ChaseEngine:
     PLAYER_SPEED = 0.17
     GHOST_SPEED = 0.145
     FRIGHT_SPEED = 0.095
+    EYES_SPEED = 0.34         # eyes outrun everything on the way home
     FRIGHT_TICKS = 140
     PHASES = [(155, "scatter"), (444, "chase")]   # ~7s / ~20s at this tick rate
 
@@ -5065,7 +5159,7 @@ class ChaseEngine:
             self.ghosts.append({
                 "cx": self.HOUSE[0], "cy": self.HOUSE[1],
                 "dir": (0, -1), "t": 0.0, "kind": i,
-                "fright": 0, "release": i * 45,
+                "fright": 0, "release": i * 45, "eaten": 0,
             })
         self.mode_i = 0
         self.mode_t = 0
@@ -5100,18 +5194,38 @@ class ChaseEngine:
         mode. Pellets therefore have to be worth a deliberate detour --
         a long one when something is closing in.
         """
-        danger = set()
-        nearest_ghost = 99
-        for g in self.ghosts:
-            if g["fright"] > 0:
-                continue
-            nearest_ghost = min(nearest_ghost,
-                                abs(g["cx"] - self.pcx) + abs(g["cy"] - self.pcy))
-            for dx in range(-2, 3):
-                for dy in range(-2, 3):
-                    danger.add((g["cx"] + dx, g["cy"] + dy))
+        threats = [g for g in self.ghosts
+                   if not g["eaten"] and g["fright"] <= 0 and g["release"] <= 0]
+        nearest_ghost = min((abs(g["cx"] - self.pcx) + abs(g["cy"] - self.pcy)
+                             for g in threats), default=99)
 
-        edible = {(g["cx"], g["cy"]) for g in self.ghosts if g["fright"] > 0}
+        def exits(cx, cy):
+            return sum(1 for d in ((0, -1), (0, 1), (-1, 0), (1, 0))
+                       if not self._wall(cx + d[0], cy + d[1]))
+
+        def zone(radius, lookahead):
+            """Tiles to treat as blocked: a diamond around each chaser plus a
+            projection along its heading, since a chaser bearing down covers
+            ground you are also trying to cross. With something close, stubs
+            are added too -- a one-exit tile is a trap, and walking into one
+            to grab a dot is the single most common way a run ends."""
+            z = set()
+            for g in threats:
+                for dx in range(-radius, radius + 1):
+                    for dy in range(-radius, radius + 1):
+                        if abs(dx) + abs(dy) <= radius:
+                            z.add((g["cx"] + dx, g["cy"] + dy))
+                for k in range(1, lookahead + 1):
+                    z.add((g["cx"] + g["dir"][0] * k, g["cy"] + g["dir"][1] * k))
+            if radius >= 2 and nearest_ghost <= 7:
+                for cy in range(self.GH):
+                    for cx in range(self.GW):
+                        if not self._wall(cx, cy) and exits(cx, cy) <= 1:
+                            z.add((cx, cy))
+            return z
+
+        edible = {(g["cx"], g["cy"]) for g in self.ghosts
+                  if g["fright"] > 0 and not g["eaten"]}
         # Shuffled expansion order breaks equal-distance ties differently
         # each run; a fixed order made every ambient run byte-identical.
         dirs = [(0, -1), (0, 1), (-1, 0), (1, 0)]
@@ -5144,27 +5258,54 @@ class ChaseEngine:
                     queue.append(((nx, ny), first or d, dist + 1))
             return best
 
-        best = search(danger) or search(set())
+        # Give ground reluctantly. Dropping straight from "avoid a wide
+        # berth" to "ignore chasers entirely" is what made this walk into
+        # ghosts and die every few seconds; each step here concedes a little
+        # margin, and even the tightest still refuses to enter a chaser's
+        # own tile.
+        best = None
+        for radius, lookahead in ((3, 3), (2, 2), (1, 1), (0, 0)):
+            best = search(zone(radius, lookahead))
+            if best:
+                break
         if not best:
-            # Every route blocked. Take the legal move that puts the most
-            # room between us and the closest chaser instead of silently
-            # keeping a stale direction that walks into a wall.
+            # Boxed in. Take the legal move with the most clearance rather
+            # than keeping a stale direction into a wall or a chaser.
             opts = [d for d in dirs if self._legal(self.pcx, self.pcy, d)]
-            if opts and self.ghosts:
+            if opts and threats:
                 def clearance(d):
                     nx, ny = (self.pcx + d[0]) % self.GW, self.pcy + d[1]
                     return min(abs(g["cx"] - nx) + abs(g["cy"] - ny)
-                               for g in self.ghosts)
+                               for g in threats)
                 self.pnext = max(opts, key=clearance)
             elif opts:
                 self.pnext = opts[0]
             return
 
-        if "hunt" in best:                      # edible ghost: worth the most
+        if "hunt" in best:                      # edible chaser: worth the most
             self.pnext = best["hunt"][1]
             return
+
+        # Something is right on top of us: stop collecting and open up the
+        # gap. Goal-seeking alone will happily take a dot that costs a tile
+        # of clearance, and at these speeds one tile is the whole margin.
+        if nearest_ghost <= 3:
+            opts = [d for d in dirs if self._legal(self.pcx, self.pcy, d)]
+            if opts:
+                def safety(d):
+                    nx, ny = (self.pcx + d[0]) % self.GW, self.pcy + d[1]
+                    room = min(abs(g["cx"] - nx) + abs(g["cy"] - ny)
+                               for g in threats)
+                    # Prefer keeping options open, and take a dot only when
+                    # it costs nothing.
+                    return (room, exits(nx, ny), (nx, ny) in self.dots)
+                self.pnext = max(opts, key=safety)
+                return
         pel, dot = best.get("pellet"), best.get("dot")
-        detour = 14 if nearest_ghost <= 6 else 7
+        # Detour for a pellet when the coast is clear. Under pressure take
+        # it only if it is essentially on the way -- crossing the board for
+        # a pellet with something on your tail is how runs used to end.
+        detour = 3 if nearest_ghost <= 5 else 10
         if pel and (not dot or pel[0] <= dot[0] + detour):
             self.pnext = pel[1]
         else:
@@ -5201,6 +5342,13 @@ class ChaseEngine:
         if self.mode_t >= self.PHASES[self.mode_i % len(self.PHASES)][0]:
             self.mode_t = 0
             self.mode_i += 1
+            # Every chaser turns around the instant the wave flips. This is
+            # a signature rule of the original and it is what telegraphs the
+            # switch to the player: the pack visibly breaking off is the cue
+            # that a scatter has started, and vice versa.
+            for g in self.ghosts:
+                if not g["eaten"] and g["fright"] <= 0:
+                    g["dir"] = (-g["dir"][0], -g["dir"][1])
 
     def _mode(self):
         return self.PHASES[self.mode_i % len(self.PHASES)][1]
@@ -5213,6 +5361,11 @@ class ChaseEngine:
             self.pcy += self.pdir[1]
             self.pdir = self.pnext
             self.pt = 1.0 - self.pt
+            # Reversing carries you into a new tile, so it has to eat what
+            # is there. Without this, doubling back over a dot silently
+            # skipped it -- the tile was entered but never consumed, and
+            # the board could never be cleared from that square.
+            self._eat()
 
         if self.pt == 0.0:
             if self.pnext and self._legal(self.pcx, self.pcy, self.pnext):
@@ -5251,6 +5404,8 @@ class ChaseEngine:
 
     def _target(self, g):
         pcell = (self.pcx, self.pcy)
+        if g["eaten"]:
+            return self.HOUSE                # eyes navigate straight home
         if g["fright"] > 0:
             return None                      # frightened chasers wander
         if self._mode() == "scatter":
@@ -5274,12 +5429,28 @@ class ChaseEngine:
                 continue
             if g["fright"] > 0:
                 g["fright"] -= 1
-            speed = self.FRIGHT_SPEED if g["fright"] > 0 else self.GHOST_SPEED
+            if g["eaten"]:
+                speed = self.EYES_SPEED          # eyes hurry home
+            elif g["fright"] > 0:
+                speed = self.FRIGHT_SPEED
+            else:
+                speed = self.GHOST_SPEED
+                if g["cy"] == self.TUNNEL_ROW:
+                    # Chasers drag through the side tunnel; the player does
+                    # not. That asymmetry is what makes the tunnel a genuine
+                    # escape route rather than just another corridor.
+                    speed *= 0.55
             g["t"] += speed
             while g["t"] >= 1.0:
                 g["t"] -= 1.0
                 g["cx"] = (g["cx"] + g["dir"][0]) % self.GW
                 g["cy"] += g["dir"][1]
+                if g["eaten"] and (g["cx"], g["cy"]) == self.HOUSE:
+                    g["eaten"] = 0               # reassembled; wait to re-enter
+                    g["release"] = 25
+                    g["dir"] = (0, -1)
+                    g["t"] = 0.0
+                    break
                 g["dir"] = self._choose_dir(g)
 
     def _choose_dir(self, g):
@@ -5300,13 +5471,17 @@ class ChaseEngine:
         for g in self.ghosts:
             if g["release"] > 0:
                 continue
+            if g["eaten"]:
+                continue                        # a pair of eyes is harmless
             if g["cx"] == self.pcx and g["cy"] == self.pcy:
                 if g["fright"] > 0:
                     self.combo += 1
-                    self.score += 200 * self.combo
-                    g["cx"], g["cy"] = self.HOUSE
+                    # 200/400/800/1600 across one pellet, as in the original:
+                    # the reward for chaining doubles rather than adding, which
+                    # is what makes clearing all four worth the risk.
+                    self.score += 200 * (2 ** (self.combo - 1))
                     g["fright"] = 0
-                    g["release"] = 40
+                    g["eaten"] = 1              # send the eyes home, don't teleport
                     g["t"] = 0.0
                 else:
                     self.lives -= 1
@@ -5350,12 +5525,19 @@ class ChaseEngine:
         # the room you cannot tell which one is you. Shape carries the
         # meaning here; colour only says *which* ghost.
         for g in self.ghosts:
+            gx, gy = self._px(g["cx"], g["cy"], g["dir"], g["t"])
+            if g["eaten"]:
+                # Just a pair of eyes hurrying home. Drawing the body here
+                # would read as a live chaser and send you running from
+                # something that cannot hurt you.
+                put_px(buf, gx - 1, gy, self.EYE)
+                put_px(buf, gx + 1, gy, self.EYE)
+                continue
             if g["fright"] > 0:
                 ending = g["fright"] < 40 and (g["fright"] // 4) % 2 == 0
                 col = self.FRIGHT_END if ending else self.FRIGHT
             else:
                 col = self.GHOST_COLS[g["kind"]]
-            gx, gy = self._px(g["cx"], g["cy"], g["dir"], g["t"])
             for dx in (-1, 0, 1):
                 put_px(buf, gx + dx, gy - 1, col)      # dome
                 put_px(buf, gx + dx, gy, col)          # body

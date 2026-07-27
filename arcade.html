@@ -103,6 +103,10 @@
     <button data-mode="dodge">▶ Dodge</button>
     <button data-mode="2048">▶ 2048</button>
     <button data-mode="life">▶ Life</button>
+    <button data-mode="brawler">▶ Brawler</button>
+    <button data-mode="chase">▶ Chase</button>
+    <button data-mode="tunnel">▶ Tunnel</button>
+    <button data-mode="powder">▶ Powder</button>
     <button data-mode="snake-demo">🤖 Snake auto</button>
     <button data-mode="tetris-demo">🤖 Tetris auto</button>
     <button data-mode="pong-demo">🤖 Pong auto</button>
@@ -113,6 +117,10 @@
     <button data-mode="dodge-demo">🤖 Dodge auto</button>
     <button data-mode="2048-demo">🤖 2048 auto</button>
     <button data-mode="life-demo">🤖 Life auto</button>
+    <button data-mode="brawler-demo">🤖 Brawler auto</button>
+    <button data-mode="chase-demo">🤖 Chase auto</button>
+    <button data-mode="tunnel-demo">🤖 Tunnel auto</button>
+    <button data-mode="powder-demo">🤖 Powder auto</button>
     <button data-mode="mirror">🖥 Mirror</button>
     <button data-mode="video">🎬 Video</button>
     <button data-mode="cast">📱 Cast</button>
@@ -372,11 +380,47 @@ document.querySelectorAll('[data-mode]').forEach(b =>
 document.querySelectorAll('[data-in]').forEach(b =>
   b.addEventListener('click', () => sendInput(b.dataset.in)));
 
+// 'hold' had no key at all, so Tetris's hold slot and Powder's material
+// selector were unreachable from a keyboard.
 const KEYS = {ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',
               w:'up',s:'down',a:'left',d:'right',' ':'drop',
-              Enter:'rotate', e:'rotate', q:'rotate'};
+              Enter:'rotate', e:'rotate', q:'rotate',
+              h:'hold', f:'hold', Shift:'hold'};
 const PLAYABLE = new Set(['snake','tetris','pong','breakout','tron','flappy',
-                          'invaders','dodge','2048','life']);
+                          'invaders','dodge','2048','life',
+                          'brawler','chase','tunnel','powder']);
+/* Powder is genuinely pointer-driven, so on the desktop dashboard you draw
+   straight onto the preview canvas: it is already a 1:1 map of the panel,
+   which makes it the honest place to aim. Sends the same /api/pointer the
+   phone touchpad uses, so both surfaces drive one code path. */
+(function () {
+  const cv = $('c');
+  if (!cv) return;
+  let drawing = false;
+  const send = (ev, down) => {
+    const r = cv.getBoundingClientRect();
+    if (!r.width || !r.height) return;   // not laid out yet: no divide by zero
+    const fx = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width));
+    const fy = Math.max(0, Math.min(1, (ev.clientY - r.top) / r.height));
+    fetch('/api/pointer', {method:'POST', headers:{'Content-Type':'application/json'},
+                           body: JSON.stringify({fx, fy, down})});
+  };
+  const active = () => (curMode || '').split('-')[0] === 'powder'
+                       && curMode && !curMode.endsWith('-demo');
+  cv.addEventListener('pointerdown', ev => {
+    if (!active()) return;
+    ev.preventDefault(); drawing = true;
+    send(ev, true);                      // draw first: capture is an optimisation,
+    try { cv.setPointerCapture(ev.pointerId); } catch (_) {}
+  });                                    // and it throws if the pointer has gone
+  cv.addEventListener('pointermove', ev => { if (drawing) send(ev, true); });
+  ['pointerup','pointercancel'].forEach(t => cv.addEventListener(t, ev => {
+    if (!drawing) return;
+    drawing = false; send(ev, false);
+  }));
+  cv.style.cursor = 'crosshair';
+})();
+
 addEventListener('keydown', e => {
   let c = KEYS[e.key];
   // Tetris-style rotate also on ArrowUp when not using WASD up for movement games —
