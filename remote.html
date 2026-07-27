@@ -450,9 +450,23 @@ async function takeOverDemo(){
     await setMode(curBase);
   }
 }
+// A press has to await the demo-takeover before it can fire, but a release
+// fires immediately -- so a fast tap could deliver release BEFORE press and
+// leave that button held down on the panel with no way to lift it (on a
+// d-pad, walking into a wall forever). Each command therefore keeps its
+// pending press, and release waits for it, so the pair can never invert.
+const pendingPress = {};
 async function sendInput(cmd){ await takeOverDemo(); return rawInput(cmd); }
-async function sendPress(cmd){ await takeOverDemo(); return rawPress(cmd); }
-function sendRelease(cmd){ return rawRelease(cmd); }
+function sendPress(cmd){
+  const p = (async () => { await takeOverDemo(); return rawPress(cmd); })();
+  pendingPress[cmd] = p;
+  return p;
+}
+async function sendRelease(cmd){
+  const p = pendingPress[cmd];
+  if (p){ delete pendingPress[cmd]; try { await p; } catch (_) {} }
+  return rawRelease(cmd);
+}
 function buzz(pattern){ if (navigator.vibrate) navigator.vibrate(pattern); }
 
 // Real digital-button state, the way an actual controller works -- the
@@ -462,6 +476,8 @@ function buzz(pattern){ if (navigator.vibrate) navigator.vibrate(pattern); }
 // for the native games too: a repeat interval is still fired alongside it
 // so their existing tap-driven behaviour is untouched.
 function bindHold(el, cmd, repeatMs, heavy){
+  el.dataset.cmd = cmd;          // lets the keyboard light up the same control
+  el.dataset.repeat = repeatMs || '';
   let timer = null;
   const down = () => { buzz(heavy ? 14 : 7); sendPress(cmd); el.classList.add('pressed'); };
   const up = () => {
@@ -493,6 +509,7 @@ function buildJoypad(zone){
     const d = document.createElement('div');
     d.className = 'dseg ' + cls;
     d.textContent = glyph;
+    d.dataset.cmd = cls;          // keyboard highlights the matching arm
     shell.appendChild(d);
     segs[cls] = d;
   }
@@ -721,6 +738,72 @@ function buildControls(base, scheme, demo){
   buildDpad(scheme);
   buildActions(scheme);
 }
+
+/* ------------------------------------------------------------- keyboard
+   This page is the controller, so a keyboard attached to it should BE a
+   controller -- not a second, weaker input path. Keys therefore run through
+   exactly the same sendPress/sendRelease pipeline the buttons use, including
+   the demo-takeover and the hold-repeat, and they light up the matching
+   on-screen control so the panel and this page never disagree about what is
+   currently held.
+
+   Scoped to this page by definition: it is a page listener, so it only ever
+   applies while this tab is open, and it stays out of the way of the FX
+   drawer's own fields. */
+const KEYMAP = {
+  ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', ArrowRight:'right',
+  w:'up', s:'down', a:'left', d:'right',
+  W:'up', S:'down', A:'left', D:'right',
+  ' ':'rotate', Enter:'rotate', e:'rotate', q:'rotate', z:'rotate', E:'rotate', Q:'rotate', Z:'rotate',
+  Shift:'drop', x:'drop', X:'drop',
+  h:'hold', f:'hold', c:'hold', H:'hold', F:'hold', C:'hold',
+};
+const REPEATABLE = {up:1, down:1, left:1, right:1};
+const keyTimers = {};
+
+function keyControl(cmd){
+  return document.querySelector('[data-cmd="' + cmd + '"]');
+}
+
+addEventListener('keydown', (ev) => {
+  const t = ev.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return;
+  if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  const cmd = KEYMAP[ev.key];
+  if (!cmd) return;
+  ev.preventDefault();
+  if (ev.repeat) return;                    // OS auto-repeat would re-fire press
+  if (keyTimers[cmd]) return;               // already held
+  const el = keyControl(cmd);
+  if (el) el.classList.add('pressed');
+  buzz(7);
+  sendPress(cmd);
+  // Mirror the touch d-pad's repeat so a held key steers at the same rate.
+  keyTimers[cmd] = REPEATABLE[cmd] ? setInterval(() => sendInput(cmd), 130) : true;
+});
+
+addEventListener('keyup', (ev) => {
+  const cmd = KEYMAP[ev.key];
+  if (!cmd || !keyTimers[cmd]) return;
+  ev.preventDefault();
+  if (keyTimers[cmd] !== true) clearInterval(keyTimers[cmd]);
+  delete keyTimers[cmd];
+  const el = keyControl(cmd);
+  if (el) el.classList.remove('pressed');
+  sendRelease(cmd);
+});
+
+// A key held while the tab loses focus would otherwise stay stuck down on
+// the panel forever, since no keyup ever arrives.
+addEventListener('blur', () => {
+  for (const cmd of Object.keys(keyTimers)){
+    if (keyTimers[cmd] !== true) clearInterval(keyTimers[cmd]);
+    delete keyTimers[cmd];
+    const el = keyControl(cmd);
+    if (el) el.classList.remove('pressed');
+    sendRelease(cmd);
+  }
+});
 
 // ------------------------------------------------------------- home / power
 $('home-btn').addEventListener('click', () => { buzz(12); setMode('menu'); });
