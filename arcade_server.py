@@ -38,6 +38,7 @@ import engines
 from engines import ENGINES, WIDTH, HEIGHT, TicCartEngine, CARTS_DIR
 from display import get_renderer
 import backgrounds
+import market
 
 PORT = 7333
 HERE = Path(__file__).parent
@@ -821,6 +822,10 @@ class Handler(BaseHTTPRequestHandler):
             s["rgb"] = base64.b64encode(s.pop("frame")).decode()
             s["w"], s["h"] = WIDTH, HEIGHT
             self._json(s)
+        elif path == "/api/ticker/symbols":
+            crypto, stocks = market.FEED.get_symbols()
+            self._json({"crypto": crypto, "stocks": stocks,
+                        "known_crypto": sorted(market.SYMBOL_TO_COINGECKO_ID)})
         elif path == "/api/frame":                    # legacy shape
             s = ARCADE.snapshot()
             self._json({"w": WIDTH, "h": HEIGHT, "mode": s["mode"],
@@ -908,6 +913,22 @@ class Handler(BaseHTTPRequestHandler):
         elif len(parts) == 3 and parts[:2] == ["api", "release"]:
             ARCADE.send_release(parts[2])
             self._json({"ok": True})
+        elif parsed.path == "/api/ticker/symbols":
+            # Config-driven watchlist: the production device needs per-owner
+            # symbols, and there is no reason a Mac install should need a
+            # code edit either. Rejects are reported back rather than
+            # silently dropped, so a typo doesn't just vanish.
+            try:
+                j = json.loads(body or b"{}")
+                accepted, rejected = market.FEED.set_symbols(
+                    j.get("crypto", []), j.get("stocks", []))
+                resp = {"ok": True, "crypto": accepted, "stocks": j.get("stocks", [])}
+                if rejected:
+                    resp["rejected"] = rejected
+                    resp["note"] = "unrecognized crypto symbol(s), not added: " + ", ".join(rejected)
+                self._json(resp)
+            except (ValueError, AttributeError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/pause" or (
                 len(parts) == 3 and parts[:2] == ["api", "pause"]):
             arg = parts[2] if len(parts) == 3 else ""

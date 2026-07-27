@@ -16,18 +16,40 @@ Two rules this module exists to enforce:
      good values and mark them stale, so the panel can say so honestly
      rather than quietly showing a price that stopped being true an hour
      ago. A wrong price shown confidently is worse than no price.
+
+Symbols are config-driven, not hardcoded -- the production device needs
+per-owner watchlists, and a single Mac install shouldn't need a code edit
+to swap AAPL for something else either. See CONFIG_PATH.
 """
 import json
 import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
-# (display symbol, coingecko id)
-CRYPTO = [("BTC", "bitcoin"), ("ETH", "ethereum"), ("SOL", "solana")]
-STOCKS = ["AAPL", "NVDA", "TSLA"]
+CONFIG_PATH = Path(__file__).parent / "market_config.json"
+
+DEFAULT_CRYPTO = ["BTC", "ETH", "SOL"]
+DEFAULT_STOCKS = ["AAPL", "NVDA", "TSLA"]
+
+# Config lists plain ticker symbols (BTC, not "bitcoin") because that's what
+# an owner actually types -- this is the map that turns one into the other.
+# Covers the coins someone is likely to actually type in; an unrecognized
+# symbol is dropped with a clear reason rather than silently ignored (see
+# MarketFeed.set_symbols), not the end of a search feature this doesn't need.
+SYMBOL_TO_COINGECKO_ID = {
+    "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "XRP": "ripple",
+    "DOGE": "dogecoin", "ADA": "cardano", "AVAX": "avalanche-2",
+    "LINK": "chainlink", "DOT": "polkadot", "MATIC": "matic-network",
+    "LTC": "litecoin", "BCH": "bitcoin-cash", "SHIB": "shiba-inu",
+    "UNI": "uniswap", "ATOM": "cosmos", "XLM": "stellar", "ETC": "ethereum-classic",
+    "FIL": "filecoin", "APT": "aptos", "ARB": "arbitrum", "OP": "optimism",
+    "NEAR": "near", "ICP": "internet-computer", "SUI": "sui", "TON": "the-open-network",
+}
 
 REFRESH = 60.0          # seconds between refreshes
+CONFIG_CHECK = 10.0     # seconds between checking whether the config changed
 IDLE_STOP = 120.0       # stop polling if nobody has read for this long
 TIMEOUT = 8.0
 _UA = "Mozilla/5.0 (HenderburghArcade)"
@@ -39,13 +61,39 @@ def _get_json(url):
         return json.load(r)
 
 
-def _fetch_crypto():
-    ids = ",".join(cid for _, cid in CRYPTO)
+def load_config():
+    """Read market_config.json, seeding it with sane defaults on first run
+    so there's always a real, editable file on disk -- an owner (or the
+    production device's setup flow) should never need to hand-construct
+    this from nothing."""
+    if CONFIG_PATH.exists():
+        try:
+            data = json.loads(CONFIG_PATH.read_text())
+            crypto = [str(s).upper() for s in data.get("crypto", DEFAULT_CRYPTO)]
+            stocks = [str(s).upper() for s in data.get("stocks", DEFAULT_STOCKS)]
+            if crypto or stocks:
+                return crypto, stocks
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+            pass          # fall through to defaults; never crash the feed over a bad file
+    save_config(DEFAULT_CRYPTO, DEFAULT_STOCKS)
+    return list(DEFAULT_CRYPTO), list(DEFAULT_STOCKS)
+
+
+def save_config(crypto, stocks):
+    CONFIG_PATH.write_text(json.dumps(
+        {"crypto": list(crypto), "stocks": list(stocks)}, indent=2))
+
+
+def _fetch_crypto(symbols):
+    pairs = [(s, SYMBOL_TO_COINGECKO_ID[s]) for s in symbols if s in SYMBOL_TO_COINGECKO_ID]
+    if not pairs:
+        return []
+    ids = ",".join(cid for _, cid in pairs)
     url = ("https://api.coingecko.com/api/v3/simple/price"
            f"?ids={ids}&vs_currencies=usd&include_24hr_change=true")
     data = _get_json(url)
     out = []
-    for sym, cid in CRYPTO:
+    for sym, cid in pairs:
         row = data.get(cid)
         if not row or row.get("usd") is None:
             continue
@@ -55,9 +103,9 @@ def _fetch_crypto():
     return out
 
 
-def _fetch_stocks():
+def _fetch_stocks(symbols):
     out = []
-    for sym in STOCKS:
+    for sym in symbols:
         try:
             url = ("https://query1.finance.yahoo.com/v8/finance/chart/"
                    f"{sym}?range=1d&interval=1d")
@@ -89,8 +137,10 @@ class MarketFeed:
         self._updated = 0.0        # when we last got real data
         self._last_try = 0.0
         self._last_read = 0.0
+        self._last_config_check = 0.0
         self._thread = None
         self._err = None
+        self.crypto, self.stocks = load_config()
 
     # ---- reading (called from the render loop; must never block) --------
     def get(self):
@@ -108,6 +158,25 @@ class MarketFeed:
         age = (now - updated) if updated else None
         return rows, age, err
 
+    def get_symbols(self):
+        with self._lock:
+            return list(self.crypto), list(self.stocks)
+
+    def set_symbols(self, crypto, stocks):
+        """Update the watchlist and force an immediate refresh. Returns
+        (accepted_crypto, rejected_crypto) so a caller (e.g. an HTTP
+        endpoint) can tell an owner "TESLA isn't a coin" instead of the
+        symbol just silently never appearing."""
+        crypto = [str(s).strip().upper() for s in crypto if str(s).strip()]
+        stocks = [str(s).strip().upper() for s in stocks if str(s).strip()]
+        accepted = [s for s in crypto if s in SYMBOL_TO_COINGECKO_ID]
+        rejected = [s for s in crypto if s not in SYMBOL_TO_COINGECKO_ID]
+        with self._lock:
+            self.crypto, self.stocks = accepted, stocks
+            self._last_try = 0.0       # let the next loop tick refresh immediately
+        save_config(accepted, stocks)
+        return accepted, rejected
+
     # ---- polling -------------------------------------------------------
     def _ensure_thread(self):
         with self._lock:
@@ -122,8 +191,22 @@ class MarketFeed:
                 idle = time.time() - self._last_read
             if idle > IDLE_STOP:
                 return                     # nobody is watching; stand down
+            self._maybe_reload_config()
             self._refresh_once()
             time.sleep(2.0)
+
+    def _maybe_reload_config(self):
+        # Picks up hand-edits to market_config.json (or a future setup-page
+        # write) without needing a service restart.
+        now = time.time()
+        if now - self._last_config_check < CONFIG_CHECK:
+            return
+        self._last_config_check = now
+        crypto, stocks = load_config()
+        with self._lock:
+            if crypto != self.crypto or stocks != self.stocks:
+                self.crypto, self.stocks = crypto, stocks
+                self._last_try = 0.0
 
     def _refresh_once(self):
         now = time.time()
@@ -131,13 +214,14 @@ class MarketFeed:
             if now - self._last_try < REFRESH:
                 return
             self._last_try = now
+            crypto, stocks = list(self.crypto), list(self.stocks)
         rows, err = [], None
         try:
-            rows += _fetch_crypto()
+            rows += _fetch_crypto(crypto)
         except Exception as e:                     # noqa: BLE001 - never die
             err = f"{type(e).__name__}"
         try:
-            rows += _fetch_stocks()
+            rows += _fetch_stocks(stocks)
         except Exception as e:                     # noqa: BLE001
             err = err or f"{type(e).__name__}"
         with self._lock:
