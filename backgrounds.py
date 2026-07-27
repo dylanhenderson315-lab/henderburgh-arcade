@@ -907,11 +907,30 @@ def capture_effect_loop(
     sk = _cache_key_speed(speed)
 
     if not _capture_lock.acquire(blocking=False):
-        # another capture in progress — wait for it if same fx ends up cached
+        # Another capture is in progress, and it may have been for a
+        # DIFFERENT effect than the one we were asked for -- waiting for it
+        # to finish and then checking the cache for OUR fx can be a genuine
+        # miss, not just a race we lost. Give up only after actually trying
+        # for ourselves once the other capture is out of the way; a bare
+        # cache-check-and-quit here would silently drop a real request
+        # (currently unreachable in practice since the one caller in this
+        # codebase already serializes its own capture calls, but this
+        # function has an unused async entry point clearly meant to be
+        # wired up later, and that will make this path live).
         with _capture_lock:
             pass
         cached = get_cached_loop(fx, speed)
-        return list(cached) if cached else []
+        if cached:
+            return list(cached)
+        if not _capture_lock.acquire(blocking=False):
+            # Something else grabbed it again immediately -- wait once more,
+            # then report honestly rather than spin forever.
+            with _capture_lock:
+                pass
+            cached = get_cached_loop(fx, speed)
+            return list(cached) if cached else []
+        # Lock is ours now: fall through and actually do the capture below
+        # instead of returning empty-handed.
 
     try:
         _capturing = True
