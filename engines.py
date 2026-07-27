@@ -20,6 +20,7 @@ import random
 from collections import deque
 from pathlib import Path
 
+import market
 import tic80_core
 
 WIDTH = 64
@@ -134,6 +135,20 @@ _FONT3x5 = {
     "Y": ("101", "101", "010", "010", "010"),
     "Z": ("111", "001", "010", "100", "111"),
     " ": ("000", "000", "000", "000", "000"),
+    # Punctuation. draw_text3x5 silently SKIPS any glyph it does not know, so
+    # a missing "." did not error -- it quietly dropped the decimal point and
+    # rendered 75.84 as "75 84", which reads as 7584. Numeric modes need these.
+    ".": ("000", "000", "000", "000", "010"),
+    ",": ("000", "000", "000", "010", "100"),
+    ":": ("000", "010", "000", "010", "000"),
+    "+": ("000", "010", "111", "010", "000"),
+    "-": ("000", "000", "111", "000", "000"),
+    "/": ("001", "001", "010", "100", "100"),
+    "%": ("101", "001", "010", "100", "101"),
+    "$": ("011", "110", "010", "011", "110"),
+    "!": ("010", "010", "010", "000", "010"),
+    "?": ("110", "001", "010", "000", "010"),
+    "'": ("010", "010", "000", "000", "000"),
 }
 
 
@@ -3768,6 +3783,187 @@ class Game2048Engine:
 # a bright flourish before it cuts to the menu. Any input skips straight
 # there, so it never gets in the way of someone who's already seen it.
 # =============================================================================
+class TickerEngine:
+    """Stock + crypto ticker.
+
+    The first non-game mode, and deliberately built to prove the shared
+    contract holds for data modes too: this class does no I/O at all. It
+    reads whatever market.FEED has already cached on its own thread and
+    renders it, so a slow or dead network can never stall the render loop --
+    which on the WLED panel would mean dropped frames, and on a Pi would
+    mean a visibly stuttering panel.
+
+    Layout is a spotlight over a scrolling tape: the spotlight is what makes
+    it readable from across a room (one symbol, big), the tape is what makes
+    it feel like a ticker. On a 32x32 production panel the spotlight alone
+    still works, which is the sizing rule from PRODUCTION.md -- smaller
+    panels show less at once, never fewer features.
+    """
+
+    name = "ticker"
+    tick_rate = 0.05
+
+    BG = (0, 0, 0)
+    INK = (150, 160, 185)
+    INK_DIM = (70, 76, 92)
+    UP = (60, 230, 110)
+    DOWN = (255, 70, 80)
+    FLAT = (170, 178, 200)
+    STALE = (255, 170, 40)
+
+    SPOTLIGHT_TICKS = 90          # ~4.5s per symbol at this tick rate
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.rows = []
+        self.age = None
+        self.err = None
+        self.cur = 0
+        self.hold = 0
+        self.scroll = 0.0
+        self.cycling = True
+        self.ticks = 0
+
+    # ---- input ---------------------------------------------------------
+    def input(self, cmd):
+        if not self.rows:
+            return
+        if cmd == "left":
+            self.cur = (self.cur - 1) % len(self.rows)
+            self.hold = 0
+        elif cmd == "right":
+            self.cur = (self.cur + 1) % len(self.rows)
+            self.hold = 0
+        elif cmd in ("rotate", "drop"):
+            self.cycling = not self.cycling      # park on one symbol
+
+    def auto(self):
+        pass          # already self-cycling; ambient and manual look the same
+
+    # ---- simulation ----------------------------------------------------
+    def tick(self):
+        self.ticks += 1
+        self.rows, self.age, self.err = market.FEED.get()
+        if self.rows:
+            self.cur %= len(self.rows)
+        self.scroll += 0.5
+        if self.cycling and self.rows:
+            self.hold += 1
+            if self.hold >= self.SPOTLIGHT_TICKS:
+                self.hold = 0
+                self.cur = (self.cur + 1) % len(self.rows)
+
+    # ---- render --------------------------------------------------------
+    @staticmethod
+    def _fmt_price(v):
+        # Keep it short enough to fit: precision matters least where the
+        # number is biggest.
+        if v >= 10000:
+            return f"{v:,.0f}".replace(",", "")
+        if v >= 1000:
+            return f"{v:.0f}"
+        if v >= 1:
+            return f"{v:.2f}"
+        return f"{v:.4f}"
+
+    def _tint(self, pct):
+        if pct > 0.05:
+            return self.UP
+        if pct < -0.05:
+            return self.DOWN
+        return self.FLAT
+
+    def frame(self):
+        buf = blank()
+        fill(buf, self.BG)
+
+        if not self.rows:
+            msg = "NO DATA" if self.err else "LOADING"
+            tw = 4 * len(msg) - 1
+            draw_text3x5(buf, (WIDTH - tw) // 2, 28, msg,
+                         self.DOWN if self.err else self.INK_DIM)
+            dots = "." * (1 + (self.ticks // 12) % 3)
+            draw_text3x5(buf, (WIDTH - 11) // 2, 38, dots, self.INK_DIM)
+            return bytes(buf)
+
+        row = self.rows[self.cur]
+        col = self._tint(row["pct"])
+
+        # --- spotlight ---
+        sym = row["sym"][:4]
+        draw_text3x5(buf, (WIDTH - (8 * len(sym) - 2)) // 2, 6, sym, col, scale=2)
+
+        price = self._fmt_price(row["price"])
+        draw_text3x5(buf, (WIDTH - (4 * len(price) - 1)) // 2, 24, price, self.INK)
+
+        pct = row["pct"]
+        chg = f"{abs(pct):.2f}%"
+        arrow_w = 7          # triangle is 5px wide; leave a clear gap after it
+        tw = 4 * len(chg) - 1 + arrow_w
+        ax = (WIDTH - tw) // 2
+        # A triangle, not just a +/- sign: direction should survive being
+        # glanced at from across the room even if the digits do not.
+        # Row i widens downward, so a gain puts the apex at the TOP and a loss
+        # puts it at the BOTTOM. Getting this backwards is silent and worse
+        # than useless: colour and arrow would disagree, and the arrow is the
+        # half that still reads from across the room.
+        if pct > 0.05:                                   # gain: apex on top
+            for i in range(3):
+                for x in range(-i, i + 1):
+                    put_px(buf, ax + 2 + x, 33 + i, col)
+        elif pct < -0.05:                                # loss: apex on bottom
+            for i in range(3):
+                w = 2 - i
+                for x in range(-w, w + 1):
+                    put_px(buf, ax + 2 + x, 33 + i, col)
+        else:
+            for x in range(5):
+                put_px(buf, ax + x, 34, col)
+        draw_text3x5(buf, ax + arrow_w, 32, chg, col)
+
+        # --- divider ---
+        for x in range(4, WIDTH - 4):
+            put_px(buf, x, 43, (30, 34, 44))
+
+        # --- scrolling tape ---
+        parts = []
+        for r in self.rows:
+            sign = "+" if r["pct"] >= 0 else "-"
+            parts.append(f"{r['sym']} {self._fmt_price(r['price'])} "
+                         f"{sign}{abs(r['pct']):.1f}%")
+        tape = "   ".join(parts) + "   "
+        tape_w = 4 * len(tape)
+        if tape_w:
+            off = int(self.scroll) % tape_w
+            x = -off
+            for ch in tape:
+                if x > WIDTH:
+                    break
+                if x > -4:
+                    draw_text3x5(buf, x, 49, ch, self.INK_DIM)
+                x += 4
+            x = -off + tape_w                    # second copy for a seamless wrap
+            for ch in tape:
+                if x > WIDTH:
+                    break
+                if x > -4:
+                    draw_text3x5(buf, x, 49, ch, self.INK_DIM)
+                x += 4
+
+        # --- honesty indicator ---
+        # Prices that stopped updating must never look live. A dot beats a
+        # word here: it costs 1px and never crowds the numbers.
+        if self.age is not None and self.age > 180:
+            put_px(buf, WIDTH - 3, 2, self.STALE)
+            put_px(buf, WIDTH - 2, 2, self.STALE)
+            put_px(buf, WIDTH - 3, 3, self.STALE)
+            put_px(buf, WIDTH - 2, 3, self.STALE)
+        return bytes(buf)
+
+
 class BootEngine:
     name = "boot"
     tick_rate = 0.045
@@ -3927,6 +4123,7 @@ class MenuEngine:
         ("chase",    "CHASE",    (255, 226, 60)),
         ("tunnel",   "TUNNEL",   (120, 110, 255)),
         ("powder",   "POWDER",   (230, 190, 90)),
+        ("ticker",   "TICKER",   (60, 230, 110)),
     ]
 
     def __init__(self):
@@ -4124,6 +4321,14 @@ class MenuEngine:
                 put_px(buf, x0 + 5, y0 + yy, w)
             for i, wd in enumerate((2, 4, 6, 8)):
                 block((10 - wd) // 2, 6 + i, wd, 1, c)
+        elif gid == "ticker":
+            # A rising bar chart -- reads as "markets" instantly, and the
+            # shape survives at icon size where a "$" glyph would not.
+            for bx, bh in ((1, 3), (4, 5), (7, 8)):
+                for dy in range(bh):
+                    block(bx, 9 - dy, 2, 1, c)
+            put_px(buf, x0 + 8, y0 + 0, w)
+            put_px(buf, x0 + 7, y0 + 1, w)
         elif gid.startswith("tic:"):
             # Generic cartridge glyph -- a cart's own art lives inside the
             # emulator, not on the menu tile, so every dropped-in .tic gets
@@ -5875,6 +6080,7 @@ ENGINES = {
     "powder": PowderEngine,
     "brawler": BrawlerEngine,
     "chase": ChaseEngine,
+    "ticker": TickerEngine,
     "menu": MenuEngine,
     "boot": BootEngine,
 }

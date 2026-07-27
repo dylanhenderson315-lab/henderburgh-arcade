@@ -367,6 +367,10 @@ const GAMES = {
   chase:    {name:'CHASE',     color:'#e8c23a', dpad:true},
   tunnel:   {name:'TUNNEL',    color:'#5a5ae0', axis:'horizontal',
     actions:[{cmd:'rotate',label:'BOOST',glyph:'⚡'}]},
+  // Not a game: LEFT/RIGHT step through symbols, the face button parks the
+  // spotlight on one instead of letting it cycle.
+  ticker:   {name:'TICKER',    color:'#3aa855', axis:'horizontal',
+    actions:[{cmd:'rotate',label:'HOLD',glyph:'⏸'}]},
   powder:   {name:'POWDER',    color:'#e89a2a', pointer:true,
     actions:[{cmd:'rotate',label:'ERASE',glyph:'⌫'},
              {cmd:'hold',label:'MATERIAL',glyph:'◆'},

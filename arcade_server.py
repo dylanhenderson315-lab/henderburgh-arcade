@@ -36,7 +36,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 import engines
 from engines import ENGINES, WIDTH, HEIGHT, TicCartEngine, CARTS_DIR
-from wled_ddp import WledDDP
+from display import get_renderer
 import backgrounds
 
 PORT = 7333
@@ -67,7 +67,7 @@ VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".gif"}
 class Arcade:
     def __init__(self):
         self.lock = threading.Lock()
-        self.panel = WledDDP()
+        self.panel = get_renderer()
         self.engine = ENGINES["snake"]()
         self.mode = DEFAULT_MODE
         self.last_game = RESUME_GAME
