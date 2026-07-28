@@ -21,6 +21,7 @@ from collections import deque
 from pathlib import Path
 
 import market
+import satellite
 import tic80_core
 
 WIDTH = 64
@@ -3964,6 +3965,193 @@ class TickerEngine:
         return bytes(buf)
 
 
+class SatelliteEngine:
+    """ISS tracker.
+
+    Same discipline as TickerEngine: no I/O in this class at all. It reads
+    whatever satellite.FEED has already cached on its own thread, so a slow
+    pass-prediction API can never stall the render loop.
+
+    Two views, because "next pass" and "right now" are both worth 4+ seconds
+    of someone's attention but don't fit as one glanceable read: PASS is the
+    hero view (PRODUCTION.md frames this whole feature as an "ISS countdown"),
+    LIVE is the secondary one. Auto-cycles like the ticker's spotlight;
+    left/right jumps between them manually.
+    """
+
+    name = "satellite"
+    tick_rate = 0.05
+
+    BG = (0, 0, 0)
+    INK = (150, 160, 185)
+    INK_DIM = (70, 76, 92)
+    VISIBLE = (60, 230, 110)
+    NOT_VISIBLE = (170, 178, 200)
+    STALE = (255, 170, 40)
+    ORBIT = (40, 46, 66)
+    ISS = (255, 226, 60)
+
+    VIEW_TICKS = 160          # ~8s per view at this tick rate
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.data = {"configured": False, "label": "HOME", "pos": None,
+                    "pos_age": None, "next_pass": None, "pass_age": None,
+                    "seconds_to_rise": None, "err": None}
+        self.view = 0             # 0 = PASS, 1 = LIVE
+        self.hold = 0
+        self.cycling = True
+        self.ticks = 0
+        self.orbit_phase = 0.0
+
+    # ---- input -----------------------------------------------------------
+    def input(self, cmd):
+        if cmd == "left":
+            self.view = (self.view - 1) % 2
+            self.hold = 0
+        elif cmd == "right":
+            self.view = (self.view + 1) % 2
+            self.hold = 0
+        elif cmd in ("rotate", "drop"):
+            self.cycling = not self.cycling
+
+    def auto(self):
+        pass          # already self-cycling; ambient and manual look the same
+
+    # ---- simulation --------------------------------------------------------
+    def tick(self):
+        self.ticks += 1
+        self.data = satellite.FEED.get()
+        self.orbit_phase += 0.035
+        if self.cycling:
+            self.hold += 1
+            if self.hold >= self.VIEW_TICKS:
+                self.hold = 0
+                self.view = (self.view + 1) % 2
+        self.score = int(self.data.get("pos", {}).get("alt_km", 0)) if self.data.get("pos") else 0
+
+    # ---- render --------------------------------------------------------
+    @staticmethod
+    def _fmt_countdown(secs):
+        secs = max(0, int(secs))
+        h, rem = divmod(secs, 3600)
+        m, s = divmod(rem, 60)
+        if h > 0:
+            return f"{h}H {m:02d}M"
+        if m > 0:
+            return f"{m}M {s:02d}S"
+        return f"{s}S"
+
+    def _frame_unconfigured(self, buf):
+        msg = "SET LOCATION"
+        draw_text3x5(buf, (WIDTH - (4 * len(msg) - 1)) // 2, 24, msg, self.INK)
+        sub = "TO TRACK ISS"
+        draw_text3x5(buf, (WIDTH - (4 * len(sub) - 1)) // 2, 34, sub, self.INK_DIM)
+        return bytes(buf)
+
+    def _frame_pass(self):
+        buf = blank()
+        fill(buf, self.BG)
+        nxt = self.data.get("next_pass")
+        secs = self.data.get("seconds_to_rise")
+
+        if not nxt or secs is None:
+            msg = "NO PASS DATA" if self.data.get("err") else "LOADING"
+            draw_text3x5(buf, (WIDTH - (4 * len(msg) - 1)) // 2, 28, msg, self.INK_DIM)
+            dots = "." * (1 + (self.ticks // 12) % 3)
+            draw_text3x5(buf, (WIDTH - 11) // 2, 38, dots, self.INK_DIM)
+            return bytes(buf)
+
+        visible = nxt.get("visible")
+        col = self.VISIBLE if visible else self.NOT_VISIBLE
+
+        label = "NEXT PASS"
+        draw_text3x5(buf, (WIDTH - (4 * len(label) - 1)) // 2, 4, label, self.INK_DIM)
+
+        cd = self._fmt_countdown(secs)
+        draw_text3x5(buf, (WIDTH - (8 * len(cd) - 2)) // 2, 12, cd, col, scale=2)
+
+        # "IN DAYLIGHT/SHADOW" (the fully accurate reason) doesn't fit at
+        # 64px; NOT VISIBLE keeps the honest meaning -- this pass happens,
+        # you just will not see it with your eyes -- in a width that fits.
+        tag = "VISIBLE" if visible else "NOT VISIBLE"
+        draw_text3x5(buf, (WIDTH - (4 * len(tag) - 1)) // 2, 26, tag, col)
+
+        detail = f"{nxt['compass']} {nxt['max_elev']:.0f}DEG {nxt['duration_s']}S"
+        if 4 * len(detail) - 1 > WIDTH - 4:
+            detail = f"{nxt['compass']} {nxt['max_elev']:.0f}D {nxt['duration_s']}S"
+        draw_text3x5(buf, max(2, (WIDTH - (4 * len(detail) - 1)) // 2), 36, detail, self.INK_DIM)
+
+        for x in range(4, WIDTH - 4):
+            put_px(buf, x, 44, (30, 34, 44))
+        loc = self.data.get("label", "HOME")[:10]
+        draw_text3x5(buf, (WIDTH - (4 * len(loc) - 1)) // 2, 50, loc, self.INK_DIM)
+
+        if self.data.get("pass_age") and self.data["pass_age"] > 3600 * 2:
+            put_px(buf, WIDTH - 3, 2, self.STALE)
+            put_px(buf, WIDTH - 2, 2, self.STALE)
+        return bytes(buf)
+
+    def _frame_live(self):
+        buf = blank()
+        fill(buf, self.BG)
+        pos = self.data.get("pos")
+
+        if not pos:
+            msg = "NO SIGNAL" if self.data.get("err") else "LOADING"
+            draw_text3x5(buf, (WIDTH - (4 * len(msg) - 1)) // 2, 28, msg, self.INK_DIM)
+            dots = "." * (1 + (self.ticks // 12) % 3)
+            draw_text3x5(buf, (WIDTH - 11) // 2, 38, dots, self.INK_DIM)
+            return bytes(buf)
+
+        label = "ISS LIVE"
+        draw_text3x5(buf, (WIDTH - (4 * len(label) - 1)) // 2, 3, label, self.ISS)
+
+        # A simple orbit ring with a moving marker -- not a literal map (a
+        # real ground-track projection is not something 64x64 can show
+        # meaningfully), just a glanceable "it's moving" flourish.
+        cx, cy, r = WIDTH // 2, 26, 13
+        for i in range(48):
+            a = i / 48 * 2 * math.pi
+            put_px(buf, cx + int(r * math.cos(a)), cy + int(r * 0.45 * math.sin(a)), self.ORBIT)
+        a = self.orbit_phase
+        mx = cx + int(r * math.cos(a))
+        my = cy + int(r * 0.45 * math.sin(a))
+        for dx in (-1, 0, 1):
+            put_px(buf, mx + dx, my, self.ISS)
+        put_px(buf, mx, my - 1, self.ISS)
+        put_px(buf, mx, my + 1, self.ISS)
+
+        alt = f"{pos['alt_km']:.0f}KM"
+        draw_text3x5(buf, 3, 40, alt, self.INK)
+        vel = f"{pos['vel_kmh']:.0f}KM/H"
+        if 4 * len(vel) - 1 <= WIDTH - 6:
+            draw_text3x5(buf, WIDTH - 3 - (4 * len(vel) - 1), 40, vel, self.INK_DIM)
+
+        if self.data.get("configured") and "distance_km" in pos:
+            dist = f"{pos['distance_km']:.0f}KM FROM {self.data.get('label','HOME')[:8]}"
+            if 4 * len(dist) - 1 > WIDTH - 4:
+                dist = f"{pos['distance_km']:.0f}KM AWAY"
+            draw_text3x5(buf, max(2, (WIDTH - (4 * len(dist) - 1)) // 2), 50, dist, self.INK_DIM)
+        else:
+            draw_text3x5(buf, (WIDTH - (4 * 12 - 1)) // 2, 50, "SET LOCATION", self.INK_DIM)
+
+        if self.data.get("pos_age") and self.data["pos_age"] > 120:
+            put_px(buf, WIDTH - 3, 2, self.STALE)
+            put_px(buf, WIDTH - 2, 2, self.STALE)
+        return bytes(buf)
+
+    def frame(self):
+        buf = blank()
+        fill(buf, self.BG)
+        if not self.data.get("configured"):
+            return self._frame_unconfigured(buf)
+        return self._frame_pass() if self.view == 0 else self._frame_live()
+
+
 class BootEngine:
     name = "boot"
     tick_rate = 0.045
@@ -4124,6 +4312,7 @@ class MenuEngine:
         ("tunnel",   "TUNNEL",   (120, 110, 255)),
         ("powder",   "POWDER",   (230, 190, 90)),
         ("ticker",   "TICKER",   (60, 230, 110)),
+        ("satellite", "ISS",     (255, 226, 60)),
     ]
 
     def __init__(self):
@@ -4333,6 +4522,17 @@ class MenuEngine:
                     block(bx, 9 - dy, 2, 1, c)
             put_px(buf, x0 + 8, y0 + 0, w)
             put_px(buf, x0 + 7, y0 + 1, w)
+        elif gid == "satellite":
+            # A little satellite silhouette: body + two solar panels + a
+            # signal arc. Reads as "space/tracking" at a glance, distinct
+            # from every other icon's boxy/bar-chart language.
+            block(4, 4, 2, 2, c)
+            block(1, 4, 2, 1, dim and c or tuple(v * 2 // 3 for v in color))
+            block(7, 4, 2, 1, dim and c or tuple(v * 2 // 3 for v in color))
+            put_px(buf, x0 + 6, y0 + 2, w)
+            put_px(buf, x0 + 2, y0 + 7, c)
+            put_px(buf, x0 + 3, y0 + 6, c)
+            put_px(buf, x0 + 4, y0 + 5, w)
         elif gid.startswith("tic:"):
             # Generic cartridge glyph -- a cart's own art lives inside the
             # emulator, not on the menu tile, so every dropped-in .tic gets
@@ -6085,6 +6285,7 @@ ENGINES = {
     "brawler": BrawlerEngine,
     "chase": ChaseEngine,
     "ticker": TickerEngine,
+    "satellite": SatelliteEngine,
     "menu": MenuEngine,
     "boot": BootEngine,
 }

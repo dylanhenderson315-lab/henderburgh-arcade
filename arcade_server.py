@@ -39,6 +39,7 @@ from engines import ENGINES, WIDTH, HEIGHT, TicCartEngine, CARTS_DIR
 from display import get_renderer
 import backgrounds
 import market
+import satellite
 
 PORT = 7333
 HERE = Path(__file__).parent
@@ -826,6 +827,10 @@ class Handler(BaseHTTPRequestHandler):
             crypto, stocks = market.FEED.get_symbols()
             self._json({"crypto": crypto, "stocks": stocks,
                         "known_crypto": sorted(market.SYMBOL_TO_COINGECKO_ID)})
+        elif path == "/api/satellite/location":
+            lat, lon, label = satellite.FEED.get_location()
+            self._json({"lat": lat, "lon": lon, "label": label,
+                        "configured": satellite.FEED.configured})
         elif path == "/api/frame":                    # legacy shape
             s = ARCADE.snapshot()
             self._json({"w": WIDTH, "h": HEIGHT, "mode": s["mode"],
@@ -928,6 +933,14 @@ class Handler(BaseHTTPRequestHandler):
                     resp["note"] = "unrecognized crypto symbol(s), not added: " + ", ".join(rejected)
                 self._json(resp)
             except (ValueError, AttributeError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/satellite/location":
+            try:
+                j = json.loads(body or b"{}")
+                lat, lon, label = satellite.FEED.set_location(
+                    j["lat"], j["lon"], j.get("label", "HOME"))
+                self._json({"ok": True, "lat": lat, "lon": lon, "label": label})
+            except (ValueError, KeyError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/pause" or (
                 len(parts) == 3 and parts[:2] == ["api", "pause"]):

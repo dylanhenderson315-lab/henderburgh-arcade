@@ -369,6 +369,10 @@ const GAMES = {
     actions:[{cmd:'rotate',label:'BOOST',glyph:'⚡'}]},
   // Not a game: LEFT/RIGHT step through symbols, the face button parks the
   // spotlight on one instead of letting it cycle.
+  // LEFT/RIGHT swap between the pass-countdown and live-position views;
+  // the face button parks the auto-cycle on whichever view is up.
+  satellite: {name:'ISS',      color:'#e8c23a', axis:'horizontal',
+    actions:[{cmd:'rotate',label:'HOLD',glyph:'⏸'}]},
   ticker:   {name:'TICKER',    color:'#3aa855', axis:'horizontal',
     actions:[{cmd:'rotate',label:'HOLD',glyph:'⏸'}]},
   powder:   {name:'POWDER',    color:'#e89a2a', pointer:true,
