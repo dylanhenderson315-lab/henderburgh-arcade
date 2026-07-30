@@ -43,6 +43,7 @@ import satellite
 import sports
 import news
 import weather
+import blog
 
 PORT = 7333
 HERE = Path(__file__).parent
@@ -888,6 +889,9 @@ class Handler(BaseHTTPRequestHandler):
             # Read-only: weather has no config of its own -- it reuses the
             # ISS/flights home location via /api/satellite/location.
             self._json(weather.FEED.get())
+        elif path == "/api/blog/config":
+            self._json({"api_url": blog.FEED.get_config(),
+                        "default_api_url": blog.DEFAULT_API_URL})
         elif path == "/api/news/config":
             feed_url, label = news.FEED.get_config()
             self._json({"feed_url": feed_url, "label": label,
@@ -1027,6 +1031,15 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         self._json({"ok": True, "favorite": favorite})
             except (ValueError, KeyError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/blog/source":
+            try:
+                j = json.loads(body or b"{}")
+                if blog.FEED.set_api_url(j.get("api_url", "")):
+                    self._json({"ok": True})
+                else:
+                    self._json({"ok": False, "error": "api_url required"}, 400)
+            except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/news/source":
             try:

@@ -26,6 +26,7 @@ import flights
 import sports
 import news
 import weather
+import blog
 import tic80_core
 
 WIDTH = 64
@@ -5282,6 +5283,147 @@ class WeatherEngine:
         return self._frame_conditions()
 
 
+class BlogEngine:
+    """Calm idle mode showing the latest posts from the HENDERBURGH site.
+
+    Deliberately the quietest mode in the project: no scrolling, no
+    pulsing, no auto-advancing counters -- a Vestaboard-style "here is a
+    thing someone wrote" that is pleasant to have on a wall for a long
+    time. Everything else here earns attention; this one specifically
+    should not.
+
+    Because it never scrolls, text that doesn't fit is WRAPPED across
+    lines and, only if it still doesn't fit, truncated at a whole word
+    (fit_text) -- never mid-word, matching the precedent set by flights
+    and sports.
+    """
+
+    name = "blog"
+    tick_rate = 0.05
+
+    BG = (0, 0, 0)
+    ACCENT = (176, 96, 255)
+    NAME = (255, 226, 60)
+    BODY = (190, 198, 220)
+    INK_DIM = (70, 76, 92)
+
+    DWELL_TICKS = 500        # ~25s per post -- long, on purpose; this is idle art
+    BODY_LINES = 4
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.data = {"posts": [], "age": None, "err": None}
+        self.cur = 0
+        self.hold = 0
+        self.cycling = True
+        self.ticks = 0
+
+    def has_content(self):
+        return bool(self.data.get("posts"))
+
+    # ---- input -----------------------------------------------------------
+    def input(self, cmd):
+        n = len(self.data.get("posts") or [])
+        if not n:
+            return
+        if cmd == "left":
+            self.cur = (self.cur - 1) % n
+            self.hold = 0
+        elif cmd == "right":
+            self.cur = (self.cur + 1) % n
+            self.hold = 0
+        elif cmd in ("rotate", "drop"):
+            self.cycling = not self.cycling
+
+    def auto(self):
+        pass          # already self-cycling; ambient and manual look the same
+
+    # ---- simulation --------------------------------------------------------
+    def tick(self):
+        self.ticks += 1
+        self.data = blog.FEED.get()
+        n = len(self.data.get("posts") or [])
+        if n:
+            self.cur %= n
+        if self.cycling and n > 1:
+            self.hold += 1
+            if self.hold >= self.DWELL_TICKS:
+                self.hold = 0
+                self.cur = (self.cur + 1) % n
+        self.score = n
+
+    # ---- render --------------------------------------------------------
+    @staticmethod
+    def _wrap(text, max_px, max_lines):
+        """Greedy word wrap. A single word longer than the line is the one
+        case that must still be broken, so it is hard-split rather than
+        dropped or allowed to overflow."""
+        lines, cur = [], ""
+        for w in text.split():
+            trial = f"{cur} {w}".strip()
+            if text_w(trial) <= max_px:
+                cur = trial
+                continue
+            if cur:
+                lines.append(cur)
+                cur = ""
+            while text_w(w) > max_px:
+                keep = max(1, len(w) - 1)
+                while keep > 1 and text_w(w[:keep]) > max_px:
+                    keep -= 1
+                lines.append(w[:keep])
+                w = w[keep:]
+                if len(lines) >= max_lines:
+                    break
+            cur = w
+            if len(lines) >= max_lines:
+                break
+        if cur and len(lines) < max_lines:
+            lines.append(cur)
+        return lines[:max_lines]
+
+    def frame(self):
+        buf = blank()
+        fill(buf, self.BG)
+        posts = self.data.get("posts") or []
+        stale = bool(self.data.get("age") and self.data["age"] > 1800)
+        draw_header(buf, "HENDERBURGH", self.ACCENT, stale=stale)
+
+        if not posts:
+            # An empty or unreachable blog shows what is actually true --
+            # never sample/placeholder content standing in for a real post.
+            msg = "NO POSTS" if not self.data.get("err") else "OFFLINE"
+            draw_text_centered(buf, 28, msg, self.INK_DIM)
+            return bytes(buf)
+
+        p = posts[self.cur % len(posts)]
+
+        # Poster name as the heading. Wrapped to two lines rather than
+        # truncated -- these are short and it is the more personal half.
+        name_lines = self._wrap(p["name"], WIDTH - 6, 2)
+        y = 8
+        for ln in name_lines:
+            draw_text_centered(buf, y, ln, self.NAME)
+            y += 7
+
+        y += 2
+        for x in range(8, WIDTH - 8):
+            put_px(buf, x, y, (34, 38, 50))
+        y += 4
+
+        body_lines = self._wrap(p["text"], WIDTH - 6, self.BODY_LINES)
+        for ln in body_lines:
+            draw_text_centered(buf, y, ln, self.BODY)
+            y += 7
+
+        if len(posts) > 1:
+            draw_dots(buf, HEIGHT - 4, len(posts), self.cur)
+        return bytes(buf)
+
+
 class AmbientEngine:
     """Master rotation: flights -> ISS -> weather -> sports -> news, on a
     loop, skipping anything that has nothing to show right now.
@@ -5311,7 +5453,7 @@ class AmbientEngine:
 
     # Order is deliberate: the two "look up, something is happening right
     # now" modes lead, then weather, then the two reading-heavy tickers.
-    SEQUENCE = ("flights", "satellite", "weather", "sports", "news")
+    SEQUENCE = ("flights", "satellite", "weather", "sports", "news", "blog")
 
     DWELL_TICKS = 400        # ~20s per mode at this tick rate
     RECHECK_TICKS = 60       # ~3s before giving up on an all-empty rotation
@@ -5575,6 +5717,7 @@ class MenuEngine:
         ("sports",   "SPORTS",   (255, 140, 40)),
         ("news",     "NEWS",     (255, 226, 60)),
         ("weather",  "WEATHER",  (90, 190, 255)),
+        ("blog",     "BLOG",     (176, 96, 255)),
         ("ambient",  "AMBIENT",  (176, 96, 255)),
     ]
 
@@ -5828,6 +5971,14 @@ class MenuEngine:
             block(2, 3, 5, 1, c)
             put_px(buf, x0 + 1, y0 + 7, c)
             put_px(buf, x0 + 7, y0 + 7, c)
+        elif gid == "blog":
+            # A quote/speech bubble with a tail -- "someone wrote something",
+            # distinct from the news tile's newspaper-column language.
+            block(1, 1, 8, 5, c)
+            block(3, 2, 4, 1, w)
+            block(3, 4, 3, 1, w)
+            put_px(buf, x0 + 2, y0 + 6, c)      # tail
+            put_px(buf, x0 + 2, y0 + 7, c)
         elif gid == "ambient":
             # A rotation arrow around a dot: "these modes cycle" -- distinct
             # from every single-subject icon since this one IS the loop.
@@ -7605,6 +7756,7 @@ ENGINES = {
     "sports": SportsEngine,
     "news": NewsEngine,
     "weather": WeatherEngine,
+    "blog": BlogEngine,
     "ambient": AmbientEngine,
     "menu": MenuEngine,
     "boot": BootEngine,
