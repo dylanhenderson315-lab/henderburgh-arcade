@@ -106,6 +106,35 @@ similarly free and keyless — consistent with, but not proof of, the same
 policy being applied deliberately every time, rather than these
 particular APIs just happening to be free.
 
+### ⚠ Free-API dependency risk at unit scale (real, quantified, unresolved)
+
+"Free and keyless" is not the same as "free of risk at scale", and the
+sports feature is the concrete case. Per the polling analysis in
+`CLAUDE.md`, a single unit left running the `ambient` rotation 24/7
+issues roughly **17,000 ESPN requests/day** (~30,000 with all 7 leagues
+enabled) to an **undocumented, unofficial API with no published rate
+limit, no terms of use covering this, and no support channel**.
+
+That is per unit. At even a modest realistic volume, the aggregate is
+substantial and originates from many residential IPs running identical
+request patterns against an endpoint ESPN never published for this.
+Three distinct exposures, none currently mitigated:
+
+1. **Technical** — ESPN may throttle or block; the failure mode is
+   sports silently dropping out of the rotation.
+2. **Terms/legal** — using an undocumented internal endpoint commercially
+   is a different posture from doing so personally. Worth a real answer
+   before shipping, alongside the FCC/GPL items below.
+3. **Support cost** — if ESPN changes or closes the endpoint, every unit
+   in the field loses the feature simultaneously, with no vendor
+   relationship through which to see it coming.
+
+Cheap mitigations exist (longer refresh, skipping off-season leagues —
+both detailed in `CLAUDE.md`) and neither is implemented yet. This does
+not change the "no recurring per-unit cost" advantage, which still holds;
+it means the *reliability* of that advantage is unverified for the one
+data source that is scraped rather than offered.
+
 ⚠ **UNKNOWN — needs your input, all of the following are unfilled:**
 - Target retail price (any figure at all)
 - Actual BOM: which Pi model, which Bonnet, which HUB75 panel size(s)

@@ -13,7 +13,7 @@ A 64×64 LED matrix "arcade console" built on an Apollo M-1 WLED-MM panel
 (HUB75, ESP32-S3), currently driven by a Mac mini over the network. It
 runs classic games, live data "modes" (stock ticker, ISS tracker, flight
 tracker, sports scoreboard, news headline ticker, weather + severe
-alerts, site blog, and an `ambient` rotation tying them together),
+alerts, site guestbook, and an `ambient` rotation tying them together),
 video/screen mirroring, and WLED's own ambient lighting effects — all
 through one local HTTP server with a web control page and a
 phone-optimized remote controller page.
@@ -192,22 +192,35 @@ appends them to the menu automatically.
   stations (humidity and gust both null on a real clear reading); and
   coverage is US-only, reported honestly as "no NWS coverage".
 
-- **blog** (`blog.py`/`BlogEngine`, 2026-07-30) — latest posts from the
-  HENDERBURGH site, as a calm Vestaboard-style idle mode (no scroll, no
-  pulse, ~25s dwell — deliberately the quietest mode here). Consumes the
-  site's **own existing** public endpoint `henderburgh.com/api/messages`;
-  no new endpoint was added to oura-dashboard, blog logic stays in one
-  place. **Checked, not assumed, and it changes the design:** the "blog"
-  is a guestbook/message board — there is **no title field**; `name` is
-  who posted and `text` is the body, so name renders as the heading.
-  Replies (`parent_id` set) are filtered out. Entries are
-  visitor-submitted, so "your own content" means "your own *site's*
-  content" — worth knowing, though nothing bundled/external is ever shown.
-  Overlong text wraps, then word-truncates, with a hard-split fallback
-  for a single unbreakable word.
+- **blog** (`blog.py`/`BlogEngine`, 2026-07-30) — **this is a guestbook /
+  visitor message board, NOT a blog.** The module and mode are named
+  "blog" for historical reasons (it was requested as a blog mode), but the
+  data is a public shoutbox: visitors post to the HENDERBURGH site and
+  those messages appear on the panel. This is intended behaviour, not a
+  bug — confirmed with the owner 2026-07-30. Do not "fix" it into an
+  articles feed.
+  - Source: the site's **own existing** public endpoint
+    `henderburgh.com/api/messages`. No new endpoint was added to
+    oura-dashboard; the guestbook logic stays in one place and this is a
+    read-only consumer.
+  - **There is no title field.** Each entry is `{id, name, text,
+    parent_id, timestamp}` — `name` is who posted, `text` is the message
+    body. The mode renders name as the heading and text as the body.
+  - Replies (`parent_id` set) are filtered out; only top-level messages
+    are shown, since "a new message went up" means a new post, not a
+    reply to an old one.
+  - Entries are **visitor-submitted**, i.e. written by other people, and
+    are shown verbatim (uppercased, whitespace-collapsed). Nothing
+    bundled or external is ever displayed, so the original
+    "no shipped quote/lyric library" copyright intent holds.
+  - Presentation is a calm Vestaboard-style idle mode: no scroll, no
+    pulse, ~25s dwell — deliberately the quietest mode here. Overlong
+    text wraps, then word-truncates, with a hard-split fallback for a
+    single unbreakable word.
 
 **`ambient` — the master rotation mode** (`AmbientEngine`). Cycles
-flights → ISS → weather → sports → news → blog, ~20s each, skipping any
+flights → ISS → weather → sports → news → blog (guestbook), ~20s each,
+skipping any
 mode with nothing to show. It **composes real instances** of the other
 engines and delegates `tick()/frame()/input()`, so sub-modes look and
 behave identically to standalone and any fix lands here free — nothing is
@@ -305,6 +318,47 @@ sessions, this is the first place to look, and the cheap fix is a longer
 scoreboards are already known-empty from the `dates=` result).
 
 ## Known issues / in-progress work
+
+### ⚠ ESPN rate exposure if `ambient` runs 24/7 — READ THIS FIRST
+
+**If `ambient` mode is left running around the clock, sports mode alone
+issues roughly 17,000 requests per day to ESPN's undocumented, unofficial
+API at the current config — and ~30,000/day if all 7 supported leagues
+are enabled. ESPN publishes no rate limit and offers no support channel.**
+
+The arithmetic, so it can be checked rather than trusted: `ambient` ticks
+every sub-engine on every tick (required — see the ambient entry above),
+so sports polls continuously whenever ambient is up. `SCOREBOARD_REFRESH`
+is 20s and it makes **one call per configured league per refresh**:
+
+| leagues enabled | calls/day |
+|---|---|
+| 4 (`DEFAULT_LEAGUES`, and what `sports_config.json` holds today) | **~17,280** |
+| 7 (all of `LEAGUE_PATHS` — EPL/NCAAF/NCAAB added) | **~30,240** |
+
+A live pinned game adds one more call per 20s on top. Note the volume
+scales linearly with league count, so enabling the three college/soccer
+leagues nearly doubles it.
+
+Nothing has failed yet and no limit is documented, so this is a genuine
+unknown rather than an observed problem — it has never actually been run
+for a full day. **Treat it as untested, not as safe.** Failure would most
+likely appear as sports mode erroring or emptying during long ambient
+sessions (and, because `has_content()` would then return False, silently
+vanishing from the rotation rather than showing an error).
+
+Two cheap mitigations exist and neither is implemented, deliberately —
+behaviour was left alone by request on 2026-07-30:
+  1. Raise `SCOREBOARD_REFRESH` (60s cuts it to ~10k/day with no
+     meaningful loss — scores do not change faster than that).
+  2. Skip leagues already known to have no games today. The `dates=`
+     response for an off-season league is empty, so those calls are
+     provably wasted; on 2026-07-30 only MLB had games (NFL/NBA/NHL all
+     off-season), so 3 of the 4 configured leagues were polled every 20s
+     purely to be told "no games" — that alone is ~75% of current volume.
+
+This is also the single biggest open risk for the production device,
+where it multiplies by unit count — see `PRODUCTION.md`.
 
 **Home Assistant notification pass-through — NOT BUILT, blocked on auth
 (2026-07-30).** Requested (doorbell / package / presence events flashing
