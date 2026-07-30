@@ -610,6 +610,38 @@ class Arcade:
             time.sleep(0.2)
             return None
 
+    def _severe_alert_frame(self):
+        """Full-screen alert if NWS has an Extreme/Severe alert active for
+        the configured location, else None.
+
+        Reading weather.FEED here on every render tick is what keeps this
+        working from any mode -- and it deliberately keeps weather's feed
+        thread alive continuously (its IDLE_STOP never elapses), because a
+        takeover that only knows about alerts while you're already looking
+        at the weather mode would be pointless. That costs one observation
+        call per 10 min and one alerts call per 2 min, always.
+
+        Clears itself with no extra bookkeeping: when NWS stops listing the
+        alert, the list empties and this returns None again on the very
+        next tick.
+        """
+        try:
+            data = weather.FEED.get()
+        except Exception:                       # noqa: BLE001 - never kill the loop
+            return None
+        severe = [a for a in (data.get("alerts") or [])
+                  if a.get("severity") in engines.GLOBAL_ALERT_SEVERITIES]
+        if not severe:
+            self._alert_ticks = 0
+            return None
+        self._alert_ticks = getattr(self, "_alert_ticks", 0) + 1
+        # Rotate through multiple severe alerts rather than pinning the
+        # first one, same dwell feel as the weather mode's own cycling.
+        idx = (self._alert_ticks // 220) % len(severe)
+        return engines.draw_alert_frame(
+            severe[idx], self._alert_ticks, place=data.get("place", ""),
+            n_alerts=len(severe), cur_alert=idx)
+
     def _loop(self):
         last_tick = time.time()
         min_send = 1.0 / PANEL_FPS
@@ -738,6 +770,20 @@ class Arcade:
                             bg_frame, frame, threshold=14, bg_gain=gain)
                         with self.lock:
                             self.latest = frame
+
+                # GLOBAL SEVERE-WEATHER TAKEOVER. Applied last, after every
+                # other composite, so it covers whatever was about to be
+                # shown -- a game, a video, a mirror, any mode. Only
+                # Extreme/Severe qualify (see engines.GLOBAL_ALERT_SEVERITIES):
+                # a routine advisory interrupting a game would train someone
+                # to ignore the panel exactly when it finally matters.
+                # Skipped in weather mode, which is already showing alerts
+                # itself and cycles through ALL of them, not just severe.
+                alert_frame = self._severe_alert_frame() if mode != "weather" else None
+                if alert_frame is not None:
+                    frame = alert_frame
+                    with self.lock:
+                        self.latest = frame
 
                 # Push when the image CHANGED (never faster than PANEL_FPS), or
                 # when the keepalive is due so WLED can't time out of realtime

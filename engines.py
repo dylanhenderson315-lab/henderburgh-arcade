@@ -313,6 +313,82 @@ def draw_dots(buf, y, n, cur, on=(150, 160, 185), off=(38, 42, 54), cap=10):
         put_px(buf, x0 + i * 3, y, on if i == (cur % n) else off)
 
 
+# NWS severity -> alert styling. Module level because the SAME styling is
+# used two ways: inside the weather mode's own rotation, and as a global
+# takeover over any other mode (see draw_alert_frame). One definition, so
+# the two can't drift apart visually.
+ALERT_SEVERITY_COLOR = {
+    "Extreme": (255, 45, 45), "Severe": (255, 80, 40),
+    "Moderate": (255, 170, 40), "Minor": (240, 200, 70),
+    "Unknown": (200, 200, 200),
+}
+
+# Only these preempt other modes globally. A routine coastal-flood
+# advisory interrupting a game would train someone to ignore the panel
+# exactly when it finally matters -- the whole point of the takeover is
+# that it's rare enough to still mean something. Weather mode itself
+# still shows every alert regardless of severity.
+GLOBAL_ALERT_SEVERITIES = ("Extreme", "Severe")
+
+
+def draw_alert_frame(alert, ticks, place="", n_alerts=1, cur_alert=0):
+    """Full-screen severe-weather alert. Used by WeatherEngine and by the
+    global takeover in arcade_server, so both look identical."""
+    buf = blank()
+    fill(buf, (0, 0, 0))
+    col = ALERT_SEVERITY_COLOR.get(alert.get("severity"), ALERT_SEVERITY_COLOR["Unknown"])
+
+    # Pulse: a wall panel has to earn attention from someone who isn't
+    # already looking at it, and motion does that where a static red
+    # screen does not.
+    k = 0.55 + 0.45 * abs(math.sin(ticks * 0.09))
+    pulse = tuple(min(255, int(c * k)) for c in col)
+
+    for x in range(WIDTH):
+        for y in (0, 1, 2):
+            put_px(buf, x, y, pulse)
+        for y in (HEIGHT - 3, HEIGHT - 2, HEIGHT - 1):
+            put_px(buf, x, y, pulse)
+    for y in range(HEIGHT):
+        for x in (0, 1):
+            put_px(buf, x, y, pulse)
+        for x in (WIDTH - 2, WIDTH - 1):
+            put_px(buf, x, y, pulse)
+
+    draw_text_centered(buf, 6, fit_text(str(alert.get("severity", "")).upper(), WIDTH - 10), pulse)
+
+    # The event name is the thing that matters ("TORNADO WARNING").
+    # Wrapped across up to three lines rather than truncated -- this is
+    # the one view where cutting the message off could actually matter.
+    words = str(alert.get("event", "")).split()
+    lines, cur = [], ""
+    for w in words:
+        trial = f"{cur} {w}".strip()
+        if text_w(trial) <= WIDTH - 10:
+            cur = trial
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    # Vertically centre the wrapped block between the severity label and
+    # the footer, so a 1-line event doesn't sit in the top third with dead
+    # space under it and a 3-line one still fits.
+    lines = lines[:3]
+    band_top, band_bot = 15, HEIGHT - 12
+    block_h = len(lines) * 8 - 2
+    y0 = band_top + max(0, ((band_bot - band_top) - block_h) // 2)
+    for i, ln in enumerate(lines):
+        draw_text_centered(buf, y0 + i * 8, ln, (255, 255, 255))
+
+    if n_alerts > 1:
+        draw_dots(buf, HEIGHT - 6, n_alerts, cur_alert, on=pulse)
+    elif place:
+        draw_text_centered(buf, HEIGHT - 9, fit_text(place, WIDTH - 10), rim(col, 0.8))
+    return bytes(buf)
+
+
 def draw_marquee(buf, y, text, color, scroll, scale=1, gap="   "):
     """Seamless looping scroller -- the shared tape used by every ticker
     mode. Draws two copies so the wrap has no visible seam."""
@@ -5024,14 +5100,9 @@ class WeatherEngine:
     ACCENT = (90, 190, 255)
     STALE = (255, 170, 40)
 
-    # NWS severity -> alert styling. Extreme/Severe get the urgent red;
-    # lesser advisories get amber so a routine coastal-flood advisory
-    # doesn't cry wolf in the same colour as a tornado warning.
-    SEVERITY_COLOR = {
-        "Extreme": (255, 45, 45), "Severe": (255, 80, 40),
-        "Moderate": (255, 170, 40), "Minor": (240, 200, 70),
-        "Unknown": (200, 200, 200),
-    }
+    # Shared with the global takeover so the two can never drift apart --
+    # see ALERT_SEVERITY_COLOR / draw_alert_frame at module level.
+    SEVERITY_COLOR = ALERT_SEVERITY_COLOR
 
     COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 
@@ -5088,63 +5159,9 @@ class WeatherEngine:
         return cls.COMPASS[int((deg + 22.5) % 360 // 45)]
 
     def _frame_alert(self, alert):
-        buf = blank()
-        fill(buf, self.BG)
-        col = self.SEVERITY_COLOR.get(alert["severity"], self.SEVERITY_COLOR["Unknown"])
-
-        # Pulse: a wall panel has to earn attention from someone who isn't
-        # already looking at it, and motion does that where a static red
-        # screen does not.
-        k = 0.55 + 0.45 * abs(math.sin(self.ticks * 0.09))
-        pulse = tuple(min(255, int(c * k)) for c in col)
-
-        for x in range(WIDTH):
-            for y in (0, 1, 2):
-                put_px(buf, x, y, pulse)
-            for y in (HEIGHT - 3, HEIGHT - 2, HEIGHT - 1):
-                put_px(buf, x, y, pulse)
-        for y in range(HEIGHT):
-            for x in (0, 1):
-                put_px(buf, x, y, pulse)
-            for x in (WIDTH - 2, WIDTH - 1):
-                put_px(buf, x, y, pulse)
-
-        sev = alert["severity"].upper()
-        draw_text_centered(buf, 6, fit_text(sev, WIDTH - 10), pulse)
-
-        # The event name is the thing that matters ("TORNADO WARNING").
-        # Wrapped across up to three lines at the largest size that fits
-        # rather than truncated -- this is the one view where cutting the
-        # message off could actually matter to someone.
-        words = alert["event"].split()
-        lines, cur = [], ""
-        for w in words:
-            trial = f"{cur} {w}".strip()
-            if text_w(trial) <= WIDTH - 10:
-                cur = trial
-            else:
-                if cur:
-                    lines.append(cur)
-                cur = w
-        if cur:
-            lines.append(cur)
-        # Vertically centre the wrapped block in the space between the
-        # severity label and the footer, so a 1-line event doesn't sit in
-        # the top third with dead space under it and a 3-line one still
-        # fits. (Fixed y0 looked visibly unbalanced for the common
-        # single-line case.)
-        lines = lines[:3]
-        band_top, band_bot = 15, HEIGHT - 12
-        block_h = len(lines) * 8 - 2
-        y0 = band_top + max(0, ((band_bot - band_top) - block_h) // 2)
-        for i, ln in enumerate(lines):
-            draw_text_centered(buf, y0 + i * 8, ln, (255, 255, 255))
-
-        if len(self.data.get("alerts") or []) > 1:
-            draw_dots(buf, HEIGHT - 6, len(self.data["alerts"]), self.cur_alert, on=pulse)
-        else:
-            draw_text_centered(buf, HEIGHT - 9, fit_text(self.data.get("place", ""), WIDTH - 10), rim(col, 0.8))
-        return bytes(buf)
+        return draw_alert_frame(alert, self.ticks, place=self.data.get("place", ""),
+                                n_alerts=len(self.data.get("alerts") or []),
+                                cur_alert=self.cur_alert)
 
     def _frame_conditions(self):
         buf = blank()
