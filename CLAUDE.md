@@ -13,8 +13,10 @@ A 64×64 LED matrix "arcade console" built on an Apollo M-1 WLED-MM panel
 (HUB75, ESP32-S3), currently driven by a Mac mini over the network. It
 runs classic games, live data "modes" (stock ticker, ISS tracker, flight
 tracker, sports scoreboard, news headline ticker, weather + severe
-alerts), video/screen mirroring, and WLED's own ambient lighting effects — all through one local HTTP server with a web
-control page and a phone-optimized remote controller page.
+alerts, site blog, and an `ambient` rotation tying them together),
+video/screen mirroring, and WLED's own ambient lighting effects — all
+through one local HTTP server with a web control page and a
+phone-optimized remote controller page.
 
 This Mac + WLED-MM setup is the **development rig**, not the final
 product. See `PRODUCTION.md` for the sellable-device plan (Raspberry Pi +
@@ -60,8 +62,9 @@ small icon case in `MenuEngine._icon`.
 purpose** — this is the load-bearing pattern for the whole project:
 
 - A plain module (`market.py`, `satellite.py`, `flights.py`, `sports.py`,
-  `news.py`, `weather.py`) owns ALL network I/O: a background-thread poller with a last-good
-  cache, a `FEED` singleton, a `get()` that never blocks, and a
+  `news.py`, `weather.py`, `blog.py`) owns ALL network I/O: a
+  background-thread poller with a last-good cache, a `FEED` singleton, a
+  `get()` that never blocks, and a
   `*_config.json` file (with matching `save_config`/`load_config`) for
   anything an owner should be able to configure without a code edit.
   Feed threads are self-limiting: they start on first `get()` and stop
@@ -115,7 +118,10 @@ uppercase-only** and silently drops any character it doesn't have —
 no error, no crash, just a quietly wrong string on the panel. This has
 caused the *same bug three times* on three different modes (ticker,
 flights, sports), always from a live external API returning mixed-case
-text. **Any new mode that draws API-sourced text must `.upper()` it at
+text. `blog.py` is the fourth and highest-risk site — free-form
+user-written posts are the most mixed-case source in the project — and is
+uppercased at its I/O boundary for exactly that reason. **Any new mode
+that draws API-sourced text must `.upper()` it at
 the I/O module boundary** (in the feed module, not the engine) — this is
 already the convention for every existing feed. Verify by actually
 rendering a frame with real data and reading the pixels; this class of
@@ -186,6 +192,47 @@ appends them to the menu automatically.
   stations (humidity and gust both null on a real clear reading); and
   coverage is US-only, reported honestly as "no NWS coverage".
 
+- **blog** (`blog.py`/`BlogEngine`, 2026-07-30) — latest posts from the
+  HENDERBURGH site, as a calm Vestaboard-style idle mode (no scroll, no
+  pulse, ~25s dwell — deliberately the quietest mode here). Consumes the
+  site's **own existing** public endpoint `henderburgh.com/api/messages`;
+  no new endpoint was added to oura-dashboard, blog logic stays in one
+  place. **Checked, not assumed, and it changes the design:** the "blog"
+  is a guestbook/message board — there is **no title field**; `name` is
+  who posted and `text` is the body, so name renders as the heading.
+  Replies (`parent_id` set) are filtered out. Entries are
+  visitor-submitted, so "your own content" means "your own *site's*
+  content" — worth knowing, though nothing bundled/external is ever shown.
+  Overlong text wraps, then word-truncates, with a hard-split fallback
+  for a single unbreakable word.
+
+**`ambient` — the master rotation mode** (`AmbientEngine`). Cycles
+flights → ISS → weather → sports → news → blog, ~20s each, skipping any
+mode with nothing to show. It **composes real instances** of the other
+engines and delegates `tick()/frame()/input()`, so sub-modes look and
+behave identically to standalone and any fix lands here free — nothing is
+reimplemented. Each engine declares its own **`has_content()`** (lives
+with the engine that knows its data shape). **All sub-engines are ticked
+every tick, not just the visible one** — load-bearing: `tick()` is what
+calls each `FEED.get()`, and an unread feed goes idle and stops polling,
+so ticking only the visible one would make every mode come up cold, get
+skipped by `has_content()`, and collapse the rotation. It also leaves a
+mode immediately if it goes empty mid-dwell.
+
+**Global severe-weather takeover** — an Extreme/Severe NWS alert
+preempts **any** mode (game, video, mirror, anything), not just weather.
+Implemented in `arcade_server._severe_alert_frame()` applied *after* all
+compositing in the render loop. Styling comes from module-level
+`draw_alert_frame` + `ALERT_SEVERITY_COLOR`, which `WeatherEngine` also
+delegates to, so the two can't drift apart. Only Extreme/Severe qualify
+(`GLOBAL_ALERT_SEVERITIES`) — a routine advisory interrupting a game
+would train someone to ignore the panel when it finally matters; weather
+mode itself still shows every severity. Clears automatically on the next
+tick when NWS drops the alert. **Deliberate cost:** this reads
+`weather.FEED` every render tick, so weather's poll thread never idles
+out (a takeover that only worked while already viewing weather would be
+pointless).
+
 **Units are imperial everywhere**, converted at the **render layer**
 (`km_to_mi`, `kmh_to_mph`, `kt_to_mph`, `nm_to_mi`, `c_to_f` in
 `engines.py`) — feed modules still report whatever their upstream API
@@ -227,17 +274,63 @@ feed's thread hasn't idled out yet. Real per-mode request rates:
 - weather: 1 obs call/600s + 1 alerts call/120s (gridpoint cached ~daily).
 - audio_sync: zero request cost — a blocking UDP socket, not polling.
 
+- blog: 1 call/300s.
+
 None of this is a real load on the Mac (all network-I/O-bound, sleeping
-threads). The one thing worth knowing before it's a surprise: **ESPN's
-site API is undocumented/unofficial with no published rate limit.**
-Sports mode's ~7 req/20s is trivial for occasional/personal use, but if
-this mode ever became a long-running always-on ambient state (hours or
-days at a stretch, or multiplied across many production-device units),
-ESPN's rate tolerance for this endpoint is genuinely unknown and hasn't
-been stress-tested — worth a real check before relying on it at that
-scale, not before.
+threads).
+
+**Two changes on 2026-07-30 broke the "only one mode polls at a time"
+assumption above — read this before assuming the per-mode numbers are the
+whole story:**
+
+1. **`ambient` mode ticks every sub-engine every tick**, so in ambient
+   *all six* feeds poll concurrently and continuously, not just the
+   visible one. That is required for the rotation to work (see the
+   ambient entry above), but it means ambient's real cost is the **sum**
+   of flights + satellite + weather + sports + news + blog.
+2. **The global severe-weather takeover reads `weather.FEED` on every
+   render tick from every mode**, so weather now polls continuously and
+   forever, in every mode including `off`-adjacent ones.
+
+**The practical consequence, stated plainly:** ambient is *designed* to
+be left running for hours as a "wall of information" — which is exactly
+the long-running always-on ESPN scenario previously flagged here as
+untested. Sports contributes ~7 undocumented-API calls/20s (~0.35 req/s,
+~30k/day) for as long as ambient is up. That has **not** been run long
+enough to know whether ESPN throttles or blocks it. Nothing has failed so
+far, and no rate limit is documented, so this is a genuine unknown rather
+than a known problem — but if sports starts erroring during long ambient
+sessions, this is the first place to look, and the cheap fix is a longer
+`SCOREBOARD_REFRESH` or skipping leagues with no games today (their
+scoreboards are already known-empty from the `dates=` result).
 
 ## Known issues / in-progress work
+
+**Home Assistant notification pass-through — NOT BUILT, blocked on auth
+(2026-07-30).** Requested (doorbell / package / presence events flashing
+on the panel). Deliberately **not started**, because the premise that
+"the HA client/auth already works" does not hold right now:
+
+- HA is up: `http://192.168.40.203:8123/` returns 200.
+- The `HA_TOKEN` in `~/oura-dashboard/.env` is **rejected with 401** on
+  every endpoint tried (`/api/`, `/api/states`, `/api/config`). It is a
+  183-char JWT, so it's a real token shape — expired or revoked, not
+  malformed. `.env.example` holds only a placeholder; no other token
+  exists on disk.
+- Without `/api/states` there is **no way to see what entities this setup
+  actually exposes**, and the request explicitly said to check that.
+  Writing a module against guessed entity IDs
+  (`binary_sensor.doorbell`, `device_tracker.*`, …) would be inventing
+  the integration — the exact thing this project's rules forbid — and it
+  would fail silently on a setup whose entities are named differently.
+
+**To unblock:** create a fresh long-lived access token in HA (profile →
+Security → Long-lived access tokens) and put it in `~/oura-dashboard/.env`
+as `HA_TOKEN=`. Then `GET /api/states` enumerates real entities and this
+can be built against what's genuinely there. The panel-side half (a
+notification flash/scroll overlay) is straightforward once the event
+source is real; the render-loop takeover added for severe weather is the
+obvious pattern to reuse for it.
 
 **Audio-reactive visualizer — paused, waiting on the user (as of
 2026-07-30).** Plan: WLED-MM's real AudioReactive usermod (the panel has
