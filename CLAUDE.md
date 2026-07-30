@@ -12,8 +12,8 @@ file.
 A 64×64 LED matrix "arcade console" built on an Apollo M-1 WLED-MM panel
 (HUB75, ESP32-S3), currently driven by a Mac mini over the network. It
 runs classic games, live data "modes" (stock ticker, ISS tracker, flight
-tracker, sports scoreboard), video/screen mirroring, and WLED's own
-ambient lighting effects — all through one local HTTP server with a web
+tracker, sports scoreboard, news headline ticker), video/screen
+mirroring, and WLED's own ambient lighting effects — all through one local HTTP server with a web
 control page and a phone-optimized remote controller page.
 
 This Mac + WLED-MM setup is the **development rig**, not the final
@@ -59,8 +59,8 @@ small icon case in `MenuEngine._icon`.
 **Data modes are pure-I/O / pure-render, split into two files on
 purpose** — this is the load-bearing pattern for the whole project:
 
-- A plain module (`market.py`, `satellite.py`, `flights.py`, `sports.py`)
-  owns ALL network I/O: a background-thread poller with a last-good
+- A plain module (`market.py`, `satellite.py`, `flights.py`, `sports.py`,
+  `news.py`) owns ALL network I/O: a background-thread poller with a last-good
   cache, a `FEED` singleton, a `get()` that never blocks, and a
   `*_config.json` file (with matching `save_config`/`load_config`) for
   anything an owner should be able to configure without a code edit.
@@ -178,6 +178,33 @@ orphaned), `cast` (phone browser -> panel), WLED ambient backgrounds,
 `menu` (the panel's own home-screen/game-picker, drawn on the matrix
 itself — the phone is just a dpad+buttons controller for it), `boot`
 (curtain-parting logo intro).
+
+## Polling load (checked 2026-07-30, no action needed yet)
+
+Every feed only polls while its mode has been read in the last
+`IDLE_STOP` (120s), and only one mode renders to the panel at a time — so
+steady-state load is whichever single mode is currently selected, with a
+brief (≤120s) overlap right after switching modes while the previous
+feed's thread hasn't idled out yet. Real per-mode request rates:
+
+- ticker: 1 batched call/60s (crypto) + 1 call per stock symbol/60s.
+- satellite: 1 call/12s (position) + 1 call/900s (pass prediction).
+- flights: 1 call/15s (position) + up to 4 adsbdb lookups/refresh, capped.
+- sports: **7 ESPN calls/20s** (one per configured league) ≈ 0.35 req/s
+  while active, plus 1 more call/20s only when the pinned favorite's game
+  is actually live (win probability).
+- news: 1 call/300s.
+- audio_sync: zero request cost — a blocking UDP socket, not polling.
+
+None of this is a real load on the Mac (all network-I/O-bound, sleeping
+threads). The one thing worth knowing before it's a surprise: **ESPN's
+site API is undocumented/unofficial with no published rate limit.**
+Sports mode's ~7 req/20s is trivial for occasional/personal use, but if
+this mode ever became a long-running always-on ambient state (hours or
+days at a stretch, or multiplied across many production-device units),
+ESPN's rate tolerance for this endpoint is genuinely unknown and hasn't
+been stress-tested — worth a real check before relying on it at that
+scale, not before.
 
 ## Known issues / in-progress work
 
