@@ -501,6 +501,24 @@ methods are what found things that code review had missed repeatedly.
   noise, not safety. All seven modes are clean against every *reachable*
   partial state (empty lists, null optional fields, one-of-two-APIs-down).
 
+### Also verified clean (no action taken)
+- **Cursor safety when a feed's list shrinks under a running engine** —
+  a real event (planes leave, games end, headlines roll off). Every
+  engine both normalises its cursor in `tick()` *and* indexes with
+  `% len()` in `frame()`, so a stale cursor can neither `IndexError` nor
+  show the wrong item. Shrink-to-one and shrink-to-empty were both
+  exercised on sports, flights, news, blog and weather. Note the belt
+  *and* braces matter: an early version of this test called `frame()`
+  without `tick()` and appeared to find a bug — the real loop always
+  ticks first, so that was a test artifact.
+- **Every reachable partial-data state across all seven modes** — empty
+  lists, null optional fields (real ADS-B and NWS both emit these), one
+  of two APIs down, pregame null scores, missing ESPN team colours,
+  posts with empty name or body. No crashes, no overflow.
+- **`has_content()` now implemented on all seven data engines**,
+  including ticker (which ambient does not use yet — see the commit; it
+  would have been an AttributeError waiting to happen).
+
 ### Checked and believed correct, but worth a second opinion
 - **`has_content()` on every engine** was verified against real feed key
   names (a wrong key would silently drop a mode from `ambient` forever).
