@@ -319,6 +319,33 @@ scoreboards are already known-empty from the `dates=` result).
 
 ## Known issues / in-progress work
 
+### ⚠ PANEL IS OFFLINE as of end of session 2026-07-30 — likely needs a power cycle
+
+The Apollo M-1 at `192.168.40.24` stopped responding to ping and HTTP
+during the audit and had not recovered by the end of the session. This
+Mac's own LAN networking is fine (`192.168.40.203` responds), so it is
+the panel, not the network. The arcade service is healthy and set to
+`off`; it will drive the panel again as soon as the panel is back.
+
+**Most likely cause, and it was my (Claude's) doing:** several audit
+scripts did `import arcade_server`, which constructs the module-level
+`ARCADE` singleton — a full `Arcade` with its own render thread and its
+own `WledDDP` sender. Those ran *concurrently with the launchd service*,
+so two or more independent DDP streams hit the panel at once. This file
+and `arcade_server.py` both warn that flooding WLED locks the panel hard
+enough to need a physical power cycle; that is the documented failure
+mode and it matches exactly what happened.
+
+**Recovery:** physically power-cycle the panel (unplug/replug USB-C).
+
+**Rule for future work — this is the actionable part:** never
+`import arcade_server` from a test/audit script while the service is
+running. Test engines directly (`import engines`, instantiate the engine
+class, call `tick()`/`frame()`), which needs no panel and no second
+render loop. If an end-to-end test genuinely needs the render loop, stop
+the service first (`launchctl bootout gui/$(id -u)/com.henderburgh.arcade`)
+so only one DDP sender exists.
+
 ### ⚠ ESPN rate exposure if `ambient` runs 24/7 — READ THIS FIRST
 
 **If `ambient` mode is left running around the clock, sports mode alone
@@ -424,6 +451,80 @@ item, don't touch without being asked.
 **Frontend audit (`arcade.html`, `remote.html`) — also explicitly
 deferred** by the user alongside the `stream.py` decision, same "Thursday
 or on reset" condition.
+
+## Self-audit 2026-07-30 — what was checked, fixed, and what still feels risky
+
+A deliberate logic-level audit (not just rendered output) was run across
+every engine. Five real bugs were found and fixed, each committed
+separately. Recording the *method* as much as the results, because the
+methods are what found things that code review had missed repeatedly.
+
+### Fixed
+1. **Ticker showed a corrupted, sometimes wrong-but-real symbol.**
+   `row["sym"][:4]` while 7 chars fit at scale=2 — `MATIC`→`MATI`,
+   `GOOGL`→`GOOG` (a *different real ticker*). The scrolling tape below
+   showed the full symbol, so one frame displayed two different tickers
+   for the same row.
+2. **ISS skipped by ambient when only one of its two APIs was up.**
+   `has_content()` required a position fix, but PASS and LIVE come from
+   two independent APIs that fail separately, and `_refresh_pass`
+   swallows its exceptions. Also made view-cycling skip a view whose
+   source is down instead of dwelling on a placeholder. Polluxlabs was
+   genuinely down at the time, so this was live, not hypothetical.
+3. **Sports dwelt on an empty PINNED view** when a favorite was set but
+   had no game that day, while real games sat one view away.
+4. **Render loop froze for seconds whenever the panel went offline.**
+   The DDP socket had no timeout; `sendto()` to an unreachable
+   *local-subnet* address blocks on ARP resolution. Every mode froze on
+   one frame with no exception and `loop_errors` stuck at 0. One-line
+   fix (`settimeout(0.25)`); `socket.timeout` is an `OSError` subclass so
+   the existing handler already did the right thing.
+5. **`@` was silently dropped from the sports tape** — fifth instance of
+   the uppercase-only-font bug class. `"AWAY 3 @ HOME 5"` rendered as
+   `"AWAY 3  HOME 5"`, losing the home/away distinction.
+
+### Methods worth reusing (each found something review didn't)
+- **Instrument `draw_text3x5` itself** to log any character absent from
+  `_FONT3x5`, then drive every mode against live data and every internal
+  view/index. This is the only reliable way to catch the recurring glyph
+  bug — it is invisible in the code *and* easy to miss on the panel. That
+  sweep now reports **zero** dropped characters across all modes.
+- **`faulthandler.dump_traceback()` on a stalled process.** Bug 4 was
+  first mis-bisected to a recent change because the panel's reachability
+  fluctuated between runs; the stack dump identified the real cause
+  immediately. Prefer it over bisection when something *hangs* rather
+  than errors.
+- **Drive engines with only states the FEEDs can actually produce.** An
+  earlier harness fed `data=None` and string-typed fields and produced a
+  wall of failures that were all fiction — feeds always return a
+  well-typed dict. Guarding against unreachable states would have added
+  noise, not safety. All seven modes are clean against every *reachable*
+  partial state (empty lists, null optional fields, one-of-two-APIs-down).
+
+### Checked and believed correct, but worth a second opinion
+- **`has_content()` on every engine** was verified against real feed key
+  names (a wrong key would silently drop a mode from `ambient` forever).
+  All correct. The subtler risk remains the class fixed in bugs 2 and 3:
+  *an engine with multiple views whose `has_content()` only reflects
+  one*. Flights, news and blog are single-view so they're safe today,
+  but any future multi-view mode inherits this trap.
+- **Ambient ticking all six sub-engines every tick** is deliberate and
+  documented, but it means ambient's cost is the sum of all feeds and it
+  is the reason for the ESPN exposure below. Worth confirming the
+  trade-off is still wanted.
+- **The `changed`/`released` half of the alert-takeover audit is timing
+  sensitive.** A cold mode draws a near-static LOADING screen, so
+  sampling too soon after `set_mode` makes a healthy render look frozen —
+  this produced false failures twice. Any future test needs a generous
+  settle or a poll-until-changed loop.
+- **`fit_text` truncation is silent by design.** It degrades gracefully,
+  but nothing warns when a string is being shortened, so an
+  over-long label can quietly lose meaning (the empty-ambient message
+  `"WAITING FOR DATA"` → `"WAITING FOR"` was caught only by looking at
+  the pixels). A debug mode that logs every truncation might be worth it.
+- **Scrolling marquees intentionally draw characters partially
+  off-panel** at both edges. The bounds checker flags these; they are
+  correct. Don't "fix" them.
 
 ## Working conventions worth knowing before touching this codebase
 
