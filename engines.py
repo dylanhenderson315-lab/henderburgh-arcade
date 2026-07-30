@@ -4072,6 +4072,18 @@ class TickerEngine:
         self.cycling = True
         self.ticks = 0
 
+    def has_content(self):
+        """Ticker is not in AmbientEngine.SEQUENCE today, but every other
+        data mode implements this and _available() calls it unguarded --
+        so without it, simply adding "ticker" to that tuple would raise
+        AttributeError at runtime. Cheap to provide, and it makes the
+        data-mode contract uniform.
+
+        Note this reads self.rows, not self.data: TickerEngine predates
+        the shared data-dict convention and keeps its own attributes.
+        """
+        return bool(self.rows)
+
     # ---- input ---------------------------------------------------------
     def input(self, cmd):
         if not self.rows:
