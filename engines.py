@@ -209,6 +209,12 @@ _FONT3x5 = {
     "'": ("010", "010", "000", "000", "000"),
     ">": ("100", "010", "001", "010", "100"),
     "<": ("001", "010", "100", "010", "001"),
+    # "@" is load-bearing, not decoration: the sports tape renders
+    # "AWAY 3 @ HOME 5", and without a glyph draw_text3x5 silently drops
+    # it, leaving "AWAY 3  HOME 5" -- which loses the only thing telling
+    # you which team is home. Found by instrumenting draw_text3x5 to log
+    # every character the font lacks, rather than by reading the string.
+    "@": ("111", "101", "111", "100", "011"),
 }
 
 
