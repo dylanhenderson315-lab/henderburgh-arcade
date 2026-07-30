@@ -88,6 +88,28 @@ def put_blob(buf, x, y, color, outline=True):
     put_px(buf, x, y, color)
 
 
+def draw_line(buf, x0, y0, x1, y1, color):
+    """Integer Bresenham line -- used for procedurally-rotated icons (e.g.
+    the flight tracker's heading-oriented plane glyph) where a fixed sprite
+    table would need one entry per angle."""
+    x0, y0, x1, y1 = int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1))
+    dx, dy = abs(x1 - x0), -abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx + dy
+    while True:
+        put_px(buf, x0, y0, color)
+        if x0 == x1 and y0 == y1:
+            break
+        e2 = 2 * err
+        if e2 >= dy:
+            err += dy
+            x0 += sx
+        if e2 <= dx:
+            err += dx
+            y0 += sy
+
+
 # Neon palette notes for ambient self-play over WLED backgrounds:
 #  * Game BG must stay pure black so backgrounds composite through.
 #  * Sprites use high-sat complementary neons (not muddy mid-greens).
@@ -4187,6 +4209,30 @@ class FlightEngine:
 
     COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 
+    # Altitude-band colour coding for the heading icon. Real ATC displays
+    # use altitude, not distance, as the primary "what kind of traffic is
+    # this" signal -- low/climbing traffic near an airport behaves and
+    # matters differently from cruising traffic overhead, regardless of
+    # how far away either one is. Distance is still shown as text (NM +
+    # compass direction) so nothing is lost, it's just not what drives the
+    # icon's colour.
+    ALT_BANDS = (
+        (5000,  (255, 90, 70)),    # LOW -- near the ground, climbing/descending
+        (15000, (255, 200, 60)),   # MID -- climbing/descending, still close-in
+        (30000, (120, 200, 255)),  # CRUISE -- typical airliner cruise band
+    )
+    ALT_HIGH_COLOR = (200, 140, 255)   # HIGH -- above typical cruise (long-haul/military)
+    ALT_UNKNOWN_COLOR = (150, 160, 185)
+
+    @classmethod
+    def _alt_color(cls, alt_ft):
+        if not isinstance(alt_ft, (int, float)):
+            return cls.ALT_UNKNOWN_COLOR
+        for cutoff, color in cls.ALT_BANDS:
+            if alt_ft < cutoff:
+                return color
+        return cls.ALT_HIGH_COLOR
+
     def __init__(self):
         self.score = 0
         self.reset()
@@ -4238,6 +4284,44 @@ class FlightEngine:
         i = int((deg + 22.5) % 360 // 45)
         return FlightEngine.COMPASS[i]
 
+    # ---- heading-oriented plane icon ------------------------------------
+    # A minimal three-stroke glyph (fuselage + wings + tailplane) computed
+    # from real ADS-B heading (track_deg), not a fixed 8-direction sprite
+    # table -- this is deliberately NOT a real airline/aircraft logo (no
+    # trademark/IP exposure), just an abstract "which way is it pointing"
+    # silhouette in the same spirit as a radar-scope aircraft mark.
+    _ICON_FUSELAGE = (7.5, -6.5)   # (nose fx, tail fx) along the heading axis
+    _ICON_WING = 5.5                # main wing half-span, at fx=0
+    _ICON_TAIL = 2.2                # tailplane half-span, at fx=tail
+
+    @classmethod
+    def _draw_plane_icon(cls, buf, cx, cy, heading_deg, color):
+        theta = math.radians(heading_deg if heading_deg is not None else 0)
+        # Forward unit vector (0 deg = up on screen); right unit vector is
+        # forward rotated +90 deg, used for the wing/tail cross-strokes.
+        fwd = (math.sin(theta), -math.cos(theta))
+        right = (math.cos(theta), math.sin(theta))
+
+        def pt(fx, fy):
+            return (cx + fx * fwd[0] + fy * right[0],
+                    cy + fx * fwd[1] + fy * right[1])
+
+        nose, tail = pt(cls._ICON_FUSELAGE[0], 0), pt(cls._ICON_FUSELAGE[1], 0)
+        wing_l, wing_r = pt(0, -cls._ICON_WING), pt(0, cls._ICON_WING)
+        tail_l, tail_r = pt(cls._ICON_FUSELAGE[1], -cls._ICON_TAIL), pt(cls._ICON_FUSELAGE[1], cls._ICON_TAIL)
+
+        draw_line(buf, *nose, *tail, color)
+        draw_line(buf, *wing_l, *wing_r, color)
+        draw_line(buf, *tail_l, *tail_r, color)
+        put_px(buf, int(round(nose[0])), int(round(nose[1])), color)   # nose pip -- reads as "front" even at low res
+
+        # Heading-unknown (no track data) gets a dim ring instead of a
+        # confidently-pointed icon that would be showing a fake direction.
+        if heading_deg is None:
+            for i in range(16):
+                a = i / 16 * 2 * math.pi
+                put_px(buf, int(round(cx + 8 * math.cos(a))), int(round(cy + 8 * math.sin(a))), rim(color, 0.4))
+
     def _frame_unconfigured(self, buf):
         msg = "SET LOCATION"
         draw_text3x5(buf, (WIDTH - (4 * len(msg) - 1)) // 2, 24, msg, self.INK)
@@ -4276,11 +4360,37 @@ class FlightEngine:
         buf = blank()
         fill(buf, self.BG)
         ac = aircraft[self.cur % len(aircraft)]
-
-        ident = (ac.get("ident") or "UNKNOWN")[:8]
-        draw_text3x5(buf, max(2, (WIDTH - (4 * len(ident) - 1)) // 2), 4, ident, self.PLANE)
-
         alt = ac.get("alt_ft")
+        col = self._alt_color(alt)
+
+        # Vertical budget, top to bottom, checked to not collide (icon is
+        # the tallest/widest element and was the thing worth double
+        # checking -- its reach at cy=24 is roughly y=15..33):
+        #   ident 2-6 | dots 9 (own row, no text on it) | icon 15-33 |
+        #   line2 35-39 | line3 43-47 | divider 50 | route 53-57 |
+        #   airline 59-63 (HEIGHT=64, last legal row)
+        ident = (ac.get("ident") or "UNKNOWN")[:8]
+        draw_text3x5(buf, max(2, (WIDTH - (4 * len(ident) - 1)) // 2), 2, ident, self.INK)
+
+        # Position dots: which aircraft (of how many) is on screen right
+        # now, so cycling reads as "stepping through a list" rather than
+        # an unexplained change every few seconds. Own row so it can never
+        # collide with the ident text above it regardless of callsign
+        # length (the old side-by-side layout could, for a long callsign
+        # with many aircraft tracked).
+        n = min(len(aircraft), 8)
+        if n > 1:
+            dot_w = n * 3 - 1
+            dx0 = (WIDTH - dot_w) // 2
+            for i in range(n):
+                c = self.DOT_ON if i == (self.cur % n) else self.DOT_OFF
+                put_px(buf, dx0 + i * 3, 9, c)
+
+        # Heading-oriented icon, the visual centerpiece -- colour-coded by
+        # altitude band (see ALT_BANDS) since that reads as "kind of
+        # traffic" better than raw distance would at this size.
+        self._draw_plane_icon(buf, WIDTH // 2, 24, ac.get("track_deg"), col)
+
         # .upper() defensively: aircraft type codes are conventionally
         # uppercase in ADS-B data, but "conventionally" is exactly the
         # word that just burned the airline-name field above.
@@ -4288,7 +4398,7 @@ class FlightEngine:
         line2 = f"{typ} {alt:.0f}FT".strip() if isinstance(alt, (int, float)) else (typ or "-")
         if 4 * len(line2) - 1 > WIDTH - 4:
             line2 = f"{alt:.0f}FT" if isinstance(alt, (int, float)) else typ
-        draw_text3x5(buf, max(2, (WIDTH - (4 * len(line2) - 1)) // 2), 16, line2, self.INK)
+        draw_text3x5(buf, max(2, (WIDTH - (4 * len(line2) - 1)) // 2), 35, line2, col)
 
         gs = ac.get("gs_kt")
         dist = ac.get("dist_nm")
@@ -4299,15 +4409,15 @@ class FlightEngine:
         if isinstance(dist, (int, float)):
             parts.append(f"{dist:.0f}NM {compass}".strip())
         line3 = " ".join(parts) if parts else "-"
-        draw_text3x5(buf, max(2, (WIDTH - (4 * len(line3) - 1)) // 2), 26, line3, self.INK_DIM)
+        draw_text3x5(buf, max(2, (WIDTH - (4 * len(line3) - 1)) // 2), 43, line3, self.INK_DIM)
 
         for x in range(4, WIDTH - 4):
-            put_px(buf, x, 34, (30, 34, 44))
+            put_px(buf, x, 50, (30, 34, 44))
 
         route = ac.get("route")
         if route and route.get("origin") and route.get("dest"):
             rline = f"{route['origin']}>{route['dest']}".upper()
-            draw_text3x5(buf, max(2, (WIDTH - (4 * len(rline) - 1)) // 2), 40, rline, self.ROUTE)
+            draw_text3x5(buf, max(2, (WIDTH - (4 * len(rline) - 1)) // 2), 53, rline, self.ROUTE)
             # adsbdb returns mixed-case names ("United Airlines"), but the
             # font is uppercase-only -- draw_text3x5 silently skips glyphs
             # it doesn't have, so lowercase letters vanished and "United
@@ -4315,21 +4425,16 @@ class FlightEngine:
             # nothing else. Every other display string in this codebase
             # was already uppercase at the source; this was the one place
             # that wasn't.
-            airline = (route.get("airline") or "").upper()[:16]
+            # Width-fit against real pixels, not a blind character slice --
+            # a fixed [:16] let long names ("Southwest Airlines") clip
+            # mid-glyph off the right edge instead of stopping cleanly.
+            airline = (route.get("airline") or "").upper()
+            while airline and 4 * len(airline) - 1 > WIDTH - 4:
+                airline = airline[:-1]
             if airline:
-                draw_text3x5(buf, max(2, (WIDTH - (4 * len(airline) - 1)) // 2), 48, airline, self.INK_DIM)
+                draw_text3x5(buf, max(2, (WIDTH - (4 * len(airline) - 1)) // 2), 59, airline, self.INK_DIM)
         else:
-            draw_text3x5(buf, (WIDTH - (4 * 10 - 1)) // 2, 44, "NO ROUTE DATA", self.INK_DIM)
-
-        # Position dots: which aircraft (of how many) is on screen right
-        # now, so cycling reads as "stepping through a list" rather than
-        # an unexplained change every few seconds.
-        n = min(len(aircraft), 8)
-        dot_w = n * 4 - 2
-        dx0 = (WIDTH - dot_w) // 2
-        for i in range(n):
-            col = self.DOT_ON if i == (self.cur % n) else self.DOT_OFF
-            put_px(buf, dx0 + i * 4, HEIGHT - 3, col)
+            draw_text3x5(buf, (WIDTH - (4 * 10 - 1)) // 2, 56, "NO ROUTE DATA", self.INK_DIM)
 
         if self.data.get("age") and self.data["age"] > 60:
             put_px(buf, WIDTH - 3, 2, self.STALE)
