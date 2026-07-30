@@ -74,6 +74,36 @@ def clamp(v, lo, hi):
     return lo if v < lo else hi if v > hi else v
 
 
+# Unit conversion, done here at the render layer on purpose -- feed
+# modules (satellite.py, weather.py) keep reporting whatever unit their
+# real upstream API actually returns (verified live, not assumed) so the
+# I/O layer stays a faithful mirror of the data source. Converting for
+# DISPLAY is a rendering concern, same as picking a color or a font
+# scale, so it lives with every other rendering decision instead of
+# leaking a "display preference" into the data layer.
+def km_to_mi(km):
+    return km * 0.621371
+
+
+def kmh_to_mph(kmh):
+    return kmh * 0.621371
+
+
+def c_to_f(c):
+    return c * 9.0 / 5.0 + 32.0
+
+
+def kt_to_mph(kt):
+    return kt * 1.15078
+
+
+def nm_to_mi(nm):
+    """Nautical miles -> statute miles. ADS-B reports distance in nautical
+    miles, which IS an imperial-family unit but not the one someone means
+    by 'how far away is that plane' -- a statute mile is."""
+    return nm * 1.15078
+
+
 def rim(color, k=0.35):
     """Darker rim of a neon colour — outlines that survive busy backgrounds."""
     return (max(0, int(color[0] * k)), max(0, int(color[1] * k)),
@@ -4058,7 +4088,8 @@ class SatelliteEngine:
             if self.hold >= self.VIEW_TICKS:
                 self.hold = 0
                 self.view = (self.view + 1) % 2
-        self.score = int(self.data.get("pos", {}).get("alt_km", 0)) if self.data.get("pos") else 0
+        alt_km = self.data.get("pos", {}).get("alt_km", 0) if self.data.get("pos") else 0
+        self.score = int(km_to_mi(alt_km))     # miles, matching what's actually shown on screen
 
     # ---- render --------------------------------------------------------
     @staticmethod
@@ -4152,16 +4183,20 @@ class SatelliteEngine:
         put_px(buf, mx, my - 1, self.ISS)
         put_px(buf, mx, my + 1, self.ISS)
 
-        alt = f"{pos['alt_km']:.0f}KM"
+        # Miles, not km. Altitude in miles (~263) rather than feet
+        # (~1,390,000): a 7-digit number is unreadable at this size and
+        # the extra precision is meaningless for something 260 miles up.
+        alt = f"{km_to_mi(pos['alt_km']):.0f}MI"
         draw_text3x5(buf, 3, 40, alt, self.INK)
-        vel = f"{pos['vel_kmh']:.0f}KM/H"
+        vel = f"{kmh_to_mph(pos['vel_kmh']):.0f}MPH"
         if 4 * len(vel) - 1 <= WIDTH - 6:
             draw_text3x5(buf, WIDTH - 3 - (4 * len(vel) - 1), 40, vel, self.INK_DIM)
 
         if self.data.get("configured") and "distance_km" in pos:
-            dist = f"{pos['distance_km']:.0f}KM FROM {self.data.get('label','HOME')[:8]}"
+            dist_mi = km_to_mi(pos["distance_km"])
+            dist = f"{dist_mi:.0f}MI FROM {self.data.get('label','HOME')[:8]}"
             if 4 * len(dist) - 1 > WIDTH - 4:
-                dist = f"{pos['distance_km']:.0f}KM AWAY"
+                dist = f"{dist_mi:.0f}MI AWAY"
             draw_text3x5(buf, max(2, (WIDTH - (4 * len(dist) - 1)) // 2), 50, dist, self.INK_DIM)
         else:
             draw_text3x5(buf, (WIDTH - (4 * 12 - 1)) // 2, 50, "SET LOCATION", self.INK_DIM)
@@ -4401,14 +4436,18 @@ class FlightEngine:
             line2 = f"{alt:.0f}FT" if isinstance(alt, (int, float)) else typ
         draw_text3x5(buf, max(2, (WIDTH - (4 * len(line2) - 1)) // 2), 35, line2, col)
 
+        # ADS-B natively reports altitude in FEET (already imperial, left
+        # as-is above) but ground speed in KNOTS and distance in NAUTICAL
+        # miles -- both aviation-standard, neither what someone reading a
+        # wall panel means. Converted to mph / statute miles for display.
         gs = ac.get("gs_kt")
         dist = ac.get("dist_nm")
         compass = self._compass(ac.get("dir_deg"))
         parts = []
         if isinstance(gs, (int, float)):
-            parts.append(f"{gs:.0f}KT")
+            parts.append(f"{kt_to_mph(gs):.0f}MPH")
         if isinstance(dist, (int, float)):
-            parts.append(f"{dist:.0f}NM {compass}".strip())
+            parts.append(f"{nm_to_mi(dist):.0f}MI {compass}".strip())
         line3 = " ".join(parts) if parts else "-"
         draw_text3x5(buf, max(2, (WIDTH - (4 * len(line3) - 1)) // 2), 43, line3, self.INK_DIM)
 
