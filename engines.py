@@ -270,15 +270,22 @@ def draw_header(buf, title, accent, right_tag=None, stale=False):
     for x in range(WIDTH):
         put_px(buf, x, 0, accent)
         put_px(buf, x, 1, rim(accent, 0.45))
-    draw_text3x5(buf, 2, 3, fit_text(title, WIDTH - 22), color_on_dark(accent))
-    if right_tag:
-        tag = fit_text(right_tag, 18)
-        draw_text3x5(buf, WIDTH - 2 - text_w(tag), 3, tag, (110, 118, 140))
+    # Right edge is laid out FIRST -- stale pip, then tag inside it --
+    # and the title gets whatever room is genuinely left. A fixed title
+    # budget (WIDTH-22) collided with any tag wider than a "1/9" counter
+    # (e.g. weather's "FL 86F"), and the pip and tag both claimed the same
+    # far-right corner, so both reserves have to be measured, not assumed.
+    right = WIDTH - 2
     if stale:
-        # Amber stale pip, always the same corner in every mode.
         for dx in range(2):
             for dy in range(2):
-                put_px(buf, WIDTH - 3 + dx, 3 + dy, (255, 170, 40))
+                put_px(buf, right - 2 + dx, 3 + dy, (255, 170, 40))
+        right -= 5
+    tag = fit_text(right_tag, 30) if right_tag else ""
+    if tag:
+        draw_text3x5(buf, right - text_w(tag), 3, tag, (110, 118, 140))
+        right -= text_w(tag) + 3
+    draw_text3x5(buf, 2, 3, fit_text(title, right - 2), color_on_dark(accent))
 
 
 def color_on_dark(c, floor=140):
@@ -5161,13 +5168,23 @@ class WeatherEngine:
                 draw_text_centered(buf, 38, "." * (1 + (self.ticks // 12) % 3), self.INK_DIM)
             return bytes(buf)
 
-        draw_header(buf, fit_text(self.data.get("place", "WEATHER"), WIDTH - 20),
-                    self.ACCENT, stale=stale)
-
-        # Temperature is the hero -- it's the one number anyone actually
-        # wants from a weather display, so it gets scale=2 and the only
-        # bright colour on the screen.
+        # "Feels like" rides in the header's top-right: it's the number
+        # that actually drives decisions (what to wear, whether to go
+        # outside), so it must always be on screen -- but it's a
+        # reference value next to the headline temperature, not a
+        # competitor for it, so it stays small rather than taking space
+        # from the hero. draw_header measures this tag and gives the
+        # place name whatever room is left.
         temp_c = cond.get("temp_c")
+        fl_c = weather.feels_like_c(cond)
+        fl_tag = None
+        if fl_c is not None:
+            fl_tag = f"FL {c_to_f(fl_c):.0f}F"
+        draw_header(buf, self.data.get("place", "WEATHER"), self.ACCENT,
+                    right_tag=fl_tag, stale=stale)
+
+        # Actual temperature is the hero -- scale=2 and the only bright
+        # colour on the screen.
         if temp_c is not None:
             draw_text_centered(buf, 12, f"{c_to_f(temp_c):.0f}F", (255, 235, 180), scale=2)
         else:
@@ -5180,6 +5197,7 @@ class WeatherEngine:
         draw_divider(buf, 37)
 
         wind = cond.get("wind_kmh")
+        wtxt = ""          # also read below for the right block's collision check
         if wind is not None:
             d = self._compass(cond.get("wind_dir_deg"))
             wtxt = f"{kmh_to_mph(wind):.0f}MPH {d}".strip()
@@ -5193,13 +5211,21 @@ class WeatherEngine:
         if gust is not None:
             label, val = "GUST", f"{kmh_to_mph(gust):.0f}MPH"
         elif hum is not None:
-            label, val = "HUMIDITY", f"{hum:.0f}%"
+            # "HUM", not "HUMIDITY": the long form pushed its block left
+            # far enough to collide with the wind value ("10MPH N62%").
+            label, val = "HUM", f"{hum:.0f}%"
         else:
             label = val = None
         if label:
-            w = max(text_w(label), text_w(val))
-            draw_text3x5(buf, WIDTH - 2 - w, 41, label, self.INK_DIM)
-            draw_text3x5(buf, WIDTH - 2 - w, 47, val, self.INK)
+            # Right-align label and value independently against the right
+            # edge, and only draw if there's a real gap from the wind
+            # block -- a shared left-edge block for the widest of the two
+            # is what let the narrow value creep into the wind text.
+            lx = WIDTH - 2 - text_w(label)
+            vx = WIDTH - 2 - text_w(val)
+            if min(lx, vx) > 2 + text_w(wtxt) + 3:
+                draw_text3x5(buf, lx, 41, label, self.INK_DIM)
+                draw_text3x5(buf, vx, 47, val, self.INK)
 
         draw_divider(buf, 55)
         draw_text_centered(buf, 58, "NO ALERTS", (60, 110, 70))

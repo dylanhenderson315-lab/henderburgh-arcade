@@ -56,6 +56,7 @@ ALERTS_URL = "https://api.weather.gov/alerts/active?point={lat},{lon}"
 CONDITIONS_REFRESH = 600.0    # observations update ~hourly; 10 min is plenty
 ALERTS_REFRESH = 120.0        # severe alerts are the time-critical half
 POINT_REFRESH = 86400.0       # gridpoint/station for a location never really changes
+MAX_STATION_TRIES = 4         # see _fetch_point: nearest station often under-reports
 CONFIG_CHECK = 10.0
 IDLE_STOP = 120.0
 TIMEOUT = 10.0
@@ -99,24 +100,72 @@ def _fetch_point(lat, lon):
     feats = sd.get("features") or []
     if not feats:
         return None
-    station = feats[0]["properties"]["stationIdentifier"]
-    return {"station": station, "city": city, "state": state}
+    # Keep several candidates, not just the nearest. Stations differ a lot
+    # in what they actually report: verified live that the nearest station
+    # here (KMYR) returns null heatIndex AND null humidity, while KCRE and
+    # KCPC a few miles away report both. Taking feats[0] blindly means
+    # "feels like" would silently never appear for some locations.
+    stations = [f["properties"]["stationIdentifier"] for f in feats[:MAX_STATION_TRIES]]
+    return {"stations": stations, "station": stations[0], "city": city, "state": state}
 
 
-def _fetch_conditions(station):
+def _read_observation(station):
     d = _get_json(f"https://api.weather.gov/stations/{station}/observations/latest")
     p = d.get("properties") or {}
     return {
         # Celsius and km/h -- NWS returns metric despite being a US
         # agency. Kept in source units here; converted at the render
         # layer like every other mode.
+        "station": station,
         "temp_c": _val(p.get("temperature")),
+        "heat_index_c": _val(p.get("heatIndex")),
+        "wind_chill_c": _val(p.get("windChill")),
         "wind_kmh": _val(p.get("windSpeed")),
         "gust_kmh": _val(p.get("windGust")),
         "wind_dir_deg": _val(p.get("windDirection")),
         "humidity": _val(p.get("relativeHumidity")),
         "text": (p.get("textDescription") or "").upper(),
     }
+
+
+def feels_like_c(obs):
+    """The 'feels like' temperature, in Celsius, or None.
+
+    NWS reports heatIndex and windChill as separate fields and populates
+    at most one of them -- heat index only above roughly 80F, wind chill
+    only below roughly 50F. Between those it reports neither, because
+    feels-like genuinely IS the air temperature in that band. So:
+    whichever of the two is present wins, otherwise fall back to the
+    actual temperature. This never computes a value NWS didn't give us --
+    the fallback is the real measured temperature, not an approximation
+    of a heat index we don't have the inputs for."""
+    if not obs:
+        return None
+    for key in ("heat_index_c", "wind_chill_c"):
+        v = obs.get(key)
+        if isinstance(v, (int, float)):
+            return v
+    return obs.get("temp_c")
+
+
+def _fetch_conditions(stations):
+    """Try candidate stations in order. Prefer one that reports a real
+    feels-like (heatIndex/windChill) or humidity alongside temperature;
+    fall back to the first that at least has a temperature."""
+    first_usable = None
+    for st in stations:
+        try:
+            obs = _read_observation(st)
+        except Exception:                              # noqa: BLE001
+            continue
+        if obs.get("temp_c") is None:
+            continue                                    # station reporting nothing useful
+        if first_usable is None:
+            first_usable = obs
+        if (obs.get("heat_index_c") is not None or obs.get("wind_chill_c") is not None
+                or obs.get("humidity") is not None):
+            return obs
+    return first_usable
 
 
 def _fetch_alerts(lat, lon):
@@ -247,9 +296,9 @@ class WeatherFeed:
             if not point:
                 return
             self._cond_try = now
-            station = point["station"]
+            stations = point.get("stations") or [point["station"]]
         try:
-            cond = _fetch_conditions(station)
+            cond = _fetch_conditions(stations)
             with self._lock:
                 self._cond = cond
                 self._cond_updated = time.time()
