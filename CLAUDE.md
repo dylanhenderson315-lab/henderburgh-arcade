@@ -12,8 +12,8 @@ file.
 A 64×64 LED matrix "arcade console" built on an Apollo M-1 WLED-MM panel
 (HUB75, ESP32-S3), currently driven by a Mac mini over the network. It
 runs classic games, live data "modes" (stock ticker, ISS tracker, flight
-tracker, sports scoreboard, news headline ticker), video/screen
-mirroring, and WLED's own ambient lighting effects — all through one local HTTP server with a web
+tracker, sports scoreboard, news headline ticker, weather + severe
+alerts), video/screen mirroring, and WLED's own ambient lighting effects — all through one local HTTP server with a web
 control page and a phone-optimized remote controller page.
 
 This Mac + WLED-MM setup is the **development rig**, not the final
@@ -60,7 +60,7 @@ small icon case in `MenuEngine._icon`.
 purpose** — this is the load-bearing pattern for the whole project:
 
 - A plain module (`market.py`, `satellite.py`, `flights.py`, `sports.py`,
-  `news.py`) owns ALL network I/O: a background-thread poller with a last-good
+  `news.py`, `weather.py`) owns ALL network I/O: a background-thread poller with a last-good
   cache, a `FEED` singleton, a `get()` that never blocks, and a
   `*_config.json` file (with matching `save_config`/`load_config`) for
   anything an owner should be able to configure without a code edit.
@@ -171,6 +171,36 @@ appends them to the menu automatically.
   currently redirect to their homepage with nothing parseable — not
   offered as defaults for that reason, documented in `news.py` rather
   than silently omitted.
+- **weather** (`weather.py`/`WeatherEngine`, 2026-07-30) — NOAA/NWS
+  current conditions + active severe alerts. Reuses `location_config.json`
+  (does NOT duplicate a home location). Active alerts **preempt** the
+  conditions view rather than taking a turn in a rotation, and pulse;
+  severity drives colour so an advisory doesn't cry wolf in tornado red.
+  Real NWS behaviours confirmed live, all of them traps: `/points`
+  **301-redirects on coordinates with >4 decimal places** and the 301
+  body is valid JSON with no usable fields, so it fails *silently*
+  (coords are rounded before the request); there is no one-call current
+  conditions (walk `/points` → `/gridpoints/.../stations` →
+  `/stations/{id}/observations/latest`); **NWS returns metric** (degC,
+  km/h) despite being a US agency; fields are frequently null on healthy
+  stations (humidity and gust both null on a real clear reading); and
+  coverage is US-only, reported honestly as "no NWS coverage".
+
+**Units are imperial everywhere**, converted at the **render layer**
+(`km_to_mi`, `kmh_to_mph`, `kt_to_mph`, `nm_to_mi`, `c_to_f` in
+`engines.py`) — feed modules still report whatever their upstream API
+actually returns, so the I/O layer stays a faithful mirror of the source
+and "what units to display" stays a rendering decision. Note ADS-B is
+natively feet (left alone) but knots and *nautical* miles (converted).
+
+**Shared visual system for data modes** — `draw_header`,
+`draw_text_centered`, `text_w`, `fit_text`, `draw_divider`, `draw_dots`,
+`draw_marquee`, `color_on_dark` in `engines.py`. All six data modes use
+the same accent-rule header + title + right tag + stale pip, so they read
+as one product; only the accent colour changes per mode. **Use `text_w()`
+rather than re-inlining `4*len(s)-1`** — that duplication (~40 sites) is
+how a scale=2 string silently overflowed. Games deliberately do NOT use
+this system; they have their own full-bleed visual language.
 
 **Other modes**: `mirror` (screen capture -> panel, needs mss+Pillow),
 `video`/`stream` naming (see Known issues — `stream.py` is currently
@@ -194,6 +224,7 @@ feed's thread hasn't idled out yet. Real per-mode request rates:
   while active, plus 1 more call/20s only when the pinned favorite's game
   is actually live (win probability).
 - news: 1 call/300s.
+- weather: 1 obs call/600s + 1 alerts call/120s (gridpoint cached ~daily).
 - audio_sync: zero request cost — a blocking UDP socket, not polling.
 
 None of this is a real load on the Mac (all network-I/O-bound, sleeping
