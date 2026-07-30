@@ -4243,6 +4243,12 @@ class SatelliteEngine:
         self.orbit_phase = 0.0
 
     # ---- input -----------------------------------------------------------
+    def has_content(self):
+        """Worth showing in the ambient rotation? Needs a real home
+        location AND a real position fix -- an unconfigured tracker is a
+        setup prompt, not information."""
+        return bool(self.data.get("configured")) and self.data.get("pos") is not None
+
     def input(self, cmd):
         if cmd == "left":
             self.view = (self.view - 1) % 2
@@ -4488,6 +4494,12 @@ class FlightEngine:
         self.ticks = 0
 
     # ---- input -----------------------------------------------------------
+    def has_content(self):
+        """Needs a home location AND at least one aircraft actually in the
+        sky right now -- 'CLEAR SKIES' is honest but it is not content to
+        dwell on for 20 seconds in a rotation."""
+        return bool(self.data.get("configured")) and bool(self.data.get("aircraft"))
+
     def input(self, cmd):
         n = len(self.data.get("aircraft") or [])
         if not n:
@@ -4750,6 +4762,12 @@ class SportsEngine:
         self.score_flash = 0
 
     # ---- input -----------------------------------------------------------
+    def has_content(self):
+        """Any game today in the configured leagues. Off-season leagues
+        legitimately return nothing (see sports.py's dates= fix), which is
+        exactly when this should be skipped."""
+        return bool(self.data.get("games"))
+
     def input(self, cmd):
         games = self.data.get("games") or []
         if cmd == "left":
@@ -4996,6 +5014,9 @@ class NewsEngine:
         self._last_headline_key = None
 
     # ---- input -----------------------------------------------------------
+    def has_content(self):
+        return bool(self.data.get("headlines"))
+
     def input(self, cmd):
         n = len(self.data.get("headlines") or [])
         if not n:
@@ -5122,6 +5143,12 @@ class WeatherEngine:
         self.scroll = 0.0
 
     # ---- input -----------------------------------------------------------
+    def has_content(self):
+        """Conditions OR an active alert. An alert with no observation
+        still absolutely counts."""
+        return bool(self.data.get("configured")) and bool(
+            self.data.get("conditions") or self.data.get("alerts"))
+
     def input(self, cmd):
         alerts = self.data.get("alerts") or []
         if cmd == "left" and alerts:
@@ -5253,6 +5280,134 @@ class WeatherEngine:
         if alerts:
             return self._frame_alert(alerts[self.cur_alert % len(alerts)])
         return self._frame_conditions()
+
+
+class AmbientEngine:
+    """Master rotation: flights -> ISS -> weather -> sports -> news, on a
+    loop, skipping anything that has nothing to show right now.
+
+    Composition, not reimplementation: this owns real instances of the
+    other engines and delegates tick()/frame()/input() to whichever is
+    current. Every sub-mode therefore looks and behaves in the rotation
+    exactly as it does on its own, and a fix to any of them lands here for
+    free. Nothing about their rendering is duplicated.
+
+    All five sub-engines are ticked every tick, not just the visible one.
+    That is deliberate and load-bearing: each engine's tick() is what
+    calls its FEED.get(), and a feed whose get() stops being called goes
+    idle and stops polling (IDLE_STOP). Ticking only the visible one would
+    mean every mode had cold, empty data at the moment it came up -- and
+    has_content() would then skip it, so the rotation would collapse to
+    whichever mode happened to be warm. Ticking is cheap (cached reads,
+    no I/O on this thread); only the current engine's frame() is drawn.
+    """
+
+    name = "ambient"
+    tick_rate = 0.05
+
+    BG = (0, 0, 0)
+    INK = (150, 160, 185)
+    INK_DIM = (70, 76, 92)
+
+    # Order is deliberate: the two "look up, something is happening right
+    # now" modes lead, then weather, then the two reading-heavy tickers.
+    SEQUENCE = ("flights", "satellite", "weather", "sports", "news")
+
+    DWELL_TICKS = 400        # ~20s per mode at this tick rate
+    RECHECK_TICKS = 60       # ~3s before giving up on an all-empty rotation
+
+    def __init__(self):
+        self.score = 0
+        self.engines = {n: ENGINES[n]() for n in self.SEQUENCE}
+        self.reset()
+
+    def reset(self):
+        for e in self.engines.values():
+            e.reset()
+        self.idx = 0
+        self.hold = 0
+        self.ticks = 0
+        self.cycling = True
+
+    @property
+    def current(self):
+        return self.engines[self.SEQUENCE[self.idx]]
+
+    def _available(self):
+        return [i for i, n in enumerate(self.SEQUENCE)
+                if self.engines[n].has_content()]
+
+    def _advance(self, step=1):
+        avail = self._available()
+        if not avail:
+            return
+        # Move to the next available index in rotation order, wrapping --
+        # not just "next in avail", so manual stepping stays predictable
+        # when availability changes between presses.
+        n = len(self.SEQUENCE)
+        for k in range(1, n + 1):
+            cand = (self.idx + step * k) % n
+            if cand in avail:
+                self.idx = cand
+                return
+
+    # ---- input -----------------------------------------------------------
+    def input(self, cmd):
+        if cmd == "left":
+            self._advance(-1)
+            self.hold = 0
+        elif cmd == "right":
+            self._advance(1)
+            self.hold = 0
+        elif cmd in ("rotate", "drop"):
+            self.cycling = not self.cycling
+        else:
+            self.current.input(cmd)     # anything else belongs to the sub-mode
+
+    def auto(self):
+        pass          # already self-cycling; ambient and manual look the same
+
+    # ---- simulation --------------------------------------------------------
+    def tick(self):
+        self.ticks += 1
+        for e in self.engines.values():
+            e.tick()                   # keeps every feed warm; see class docstring
+
+        avail = self._available()
+        if not avail:
+            return                     # nothing anywhere yet; the frame() shows why
+
+        if self.idx not in avail:
+            # Whatever we were showing just went empty (last plane left the
+            # sky, games ended). Move on immediately rather than dwelling on
+            # a mode that now has nothing.
+            self._advance(1)
+            self.hold = 0
+
+        if self.cycling and len(avail) > 1:
+            self.hold += 1
+            if self.hold >= self.DWELL_TICKS:
+                self.hold = 0
+                self._advance(1)
+
+        self.score = self.current.score
+
+    # ---- render --------------------------------------------------------
+    def frame(self):
+        avail = self._available()
+        if not avail:
+            buf = blank()
+            fill(buf, self.BG)
+            draw_text_centered(buf, 22, "AMBIENT", self.INK)
+            # Kept short enough to actually FIT at 64px: "WAITING FOR DATA"
+            # is 63px against a 60px budget, so fit_text word-truncated it to
+            # a dangling "WAITING FOR". Caught by rendering it and reading
+            # the pixels -- the string length was the bug, not the fitter.
+            draw_text_centered(buf, 34, "NO DATA YET", self.INK_DIM)
+            dots = "." * (1 + (self.ticks // 12) % 3)
+            draw_text_centered(buf, 44, dots, self.INK_DIM)
+            return bytes(buf)
+        return self.current.frame()
 
 
 class BootEngine:
@@ -5420,6 +5575,7 @@ class MenuEngine:
         ("sports",   "SPORTS",   (255, 140, 40)),
         ("news",     "NEWS",     (255, 226, 60)),
         ("weather",  "WEATHER",  (90, 190, 255)),
+        ("ambient",  "AMBIENT",  (176, 96, 255)),
     ]
 
     def __init__(self):
@@ -5672,6 +5828,19 @@ class MenuEngine:
             block(2, 3, 5, 1, c)
             put_px(buf, x0 + 1, y0 + 7, c)
             put_px(buf, x0 + 7, y0 + 7, c)
+        elif gid == "ambient":
+            # A rotation arrow around a dot: "these modes cycle" -- distinct
+            # from every single-subject icon since this one IS the loop.
+            for xx in range(2, 8):
+                put_px(buf, x0 + xx, y0 + 1, c)
+                put_px(buf, x0 + xx, y0 + 8, c)
+            for yy in range(2, 8):
+                put_px(buf, x0 + 1, y0 + yy, c)
+                put_px(buf, x0 + 8, y0 + yy, c)
+            block(4, 4, 2, 2, w)          # the "current" mode at the centre
+            put_px(buf, x0 + 7, y0 + 0, w)   # arrowhead, so it reads as motion
+            put_px(buf, x0 + 8, y0 + 1, w)
+            put_px(buf, x0 + 7, y0 + 2, w)
         elif gid == "news":
             # A folded newspaper: masthead bar + column rules -- distinct
             # from the ticker's bar-chart language and the sports
@@ -7436,6 +7605,7 @@ ENGINES = {
     "sports": SportsEngine,
     "news": NewsEngine,
     "weather": WeatherEngine,
+    "ambient": AmbientEngine,
     "menu": MenuEngine,
     "boot": BootEngine,
 }
