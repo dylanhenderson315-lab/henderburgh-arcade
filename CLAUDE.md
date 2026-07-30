@@ -139,17 +139,38 @@ appends them to the menu automatically.
   don't duplicate it.
 - **flights** (`flights.py`/`FlightEngine`) — nearby ADS-B traffic
   (adsb.lol) + route/airline enrichment (adsbdb), reuses satellite's
-  location config.
-- **sports** (`sports.py`/`SportsEngine`, 2026-07-30) — NFL/NBA/MLB/NHL
-  scores via ESPN's free undocumented site API. Pinned favorite team
-  (full-screen score, scoring-flash animation, win probability when
-  available) + a rotating ticker of every other game. Two real,
-  *confirmed-not-assumed* API gaps worth knowing if you touch this mode:
-  win probability lives in a **separate** per-game `summary?event=ID`
-  call, not the bulk scoreboard payload; and **NHL's summary endpoint has
-  no win-probability data at all**, checked against a real completed NHL
-  game. The engine correctly shows no win% line for NHL rather than
-  guessing one.
+  location config. Heading-oriented plane icon (procedurally rotated from
+  real `track_deg` via `draw_line`, not a fixed sprite table — deliberately
+  not a real airline logo, no IP exposure), color-coded by altitude band
+  (chosen over distance-band coloring: distance is already shown as text,
+  altitude wasn't color-coded anywhere, and altitude is the more standard
+  "what kind of traffic is this" signal on real ATC displays).
+- **sports** (`sports.py`/`SportsEngine`, 2026-07-30, expanded same day) —
+  NFL/NBA/MLB/NHL/EPL/NCAAF/NCAAB scores via ESPN's free undocumented site
+  API. Pinned favorite team (full-screen score, scoring-flash animation,
+  win probability when available) + a rotating ticker of every other game,
+  each team row tinted with its **real** ESPN `team.color` (with a
+  brightness floor so genuinely near-black team colors, which real teams
+  do ship, stay visible on the panel's black background — not an invented
+  color, the real hue lifted to a visible minimum). Real gaps
+  *confirmed-not-assumed*, not guessed: win probability lives in a
+  **separate** per-game `summary?event=ID` call, not the bulk scoreboard
+  payload; **NHL and EPL's summary endpoints have no win-probability data
+  at all**, each checked against a real completed game. The engine shows
+  no win% line for those two rather than guessing one. Also: the bare
+  scoreboard endpoint with no `dates` param does NOT mean "today" during
+  a league's dead period — it jumps to the next scheduled game, which can
+  be months out (an NFL game shown in July). Always pass an explicit
+  `dates=<today>`; confirmed live this correctly returns zero games for
+  an off-season league instead of a bogus future one.
+- **news** (`news.py`/`NewsEngine`, 2026-07-30) — source-configurable RSS
+  headline ticker, any standard RSS 2.0 feed URL (default: Fox News).
+  Headlines only — reads `<item><title>`, never `<description>` or
+  `<content:encoded>` even though real feeds carry them. AP's and
+  Reuters' commonly-referenced public RSS URLs were tried live and both
+  currently redirect to their homepage with nothing parseable — not
+  offered as defaults for that reason, documented in `news.py` rather
+  than silently omitted.
 
 **Other modes**: `mirror` (screen capture -> panel, needs mss+Pillow),
 `video`/`stream` naming (see Known issues — `stream.py` is currently
