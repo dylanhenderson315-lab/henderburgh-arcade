@@ -24,6 +24,7 @@ import market
 import satellite
 import flights
 import sports
+import news
 import tic80_core
 
 WIDTH = 64
@@ -4738,6 +4739,147 @@ class SportsEngine:
         return self._frame_ticker()
 
 
+class NewsEngine:
+    """RSS headline ticker.
+
+    Same discipline as every other data mode: no I/O in this class, reads
+    whatever news.FEED has already cached. Headlines are typically far
+    wider than 64px even at scale=1 (a real headline can run 80+
+    characters), so unlike the ticker/sports modes there's no sensible
+    fixed-width truncation for the "current" headline -- it scrolls, the
+    same way the bottom tape of every other ticker mode already does,
+    just bigger and as the primary content instead of a secondary strip.
+
+    Auto-advances through headlines on a fixed tick cadence (not "wait for
+    the scroll to finish"), matching every other mode's cycling behavior
+    so the pacing is predictable regardless of headline length.
+    """
+
+    name = "news"
+    tick_rate = 0.05
+
+    BG = (0, 0, 0)
+    INK = (150, 160, 185)
+    INK_DIM = (70, 76, 92)
+    HEADLINE = (255, 226, 60)
+    STALE = (255, 170, 40)
+    LOSE = (255, 70, 80)
+
+    SPOTLIGHT_TICKS = 260      # ~13s per headline before auto-advancing
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.data = {"headlines": [], "label": "NEWS", "age": None, "err": None}
+        self.cur = 0
+        self.hold = 0
+        self.cycling = True
+        self.ticks = 0
+        self.scroll = 0.0
+        self._last_headline_key = None
+
+    # ---- input -----------------------------------------------------------
+    def input(self, cmd):
+        n = len(self.data.get("headlines") or [])
+        if not n:
+            return
+        if cmd == "left":
+            self.cur = (self.cur - 1) % n
+            self.hold = 0
+        elif cmd == "right":
+            self.cur = (self.cur + 1) % n
+            self.hold = 0
+        elif cmd in ("rotate", "drop"):
+            self.cycling = not self.cycling
+
+    def auto(self):
+        pass          # already self-cycling; ambient and manual look the same
+
+    # ---- simulation --------------------------------------------------------
+    def tick(self):
+        self.ticks += 1
+        self.data = news.FEED.get()
+        n = len(self.data.get("headlines") or [])
+        if n:
+            self.cur %= n
+        self.scroll += 0.5
+        if self.cycling and n > 1:
+            self.hold += 1
+            if self.hold >= self.SPOTLIGHT_TICKS:
+                self.hold = 0
+                self.cur = (self.cur + 1) % n
+        self.score = n
+
+        key = (self.cur, n)
+        if key != self._last_headline_key:
+            self._last_headline_key = key
+            self.scroll = 0.0     # fresh scroll from the start on every headline change
+
+    # ---- render --------------------------------------------------------
+    def frame(self):
+        buf = blank()
+        fill(buf, self.BG)
+        headlines = self.data.get("headlines") or []
+        label = self.data.get("label") or "NEWS"
+
+        draw_text3x5(buf, (WIDTH - (4 * len(label) - 1)) // 2, 3, label, self.INK_DIM)
+        for x in range(4, WIDTH - 4):
+            put_px(buf, x, 10, (30, 34, 44))
+
+        if not headlines:
+            msg = "NO HEADLINES" if self.data.get("err") else "LOADING"
+            draw_text3x5(buf, (WIDTH - (4 * len(msg) - 1)) // 2, 28, msg,
+                         self.LOSE if self.data.get("err") else self.INK_DIM)
+            dots = "." * (1 + (self.ticks // 12) % 3)
+            draw_text3x5(buf, (WIDTH - 11) // 2, 38, dots, self.INK_DIM)
+            return bytes(buf)
+
+        # --- spotlight: the current headline, big, scrolling ---
+        headline = headlines[self.cur % len(headlines)]
+        text = headline + "     "               # trailing gap before the loop repeats
+        text_w = 8 * len(text)                    # scale=2 glyph pitch
+        off = int(self.scroll) % text_w
+        for rep in (0, 1):
+            x = -off + rep * text_w
+            for ch in text:
+                if x > WIDTH:
+                    break
+                if x > -8:
+                    draw_text3x5(buf, x, 20, ch, self.HEADLINE, scale=2)
+                x += 8
+
+        for x in range(4, WIDTH - 4):
+            put_px(buf, x, 38, (30, 34, 44))
+
+        # --- full tape of every other headline, ESPN-ticker-style ---
+        tape = "   /   ".join(headlines) + "   /   "
+        tape_w = 4 * len(tape)
+        if tape_w:
+            toff = int(self.scroll * 0.6) % tape_w    # slower than the spotlight -- two independent reads, not a race
+            for rep in (0, 1):
+                x = -toff + rep * tape_w
+                for ch in tape:
+                    if x > WIDTH:
+                        break
+                    if x > -4:
+                        draw_text3x5(buf, x, 44, ch, self.INK_DIM)
+                    x += 4
+
+        n = min(len(headlines), 10)
+        dot_w = n * 3 - 1
+        dx0 = (WIDTH - dot_w) // 2
+        for i in range(n):
+            col = self.INK if i == (self.cur % n) else (40, 44, 56)
+            put_px(buf, dx0 + i * 3, HEIGHT - 3, col)
+
+        if self.data.get("age") and self.data["age"] > 1800:
+            put_px(buf, WIDTH - 3, 2, self.STALE)
+            put_px(buf, WIDTH - 2, 2, self.STALE)
+        return bytes(buf)
+
+
 class BootEngine:
     name = "boot"
     tick_rate = 0.045
@@ -4901,6 +5043,7 @@ class MenuEngine:
         ("satellite", "ISS",     (255, 226, 60)),
         ("flights",  "FLIGHTS",  (120, 200, 255)),
         ("sports",   "SPORTS",   (255, 140, 40)),
+        ("news",     "NEWS",     (255, 226, 60)),
     ]
 
     def __init__(self):
@@ -5145,6 +5288,13 @@ class MenuEngine:
             block(6, 2, 2, 1, w)
             block(2, 5, 2, 1, c)
             block(6, 5, 2, 1, c)
+        elif gid == "news":
+            # A folded newspaper: masthead bar + column rules -- distinct
+            # from the ticker's bar-chart language and the sports
+            # scoreboard's grid, reads as "print/headlines" at a glance.
+            block(1, 1, 8, 2, w)
+            for yy in (4, 6, 8):
+                block(1, yy, 8, 1, c)
         elif gid.startswith("tic:"):
             # Generic cartridge glyph -- a cart's own art lives inside the
             # emulator, not on the menu tile, so every dropped-in .tic gets
@@ -6900,6 +7050,7 @@ ENGINES = {
     "satellite": SatelliteEngine,
     "flights": FlightEngine,
     "sports": SportsEngine,
+    "news": NewsEngine,
     "menu": MenuEngine,
     "boot": BootEngine,
 }

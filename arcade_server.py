@@ -41,6 +41,7 @@ import backgrounds
 import market
 import satellite
 import sports
+import news
 
 PORT = 7333
 HERE = Path(__file__).parent
@@ -836,6 +837,10 @@ class Handler(BaseHTTPRequestHandler):
             leagues, favorite = sports.FEED.get_config()
             self._json({"leagues": leagues, "favorite": favorite,
                         "known_leagues": sorted(sports.LEAGUE_PATHS)})
+        elif path == "/api/news/config":
+            feed_url, label = news.FEED.get_config()
+            self._json({"feed_url": feed_url, "label": label,
+                        "default_feed_url": news.DEFAULT_FEED_URL})
         elif path == "/api/frame":                    # legacy shape
             s = ARCADE.snapshot()
             self._json({"w": WIDTH, "h": HEIGHT, "mode": s["mode"],
@@ -971,6 +976,16 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         self._json({"ok": True, "favorite": favorite})
             except (ValueError, KeyError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/news/source":
+            try:
+                j = json.loads(body or b"{}")
+                ok = news.FEED.set_source(j.get("feed_url", ""), j.get("label", ""))
+                if ok:
+                    self._json({"ok": True})
+                else:
+                    self._json({"ok": False, "error": "feed_url required"}, 400)
+            except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/pause" or (
                 len(parts) == 3 and parts[:2] == ["api", "pause"]):
