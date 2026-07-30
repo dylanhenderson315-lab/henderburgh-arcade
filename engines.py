@@ -4251,11 +4251,26 @@ class SatelliteEngine:
         self.orbit_phase = 0.0
 
     # ---- input -----------------------------------------------------------
+    # Which of the two views actually has data behind it. The views are
+    # fed by two INDEPENDENT APIs (wheretheiss.at for position,
+    # polluxlabs for pass predictions) that fail separately -- and
+    # satellite._refresh_pass swallows its exceptions, so a dead pass API
+    # is invisible while position keeps working, and vice versa.
+    def _view_has_data(self, view):
+        return (self.data.get("next_pass") is not None) if view == 0 \
+            else (self.data.get("pos") is not None)
+
     def has_content(self):
         """Worth showing in the ambient rotation? Needs a real home
-        location AND a real position fix -- an unconfigured tracker is a
-        setup prompt, not information."""
-        return bool(self.data.get("configured")) and self.data.get("pos") is not None
+        location and at least ONE of the two views populated.
+
+        Previously this required a position fix specifically, which meant
+        that with the position API down but pass predictions healthy, a
+        perfectly good "NEXT ISS PASS IN 1H 00M / VISIBLE" screen was
+        reported as no-content and skipped entirely by the rotation.
+        """
+        return bool(self.data.get("configured")) and (
+            self.data.get("pos") is not None or self.data.get("next_pass") is not None)
 
     def input(self, cmd):
         if cmd == "left":
@@ -4280,6 +4295,14 @@ class SatelliteEngine:
             if self.hold >= self.VIEW_TICKS:
                 self.hold = 0
                 self.view = (self.view + 1) % 2
+        # Don't dwell on a view whose API is down while the other one has
+        # real data -- otherwise half of every rotation slot is a
+        # "NO PASS DATA" placeholder for no reason. Only switches away if
+        # the OTHER view is actually populated, so with both down the
+        # normal empty state still shows rather than flapping.
+        if not self._view_has_data(self.view) and self._view_has_data(1 - self.view):
+            self.view = 1 - self.view
+            self.hold = 0
         alt_km = self.data.get("pos", {}).get("alt_km", 0) if self.data.get("pos") else 0
         self.score = int(km_to_mi(alt_km))     # miles, matching what's actually shown on screen
 
