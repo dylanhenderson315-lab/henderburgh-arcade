@@ -22,6 +22,7 @@ from pathlib import Path
 
 import market
 import satellite
+import flights
 import tic80_core
 
 WIDTH = 64
@@ -150,6 +151,8 @@ _FONT3x5 = {
     "!": ("010", "010", "010", "000", "010"),
     "?": ("110", "001", "010", "000", "010"),
     "'": ("010", "010", "000", "000", "000"),
+    ">": ("100", "010", "001", "010", "100"),
+    "<": ("001", "010", "100", "010", "001"),
 }
 
 
@@ -4152,6 +4155,187 @@ class SatelliteEngine:
         return self._frame_pass() if self.view == 0 else self._frame_live()
 
 
+class FlightEngine:
+    """Live ADS-B flight tracker.
+
+    Same discipline as Ticker/Satellite: no I/O in this class. Reads
+    whatever flights.FEED has cached and spotlights one aircraft at a time,
+    rotating every ~12s per the spec (10-15s). left/right steps through the
+    list manually; the face button pauses the rotation.
+
+    Identifier display is deliberately scale=1, not the scale=2 the ticker
+    uses for its 3-4 char symbols -- real callsigns run up to 7-8
+    characters (DAL1362, GJS4494), and forcing scale=2 would either clip
+    or need per-string width math to avoid it. Safe and always-fits beats
+    flashy-but-fragile for exactly the class of bug the ticker had.
+    """
+
+    name = "flights"
+    tick_rate = 0.05
+
+    BG = (0, 0, 0)
+    INK = (150, 160, 185)
+    INK_DIM = (70, 76, 92)
+    PLANE = (120, 200, 255)
+    ROUTE = (255, 226, 60)
+    STALE = (255, 170, 40)
+    DOT_ON = (150, 160, 185)
+    DOT_OFF = (40, 44, 56)
+
+    VIEW_TICKS = 240          # ~12s per aircraft at this tick rate
+
+    COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.data = {"aircraft": [], "age": None, "home_label": "HOME",
+                    "configured": False, "err": None}
+        self.cur = 0
+        self.hold = 0
+        self.cycling = True
+        self.ticks = 0
+
+    # ---- input -----------------------------------------------------------
+    def input(self, cmd):
+        n = len(self.data.get("aircraft") or [])
+        if not n:
+            return
+        if cmd == "left":
+            self.cur = (self.cur - 1) % n
+            self.hold = 0
+        elif cmd == "right":
+            self.cur = (self.cur + 1) % n
+            self.hold = 0
+        elif cmd in ("rotate", "drop"):
+            self.cycling = not self.cycling
+
+    def auto(self):
+        pass          # already self-cycling; ambient and manual look the same
+
+    # ---- simulation --------------------------------------------------------
+    def tick(self):
+        self.ticks += 1
+        self.data = flights.FEED.get()
+        n = len(self.data.get("aircraft") or [])
+        if n:
+            self.cur %= n
+        if self.cycling and n > 1:
+            self.hold += 1
+            if self.hold >= self.VIEW_TICKS:
+                self.hold = 0
+                self.cur = (self.cur + 1) % n
+        self.score = n
+
+    # ---- render --------------------------------------------------------
+    @staticmethod
+    def _compass(deg):
+        if deg is None:
+            return ""
+        i = int((deg + 22.5) % 360 // 45)
+        return FlightEngine.COMPASS[i]
+
+    def _frame_unconfigured(self, buf):
+        msg = "SET LOCATION"
+        draw_text3x5(buf, (WIDTH - (4 * len(msg) - 1)) // 2, 24, msg, self.INK)
+        sub = "TO TRACK SKY"
+        draw_text3x5(buf, (WIDTH - (4 * len(sub) - 1)) // 2, 34, sub, self.INK_DIM)
+        return bytes(buf)
+
+    def _frame_idle(self):
+        buf = blank()
+        fill(buf, self.BG)
+        msg = "CLEAR SKIES"
+        draw_text3x5(buf, (WIDTH - (4 * len(msg) - 1)) // 2, 26, msg, self.INK_DIM)
+        sub = "NO AIRCRAFT NEARBY" if not self.data.get("err") else "CONNECTION ERROR"
+        # 19 chars is too wide at 64px on one line -- split cleanly rather
+        # than let it run off the edge.
+        if 4 * len(sub) - 1 > WIDTH - 4:
+            words = sub.split()
+            mid = len(words) // 2
+            line1, line2 = " ".join(words[:mid]), " ".join(words[mid:])
+            draw_text3x5(buf, max(2, (WIDTH - (4 * len(line1) - 1)) // 2), 36, line1, self.INK_DIM)
+            draw_text3x5(buf, max(2, (WIDTH - (4 * len(line2) - 1)) // 2), 44, line2, self.INK_DIM)
+        else:
+            draw_text3x5(buf, (WIDTH - (4 * len(sub) - 1)) // 2, 36, sub, self.INK_DIM)
+        return bytes(buf)
+
+    def frame(self):
+        if not self.data.get("configured"):
+            buf = blank()
+            fill(buf, self.BG)
+            return self._frame_unconfigured(buf)
+
+        aircraft = self.data.get("aircraft") or []
+        if not aircraft:
+            return self._frame_idle()
+
+        buf = blank()
+        fill(buf, self.BG)
+        ac = aircraft[self.cur % len(aircraft)]
+
+        ident = (ac.get("ident") or "UNKNOWN")[:8]
+        draw_text3x5(buf, max(2, (WIDTH - (4 * len(ident) - 1)) // 2), 4, ident, self.PLANE)
+
+        alt = ac.get("alt_ft")
+        # .upper() defensively: aircraft type codes are conventionally
+        # uppercase in ADS-B data, but "conventionally" is exactly the
+        # word that just burned the airline-name field above.
+        typ = (ac.get("type") or "").upper()
+        line2 = f"{typ} {alt:.0f}FT".strip() if isinstance(alt, (int, float)) else (typ or "-")
+        if 4 * len(line2) - 1 > WIDTH - 4:
+            line2 = f"{alt:.0f}FT" if isinstance(alt, (int, float)) else typ
+        draw_text3x5(buf, max(2, (WIDTH - (4 * len(line2) - 1)) // 2), 16, line2, self.INK)
+
+        gs = ac.get("gs_kt")
+        dist = ac.get("dist_nm")
+        compass = self._compass(ac.get("dir_deg"))
+        parts = []
+        if isinstance(gs, (int, float)):
+            parts.append(f"{gs:.0f}KT")
+        if isinstance(dist, (int, float)):
+            parts.append(f"{dist:.0f}NM {compass}".strip())
+        line3 = " ".join(parts) if parts else "-"
+        draw_text3x5(buf, max(2, (WIDTH - (4 * len(line3) - 1)) // 2), 26, line3, self.INK_DIM)
+
+        for x in range(4, WIDTH - 4):
+            put_px(buf, x, 34, (30, 34, 44))
+
+        route = ac.get("route")
+        if route and route.get("origin") and route.get("dest"):
+            rline = f"{route['origin']}>{route['dest']}".upper()
+            draw_text3x5(buf, max(2, (WIDTH - (4 * len(rline) - 1)) // 2), 40, rline, self.ROUTE)
+            # adsbdb returns mixed-case names ("United Airlines"), but the
+            # font is uppercase-only -- draw_text3x5 silently skips glyphs
+            # it doesn't have, so lowercase letters vanished and "United
+            # Airlines" rendered as just the two capitals, "U" and "A",
+            # nothing else. Every other display string in this codebase
+            # was already uppercase at the source; this was the one place
+            # that wasn't.
+            airline = (route.get("airline") or "").upper()[:16]
+            if airline:
+                draw_text3x5(buf, max(2, (WIDTH - (4 * len(airline) - 1)) // 2), 48, airline, self.INK_DIM)
+        else:
+            draw_text3x5(buf, (WIDTH - (4 * 10 - 1)) // 2, 44, "NO ROUTE DATA", self.INK_DIM)
+
+        # Position dots: which aircraft (of how many) is on screen right
+        # now, so cycling reads as "stepping through a list" rather than
+        # an unexplained change every few seconds.
+        n = min(len(aircraft), 8)
+        dot_w = n * 4 - 2
+        dx0 = (WIDTH - dot_w) // 2
+        for i in range(n):
+            col = self.DOT_ON if i == (self.cur % n) else self.DOT_OFF
+            put_px(buf, dx0 + i * 4, HEIGHT - 3, col)
+
+        if self.data.get("age") and self.data["age"] > 60:
+            put_px(buf, WIDTH - 3, 2, self.STALE)
+            put_px(buf, WIDTH - 2, 2, self.STALE)
+        return bytes(buf)
+
+
 class BootEngine:
     name = "boot"
     tick_rate = 0.045
@@ -4313,6 +4497,7 @@ class MenuEngine:
         ("powder",   "POWDER",   (230, 190, 90)),
         ("ticker",   "TICKER",   (60, 230, 110)),
         ("satellite", "ISS",     (255, 226, 60)),
+        ("flights",  "FLIGHTS",  (120, 200, 255)),
     ]
 
     def __init__(self):
@@ -4533,6 +4718,19 @@ class MenuEngine:
             put_px(buf, x0 + 2, y0 + 7, c)
             put_px(buf, x0 + 3, y0 + 6, c)
             put_px(buf, x0 + 4, y0 + 5, w)
+        elif gid == "flights":
+            # A simple swept-wing silhouette pointed up-right, the classic
+            # "flight tracker" glyph shape -- reads instantly as aviation,
+            # distinct from the satellite's boxier body-and-panels shape.
+            put_px(buf, x0 + 7, y0 + 1, c)
+            put_px(buf, x0 + 6, y0 + 2, c)
+            put_px(buf, x0 + 5, y0 + 3, c)
+            block(1, 3, 4, 1, c)
+            put_px(buf, x0 + 4, y0 + 4, c)
+            block(3, 5, 3, 1, c)
+            put_px(buf, x0 + 4, y0 + 6, c)
+            put_px(buf, x0 + 3, y0 + 7, c)
+            put_px(buf, x0 + 4, y0 + 3, w)
         elif gid.startswith("tic:"):
             # Generic cartridge glyph -- a cart's own art lives inside the
             # emulator, not on the menu tile, so every dropped-in .tic gets
@@ -6286,6 +6484,7 @@ ENGINES = {
     "chase": ChaseEngine,
     "ticker": TickerEngine,
     "satellite": SatelliteEngine,
+    "flights": FlightEngine,
     "menu": MenuEngine,
     "boot": BootEngine,
 }

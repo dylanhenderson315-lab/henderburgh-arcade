@@ -371,6 +371,10 @@ const GAMES = {
   // spotlight on one instead of letting it cycle.
   // LEFT/RIGHT swap between the pass-countdown and live-position views;
   // the face button parks the auto-cycle on whichever view is up.
+  // LEFT/RIGHT steps through nearby aircraft manually; face button pauses
+  // the automatic ~12s rotation.
+  flights:  {name:'FLIGHTS',   color:'#78c8ff', axis:'horizontal',
+    actions:[{cmd:'rotate',label:'HOLD',glyph:'⏸'}]},
   satellite: {name:'ISS',      color:'#e8c23a', axis:'horizontal',
     actions:[{cmd:'rotate',label:'HOLD',glyph:'⏸'}]},
   ticker:   {name:'TICKER',    color:'#3aa855', axis:'horizontal',

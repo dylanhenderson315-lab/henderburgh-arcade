@@ -116,6 +116,7 @@
     <button data-mode="powder">▶ Powder</button>
     <button data-mode="ticker">▶ Ticker</button>
     <button data-mode="satellite">▶ ISS Tracker</button>
+    <button data-mode="flights">▶ Flights</button>
     <button data-mode="snake-demo">🤖 Snake auto</button>
     <button data-mode="tetris-demo">🤖 Tetris auto</button>
     <button data-mode="pong-demo">🤖 Pong auto</button>
@@ -399,7 +400,7 @@ const KEYS = {ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',
               h:'hold', f:'hold', Shift:'hold'};
 const PLAYABLE = new Set(['snake','tetris','pong','breakout','tron','flappy',
                           'invaders','dodge','2048','life',
-                          'brawler','chase','tunnel','powder','ticker','satellite']);
+                          'brawler','chase','tunnel','powder','ticker','satellite','flights']);
 /* Powder is genuinely pointer-driven, so on the desktop dashboard you draw
    straight onto the preview canvas: it is already a 1:1 map of the panel,
    which makes it the honest place to aim. Sends the same /api/pointer the
