@@ -23,6 +23,7 @@ from pathlib import Path
 import market
 import satellite
 import flights
+import sports
 import tic80_core
 
 WIDTH = 64
@@ -4336,6 +4337,288 @@ class FlightEngine:
         return bytes(buf)
 
 
+class SportsEngine:
+    """Live sports scoreboard (NFL/NBA/MLB/NHL via ESPN).
+
+    Same discipline as Ticker/Satellite/Flights: no I/O in this class at
+    all. It reads whatever sports.FEED has already cached on its own
+    thread and renders it.
+
+    Two views, same shape as SatelliteEngine's PASS/LIVE split: PINNED is
+    the hero view -- the owner's chosen team, full-screen, persistent --
+    and TICKER is the secondary rotating view over every other game in the
+    configured leagues. Auto-cycles between them; left/right jumps
+    manually, rotate/drop pauses the auto-cycle (identical control scheme
+    to every other data mode).
+
+    With no favorite team configured, PINNED has nothing to show, so the
+    mode just stays on TICKER -- a real, complete scoreboard view, not a
+    dead end waiting for setup.
+
+    Win probability is only ever drawn when sports.FEED actually handed
+    one back. It doesn't exist in ESPN's public data for NHL at all (see
+    sports.py's docstring for how that was confirmed against a real
+    completed game, not assumed) -- so NHL pinned games simply never show
+    a win% line, which is the correct behavior, not a bug.
+    """
+
+    name = "sports"
+    tick_rate = 0.05
+
+    BG = (0, 0, 0)
+    INK = (150, 160, 185)
+    INK_DIM = (70, 76, 92)
+    WIN = (60, 230, 110)
+    LOSE = (255, 70, 80)
+    LIVE = (255, 226, 60)
+    STALE = (255, 170, 40)
+    FLASH = (255, 255, 255)
+
+    LEAGUE_COLOR = {
+        "NFL": (255, 90, 120), "NBA": (255, 140, 40),
+        "MLB": (120, 200, 255), "NHL": (150, 200, 255),
+    }
+
+    VIEW_TICKS = 200          # ~10s per view at this tick rate
+    SPOTLIGHT_TICKS = 90      # ~4.5s per game in the ticker view
+    FLASH_TICKS = 14
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.data = {"games": [], "favorite": None, "favorite_game": None,
+                    "win_prob": None, "age": None, "err": None}
+        self.view = 0             # 0 = PINNED, 1 = TICKER
+        self.hold = 0
+        self.cur = 0              # index into games, for TICKER view
+        self.cycling = True
+        self.ticks = 0
+        self.scroll = 0.0
+        self._last_home_score = None
+        self._last_away_score = None
+        self._last_event_id = None
+        self.score_flash = 0
+
+    # ---- input -----------------------------------------------------------
+    def input(self, cmd):
+        games = self.data.get("games") or []
+        if cmd == "left":
+            if self.view == 1 and games:
+                self.cur = (self.cur - 1) % len(games)
+                self.hold = 0
+            elif self.data.get("favorite"):
+                self.view = (self.view - 1) % 2
+                self.hold = 0
+        elif cmd == "right":
+            if self.view == 1 and games:
+                self.cur = (self.cur + 1) % len(games)
+                self.hold = 0
+            elif self.data.get("favorite"):
+                self.view = (self.view + 1) % 2
+                self.hold = 0
+        elif cmd in ("rotate", "drop"):
+            self.cycling = not self.cycling
+
+    def auto(self):
+        pass          # already self-cycling; ambient and manual look the same
+
+    # ---- simulation --------------------------------------------------------
+    def tick(self):
+        self.ticks += 1
+        self.data = sports.FEED.get()
+        if not self.data.get("favorite"):
+            self.view = 1          # nothing to pin: stay on the ticker
+        games = self.data.get("games") or []
+        if games:
+            self.cur %= len(games)
+        self.scroll += 0.5
+
+        # Scoring alert: flash when the PINNED team's score just went up.
+        # Tracked by event_id, not just score, so switching to a different
+        # pinned team's game (or a new game entirely) can't misread a fresh
+        # game's starting score as a "score" against the old baseline.
+        fg = self.data.get("favorite_game")
+        if fg:
+            if fg["event_id"] != self._last_event_id:
+                self._last_event_id = fg["event_id"]
+                self._last_home_score = fg["home"]["score"]
+                self._last_away_score = fg["away"]["score"]
+            else:
+                h, a = fg["home"]["score"], fg["away"]["score"]
+                if (isinstance(h, (int, float)) and isinstance(self._last_home_score, (int, float)) and h > self._last_home_score) or \
+                   (isinstance(a, (int, float)) and isinstance(self._last_away_score, (int, float)) and a > self._last_away_score):
+                    self.score_flash = self.FLASH_TICKS
+                self._last_home_score, self._last_away_score = h, a
+        if self.score_flash > 0:
+            self.score_flash -= 1
+
+        if self.cycling:
+            self.hold += 1
+            limit = self.VIEW_TICKS if self.view == 0 else self.SPOTLIGHT_TICKS
+            if self.hold >= limit:
+                self.hold = 0
+                if self.data.get("favorite"):
+                    self.view = (self.view + 1) % 2
+                elif games:
+                    self.cur = (self.cur + 1) % len(games)
+        self.score = len(games)
+
+    # ---- render --------------------------------------------------------
+    @staticmethod
+    def _score_txt(v):
+        return str(v) if isinstance(v, (int, float)) else "-"
+
+    def _fit(self, s, max_px):
+        # Drop whole trailing words first (ESPN's "shortDetail" strings are
+        # space-separated: "8/6 - 8:00 PM EDT") -- a blind char-truncate
+        # left dangling fragments like "...PM E" on screen, which reads as
+        # broken rather than just abbreviated.
+        while s and 4 * len(s) - 1 > max_px and " " in s:
+            s = s.rsplit(" ", 1)[0]
+        while s and 4 * len(s) - 1 > max_px:
+            s = s[:-1]
+        return s
+
+    def _frame_empty(self, msg, sub):
+        buf = blank()
+        fill(buf, self.BG)
+        draw_text3x5(buf, (WIDTH - (4 * len(msg) - 1)) // 2, 26, msg, self.INK_DIM)
+        draw_text3x5(buf, max(2, (WIDTH - (4 * len(sub) - 1)) // 2), 36, sub, self.INK_DIM)
+        return bytes(buf)
+
+    def _draw_game_block(self, buf, g, y, big=False, flash_col=None):
+        """One game: away line over home line, matching the standard
+        box-score convention (visitor listed first/on top)."""
+        scale = 2 if big else 1
+        # Glyph height is 5*scale px; the gap between the away/home lines
+        # must clear that or the two rows visibly bleed into each other.
+        # (8 < 10 at scale=2 did exactly that -- caught by rendering an
+        # actual frame and looking at it, not just eyeballing the number.)
+        gap = 11 if big else 6
+        for i, (team, other) in enumerate(((g["away"], g["home"]), (g["home"], g["away"]))):
+            txt = f"{team['abbr']} {self._score_txt(team['score'])}"
+            txt = self._fit(txt, WIDTH - 4)
+            w = (8 if big else 4) * len(txt) - (2 if big else 1)
+            col = flash_col if flash_col else (
+                self.WIN if team["winner"] else (self.INK if g["state"] != "post" else self.INK_DIM))
+            draw_text3x5(buf, max(2, (WIDTH - w) // 2), y + i * gap, txt, col, scale=scale)
+
+    def _frame_pinned(self):
+        buf = blank()
+        fill(buf, self.BG)
+        fg = self.data.get("favorite_game")
+        fav = self.data.get("favorite") or {}
+
+        if not fg:
+            sub = f"NO {fav.get('team_abbr','')} GAME TODAY".strip()
+            return self._frame_empty("PINNED TEAM", self._fit(sub, WIDTH - 4) or "NO GAME TODAY")
+
+        lg_col = self.LEAGUE_COLOR.get(fg["league"], self.INK_DIM)
+        draw_text3x5(buf, (WIDTH - (4 * len(fg["league"]) - 1)) // 2, 2, fg["league"], lg_col)
+
+        flash_col = self.FLASH if (self.score_flash > 0 and self.score_flash % 2 == 0) else None
+        self._draw_game_block(buf, fg, 11, big=True, flash_col=flash_col)
+
+        detail = self._fit(fg["detail"] or "", WIDTH - 4)
+        draw_text3x5(buf, max(2, (WIDTH - (4 * len(detail) - 1)) // 2), 35, detail, self.LIVE if fg["state"] == "in" else self.INK_DIM)
+
+        for x in range(4, WIDTH - 4):
+            put_px(buf, x, 43, (30, 34, 44))
+
+        win_prob = self.data.get("win_prob")
+        if win_prob is not None:
+            is_home = fav.get("team_abbr") == fg["home"]["abbr"]
+            pct = win_prob if is_home else (1.0 - win_prob)
+            label = f"{fav.get('team_abbr','')} {pct * 100:.0f}%"
+            draw_text3x5(buf, (WIDTH - (4 * len(label) - 1)) // 2, 48, label, self.WIN)
+            # A literal probability bar under the text -- the number alone
+            # reads fine up close, but the bar is what survives a glance
+            # from across the room the way the ticker's arrow does.
+            bar_w = WIDTH - 12
+            bx0 = 6
+            fill_w = int(bar_w * pct)
+            for x in range(bar_w):
+                col = self.WIN if x < fill_w else (30, 34, 44)
+                put_px(buf, bx0 + x, 55, col)
+
+        if self.data.get("age") and self.data["age"] > 120:
+            put_px(buf, WIDTH - 3, 2, self.STALE)
+            put_px(buf, WIDTH - 2, 2, self.STALE)
+        return bytes(buf)
+
+    def _frame_ticker(self):
+        games = self.data.get("games") or []
+        if not games:
+            msg = "NO GAMES" if self.data.get("err") else "LOADING"
+            buf = blank()
+            fill(buf, self.BG)
+            draw_text3x5(buf, (WIDTH - (4 * len(msg) - 1)) // 2, 28, msg,
+                         self.LOSE if self.data.get("err") else self.INK_DIM)
+            dots = "." * (1 + (self.ticks // 12) % 3)
+            draw_text3x5(buf, (WIDTH - 11) // 2, 38, dots, self.INK_DIM)
+            return bytes(buf)
+
+        buf = blank()
+        fill(buf, self.BG)
+        g = games[self.cur % len(games)]
+
+        lg_col = self.LEAGUE_COLOR.get(g["league"], self.INK_DIM)
+        draw_text3x5(buf, (WIDTH - (4 * len(g["league"]) - 1)) // 2, 3, g["league"], lg_col)
+
+        self._draw_game_block(buf, g, 11, big=True)
+
+        detail = self._fit(g["detail"] or "", WIDTH - 4)
+        draw_text3x5(buf, max(2, (WIDTH - (4 * len(detail) - 1)) // 2), 35, detail,
+                     self.LIVE if g["state"] == "in" else self.INK_DIM)
+
+        for x in range(4, WIDTH - 4):
+            put_px(buf, x, 43, (30, 34, 44))
+
+        # --- scrolling tape of every other game, ESPN-style ---
+        parts = []
+        for r in games:
+            sign = f"{r['away']['abbr']} {self._score_txt(r['away']['score'])} @ " \
+                   f"{r['home']['abbr']} {self._score_txt(r['home']['score'])} {r['detail']}"
+            parts.append(sign)
+        tape = "   ".join(parts) + "   "
+        tape_w = 4 * len(tape)
+        if tape_w:
+            off = int(self.scroll) % tape_w
+            x = -off
+            for ch in tape:
+                if x > WIDTH:
+                    break
+                if x > -4:
+                    draw_text3x5(buf, x, 50, ch, self.INK_DIM)
+                x += 4
+            x = -off + tape_w
+            for ch in tape:
+                if x > WIDTH:
+                    break
+                if x > -4:
+                    draw_text3x5(buf, x, 50, ch, self.INK_DIM)
+                x += 4
+
+        n = min(len(games), 8)
+        dot_w = n * 4 - 2
+        dx0 = (WIDTH - dot_w) // 2
+        for i in range(n):
+            col = self.INK if i == (self.cur % n) else self.INK_DIM
+            put_px(buf, dx0 + i * 4, HEIGHT - 3, col)
+
+        if self.data.get("age") and self.data["age"] > 120:
+            put_px(buf, WIDTH - 3, 2, self.STALE)
+            put_px(buf, WIDTH - 2, 2, self.STALE)
+        return bytes(buf)
+
+    def frame(self):
+        if self.view == 0 and self.data.get("favorite"):
+            return self._frame_pinned()
+        return self._frame_ticker()
+
+
 class BootEngine:
     name = "boot"
     tick_rate = 0.045
@@ -4498,6 +4781,7 @@ class MenuEngine:
         ("ticker",   "TICKER",   (60, 230, 110)),
         ("satellite", "ISS",     (255, 226, 60)),
         ("flights",  "FLIGHTS",  (120, 200, 255)),
+        ("sports",   "SPORTS",   (255, 140, 40)),
     ]
 
     def __init__(self):
@@ -4731,6 +5015,17 @@ class MenuEngine:
             put_px(buf, x0 + 4, y0 + 6, c)
             put_px(buf, x0 + 3, y0 + 7, c)
             put_px(buf, x0 + 4, y0 + 3, w)
+        elif gid == "sports":
+            # A scoreboard: a frame with a divider and two blocky "score"
+            # marks -- reads as "live score" distinct from the ticker's
+            # bar-chart language and the flights/satellite silhouettes.
+            block(1, 1, 8, 7, dim and c or tuple(v * 2 // 3 for v in color))
+            for xx in range(1, 9):
+                put_px(buf, x0 + xx, y0 + 4, self.BG)
+            block(2, 2, 2, 1, w)
+            block(6, 2, 2, 1, w)
+            block(2, 5, 2, 1, c)
+            block(6, 5, 2, 1, c)
         elif gid.startswith("tic:"):
             # Generic cartridge glyph -- a cart's own art lives inside the
             # emulator, not on the menu tile, so every dropped-in .tic gets
@@ -6485,6 +6780,7 @@ ENGINES = {
     "ticker": TickerEngine,
     "satellite": SatelliteEngine,
     "flights": FlightEngine,
+    "sports": SportsEngine,
     "menu": MenuEngine,
     "boot": BootEngine,
 }

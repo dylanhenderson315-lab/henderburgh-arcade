@@ -40,6 +40,7 @@ from display import get_renderer
 import backgrounds
 import market
 import satellite
+import sports
 
 PORT = 7333
 HERE = Path(__file__).parent
@@ -831,6 +832,10 @@ class Handler(BaseHTTPRequestHandler):
             lat, lon, label = satellite.FEED.get_location()
             self._json({"lat": lat, "lon": lon, "label": label,
                         "configured": satellite.FEED.configured})
+        elif path == "/api/sports/config":
+            leagues, favorite = sports.FEED.get_config()
+            self._json({"leagues": leagues, "favorite": favorite,
+                        "known_leagues": sorted(sports.LEAGUE_PATHS)})
         elif path == "/api/frame":                    # legacy shape
             s = ARCADE.snapshot()
             self._json({"w": WIDTH, "h": HEIGHT, "mode": s["mode"],
@@ -940,6 +945,31 @@ class Handler(BaseHTTPRequestHandler):
                 lat, lon, label = satellite.FEED.set_location(
                     j["lat"], j["lon"], j.get("label", "HOME"))
                 self._json({"ok": True, "lat": lat, "lon": lon, "label": label})
+            except (ValueError, KeyError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/sports/leagues":
+            try:
+                j = json.loads(body or b"{}")
+                accepted, rejected = sports.FEED.set_leagues(j.get("leagues", []))
+                resp = {"ok": True, "leagues": accepted}
+                if rejected:
+                    resp["rejected"] = rejected
+                    resp["note"] = "unrecognized league(s), not added: " + ", ".join(rejected)
+                self._json(resp)
+            except (ValueError, AttributeError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/sports/favorite":
+            try:
+                j = json.loads(body or b"{}")
+                if not j.get("league") or not j.get("team_abbr"):
+                    sports.FEED.clear_favorite()
+                    self._json({"ok": True, "favorite": None})
+                else:
+                    favorite = sports.FEED.set_favorite(j["league"], j["team_abbr"])
+                    if favorite is None:
+                        self._json({"ok": False, "error": "unknown league"}, 400)
+                    else:
+                        self._json({"ok": True, "favorite": favorite})
             except (ValueError, KeyError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/pause" or (

@@ -1,0 +1,229 @@
+# CLAUDE.md — Henderburgh Arcade
+
+Project context for a fresh session. This file did not exist before
+2026-07-30 despite being referenced by name in several module docstrings
+(`PRODUCTION.md` too) — those references predate this file; treat any
+claim in this doc as reconstructed from the current code and this
+session's own history, not carried forward from a prior version of this
+file.
+
+## What this is
+
+A 64×64 LED matrix "arcade console" built on an Apollo M-1 WLED-MM panel
+(HUB75, ESP32-S3), currently driven by a Mac mini over the network. It
+runs classic games, live data "modes" (stock ticker, ISS tracker, flight
+tracker, sports scoreboard), video/screen mirroring, and WLED's own
+ambient lighting effects — all through one local HTTP server with a web
+control page and a phone-optimized remote controller page.
+
+This Mac + WLED-MM setup is the **development rig**, not the final
+product. See `PRODUCTION.md` for the sellable-device plan (Raspberry Pi +
+HUB75 panel, no Mac, no WLED-MM) — `display.py` already has the seam for
+that swap built in (see Architecture below).
+
+## Architecture
+
+**`arcade_server.py`** — the local brain (`ThreadingHTTPServer`, port
+7333). Runs the active mode in a background thread, streams frames to the
+panel, serves `/` (control page, `arcade.html`) and `/remote` (phone
+controller, `remote.html`) plus a JSON API. Start it with:
+
+```
+cd wled-m1-arcade
+.venv/bin/python arcade_server.py
+```
+
+(`.venv` is needed for `mirror` mode — mss + Pillow. Every other mode is
+stdlib-only.) In production this runs under launchd as
+`com.henderburgh.arcade` (`~/Library/LaunchAgents/com.henderburgh.arcade.plist`);
+restart with `launchctl kickstart -k gui/$(id -u)/com.henderburgh.arcade`.
+
+**The mode contract** (`engines.py`) — every mode is a class with:
+
+```python
+e = SomeEngine()
+e.input(cmd)      # "left"/"right"/"up"/"down"/"rotate"/"drop" from the dpad
+e.auto()           # demo/ambient mode: engine steers itself
+e.tick()            # advance one step
+rgb = e.frame()    # WIDTH*HEIGHT*3 bytes, row-major, top-left origin, returns bytes
+e.tick_rate         # seconds between ticks
+e.score
+```
+
+Registered in `engines.ENGINES` (`name -> class`); `engines.PLAYABLE` is
+that set minus `menu`/`boot`. Adding a new mode means: write the engine
+class, add it to `ENGINES`, add it to `MenuEngine.NATIVE_GAMES` (label +
+accent color) if it should appear on the panel's own menu grid, and add a
+small icon case in `MenuEngine._icon`.
+
+**Data modes are pure-I/O / pure-render, split into two files on
+purpose** — this is the load-bearing pattern for the whole project:
+
+- A plain module (`market.py`, `satellite.py`, `flights.py`, `sports.py`)
+  owns ALL network I/O: a background-thread poller with a last-good
+  cache, a `FEED` singleton, a `get()` that never blocks, and a
+  `*_config.json` file (with matching `save_config`/`load_config`) for
+  anything an owner should be able to configure without a code edit.
+  Feed threads are self-limiting: they start on first `get()` and stop
+  once nothing has read for `IDLE_STOP` (120s), so leaving a mode doesn't
+  leave a thread polling the internet forever.
+- The corresponding `*Engine` class in `engines.py` does **zero I/O**. It
+  only calls `FEED.get()` in `tick()` and renders whatever came back in
+  `frame()`. This is what keeps a slow or dead upstream API from ever
+  stalling the render loop (dropped frames on WLED, stutter on a future
+  Pi).
+
+Two rules every feed module enforces, no exceptions:
+1. **Never block the render loop.** All I/O happens off the calling
+   thread; `get()` returns instantly from cache.
+2. **Never invent a number.** If the network is down, keep serving the
+   last good data and mark it stale (an "age" the engine can check and
+   flag on-screen) rather than showing something false with confidence.
+   Same principle drives `backgrounds.py`'s rule about WLED effects
+   ("never invent what an effect looks like — every pixel comes from the
+   real panel").
+
+**Rendering pipeline** — `display.py` is the one seam between "a mode
+computed some pixels" and "pixels reached real hardware":
+
+```
+mode.frame() -> arcade_server's render loop (dedup + rate cap)
+             -> display.get_renderer() -> WledDDP.send(rgb) [today]
+                                        -> BonnetRenderer.send(rgb) [production, not built yet]
+```
+
+`WledDDP` (`wled_ddp.py`) streams over WLED's DDP protocol, UDP port
+4048. **Do not raise `PANEL_FPS` or remove frame de-duplication** —
+flooding WLED with full frames locks the panel hard enough to need a
+physical power cycle; this is a hard-won constraint, not a guess.
+`BonnetRenderer` is a deliberate `NotImplementedError` stub (not a silent
+no-op) for the eventual Raspberry Pi + Adafruit RGB Matrix Bonnet
+production path — chain/parallel HUB75 tiling for multi-panel setups is
+meant to live entirely inside that renderer, invisible to every mode
+above it.
+
+**`backgrounds.py`** — WLED's own firmware effects used as ambient
+lighting or as a live-captured underlay behind a game's sprites. Hard
+rule: never synthesize what an effect looks like in software; every pixel
+either comes from telling the real panel to run the effect, or from a
+recorded peek of the real LED buffer via WLED's liveview websocket. The
+in-file software generators are dead code for any real display path,
+kept only as offline experiment helpers.
+
+**The 3×5 font (`_FONT3x5`/`draw_text3x5` in `engines.py`) is
+uppercase-only** and silently drops any character it doesn't have —
+no error, no crash, just a quietly wrong string on the panel. This has
+caused the *same bug three times* on three different modes (ticker,
+flights, sports), always from a live external API returning mixed-case
+text. **Any new mode that draws API-sourced text must `.upper()` it at
+the I/O module boundary** (in the feed module, not the engine) — this is
+already the convention for every existing feed. Verify by actually
+rendering a frame with real data and reading the pixels; this class of
+bug is invisible to a code read.
+
+## What's built
+
+**Games** (all native, headless, stdlib-only): snake, tetris, pong,
+breakout, tron, flappy, invaders, life, dodge, 2048, tunnel, powder,
+brawler, chase. Plus a TIC-80 fantasy-console cartridge loader
+(`tic80_core.py`, `TicCartEngine`) that scans `carts/tic80/*.tic` and
+appends them to the menu automatically.
+
+**Data modes**, in build order:
+- **ticker** (`market.py`/`TickerEngine`) — crypto (CoinGecko) + stocks
+  (Yahoo Finance v8 chart), config-driven watchlist.
+- **satellite** (`satellite.py`/`SatelliteEngine`) — ISS live position
+  (wheretheiss.at) + next visible pass prediction (polluxlabs), framed as
+  an "ISS countdown." Owns `location_config.json`, the project's one
+  source of truth for the owner's home coordinates — reused by flights,
+  don't duplicate it.
+- **flights** (`flights.py`/`FlightEngine`) — nearby ADS-B traffic
+  (adsb.lol) + route/airline enrichment (adsbdb), reuses satellite's
+  location config.
+- **sports** (`sports.py`/`SportsEngine`, 2026-07-30) — NFL/NBA/MLB/NHL
+  scores via ESPN's free undocumented site API. Pinned favorite team
+  (full-screen score, scoring-flash animation, win probability when
+  available) + a rotating ticker of every other game. Two real,
+  *confirmed-not-assumed* API gaps worth knowing if you touch this mode:
+  win probability lives in a **separate** per-game `summary?event=ID`
+  call, not the bulk scoreboard payload; and **NHL's summary endpoint has
+  no win-probability data at all**, checked against a real completed NHL
+  game. The engine correctly shows no win% line for NHL rather than
+  guessing one.
+
+**Other modes**: `mirror` (screen capture -> panel, needs mss+Pillow),
+`video`/`stream` naming (see Known issues — `stream.py` is currently
+orphaned), `cast` (phone browser -> panel), WLED ambient backgrounds,
+`menu` (the panel's own home-screen/game-picker, drawn on the matrix
+itself — the phone is just a dpad+buttons controller for it), `boot`
+(curtain-parting logo intro).
+
+## Known issues / in-progress work
+
+**Audio-reactive visualizer — paused, waiting on the user (as of
+2026-07-30).** Plan: WLED-MM's real AudioReactive usermod (the panel has
+a physical Rev 6 mic add-on) broadcasts analyzed audio (volume + 16-band
+FFT) over UDP multicast (239.0.0.1:11988, "V2" packet format, confirmed
+against the real WLED-MM firmware source — see `audio_sync.py`'s
+docstring for the exact byte layout) so the arcade service can build a
+real EQ/VU visualizer without capturing or fabricating any audio itself
+— explicit standing rule from the user: never fake a waveform, same
+"never invent what an effect looks like" principle as `backgrounds.py`.
+
+`audio_sync.py` (the UDP listener, pure I/O, same FEED pattern as every
+other data module) is written and tested — it correctly listens and
+correctly reports zero packets when none arrive, no fabricated fallback.
+Blocked on: the panel's mic needed real config fixes (sync mode → Send,
+mic type → Generic I2S, a genuine physical power-cycle, not just a
+software reboot) which are now all done and confirmed via the panel's own
+`/json/si` status endpoint (`Audio Source: I2S digital - quiet`, `Sound
+Processing: running`). Despite that, **no UDP packets are reaching the
+Mac** even though the panel's own status shows it actively transmitting.
+Ruled out: firewall (both relevant Python binaries are `Permitted`),
+wrong network interface/multicast route (verified correct via
+`route get`), wrong packet format (struct layout verified against real
+firmware source, `struct.calcsize` matches `sizeof()` exactly).
+**Leading suspect: IGMP snooping on the router/AP silently dropping
+multicast traffic** — a well-documented WLED Sound Sync gotcha on
+consumer/mesh routers, and not something checkable from either device;
+needs the user to check the router's admin UI. Do not resume building
+the visualizer engine until real varying packet data is confirmed
+flowing — that was an explicit, repeated instruction this session.
+
+**`stream.py` is orphaned** — nothing in the current codebase imports it
+(confirmed via grep). Needs a decision: wire it in, or delete it. User
+explicitly deferred this to "Thursday or on reset" — not a "do it now"
+item, don't touch without being asked.
+
+**Frontend audit (`arcade.html`, `remote.html`) — also explicitly
+deferred** by the user alongside the `stream.py` decision, same "Thursday
+or on reset" condition.
+
+## Working conventions worth knowing before touching this codebase
+
+- **Verify by rendering, not by reading.** Every mode in this project has
+  had at least one real bug that a code read would not catch (missing
+  font glyphs, inverted arrows, mixed-case text silently vanishing,
+  vertically-overlapping text at scale=2). The established discipline is:
+  render an actual frame with real data, save it as a PNG, and look at
+  it — every new mode and every nontrivial layout change should go
+  through this before being called done.
+- **Never invent a number or a pixel.** This shows up as: feeds serving
+  stale-but-honest cached data instead of fabricating current data;
+  `backgrounds.py` refusing to synthesize WLED effects in software;
+  the audio-sync work refusing to fake a waveform. If real data isn't
+  available, say so on-screen (a stale-dot, a "NO DATA" message) rather
+  than approximate it.
+- **Config-driven, not hardcoded**, for anything owner-specific: symbols,
+  home location, sports leagues/favorite team. Every one of these follows
+  the same shape — a JSON file next to the module, `load_*()`/`save_*()`
+  functions with safe defaults on first run, and matching GET/POST
+  endpoints in `arcade_server.py` so the control panel and phone remote
+  can change it without a code edit or restart.
+- **One feature per commit, matching an established pattern where one
+  exists.** Recent history: each new data mode ("Flights tracker: new
+  mode, same pattern as ticker/satellite") explicitly calls out which
+  prior mode it copied the shape from.
+- The user runs this session-by-session and steps away for days at a
+  time; leave in-progress work in a clearly-described, non-broken state
+  (as above) rather than mid-refactor.
