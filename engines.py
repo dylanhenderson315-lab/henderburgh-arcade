@@ -229,6 +229,102 @@ def draw_text3x5(buf, x, y, text, color, scale=1):
 
 
 # =============================================================================
+# Shared visual vocabulary for the DATA modes (ticker/ISS/flights/sports/news
+# /weather). These exist so the six modes read as one designed product rather
+# than six independently-styled text dumps -- the header treatment, the value
+# hierarchy and the chrome are identical everywhere, and only the accent
+# colour changes per mode. Games deliberately do NOT use these; they have
+# their own full-bleed visual language.
+# =============================================================================
+def text_w(s, scale=1):
+    """Rendered pixel width of a string -- the ONE place that knows the
+    glyph pitch. Hand-inlined `4*len(s)-1` math was duplicated ~40 times
+    and is exactly how a scale=2 string silently overflowed before."""
+    return (4 * len(s) - 1) * scale
+
+
+def draw_text_centered(buf, y, s, color, scale=1, x_min=2):
+    """Horizontally-centred text, clamped so it can never start off-screen."""
+    return draw_text3x5(buf, max(x_min, (WIDTH - text_w(s, scale)) // 2), y, s, color, scale=scale)
+
+
+def fit_text(s, max_px, scale=1):
+    """Trim to fit real pixels, dropping whole trailing words first so a
+    cut string reads as abbreviated rather than broken."""
+    while s and text_w(s, scale) > max_px and " " in s:
+        s = s.rsplit(" ", 1)[0]
+    while s and text_w(s, scale) > max_px:
+        s = s[:-1]
+    return s
+
+
+def draw_header(buf, title, accent, right_tag=None, stale=False):
+    """Standard top chrome for every data mode: a full-width accent rule,
+    the mode/source title on it, and an optional right-aligned tag.
+
+    A solid coloured rule (rather than only coloured text) is what makes
+    each mode identifiable from across a room before any text is legible
+    -- at 64px the title itself is only readable up close, but a band of
+    colour reads instantly."""
+    for x in range(WIDTH):
+        put_px(buf, x, 0, accent)
+        put_px(buf, x, 1, rim(accent, 0.45))
+    draw_text3x5(buf, 2, 3, fit_text(title, WIDTH - 22), color_on_dark(accent))
+    if right_tag:
+        tag = fit_text(right_tag, 18)
+        draw_text3x5(buf, WIDTH - 2 - text_w(tag), 3, tag, (110, 118, 140))
+    if stale:
+        # Amber stale pip, always the same corner in every mode.
+        for dx in range(2):
+            for dy in range(2):
+                put_px(buf, WIDTH - 3 + dx, 3 + dy, (255, 170, 40))
+
+
+def color_on_dark(c, floor=140):
+    """Lift a colour to stay legible as text on the near-black body."""
+    m = max(c)
+    if m >= floor:
+        return c
+    k = floor / max(1, m)
+    return (min(255, int(c[0] * k)), min(255, int(c[1] * k)), min(255, int(c[2] * k)))
+
+
+def draw_divider(buf, y, color=(26, 30, 40), inset=2):
+    for x in range(inset, WIDTH - inset):
+        put_px(buf, x, y, color)
+
+
+def draw_dots(buf, y, n, cur, on=(150, 160, 185), off=(38, 42, 54), cap=10):
+    """Position indicator shared by every rotating mode."""
+    n = min(n, cap)
+    if n <= 1:
+        return
+    w = n * 3 - 1
+    x0 = (WIDTH - w) // 2
+    for i in range(n):
+        put_px(buf, x0 + i * 3, y, on if i == (cur % n) else off)
+
+
+def draw_marquee(buf, y, text, color, scroll, scale=1, gap="   "):
+    """Seamless looping scroller -- the shared tape used by every ticker
+    mode. Draws two copies so the wrap has no visible seam."""
+    s = text + gap
+    pitch = 4 * scale
+    total = pitch * len(s)
+    if total <= 0:
+        return
+    off = int(scroll) % total
+    for rep in (0, 1):
+        x = -off + rep * total
+        for ch in s:
+            if x > WIDTH:
+                break
+            if x > -pitch:
+                draw_text3x5(buf, x, y, ch, color, scale=scale)
+            x += pitch
+
+
+# =============================================================================
 # SNAKE — classic: walls kill, grow on food, speed scales, 1-input buffer
 # =============================================================================
 class SnakeEngine:
@@ -3934,45 +4030,69 @@ class TickerEngine:
             return self.DOWN
         return self.FLAT
 
+    def _draw_change_bar(self, buf, y, pct, col):
+        """A centre-anchored magnitude bar: grows right on a gain, left on
+        a loss, from a fixed centre tick. Gives the percentage a physical
+        size you can read across a room, where the digits themselves are
+        far too small to resolve -- and unlike a naive left-to-right bar,
+        the direction is unmistakable because the origin never moves.
+        Uses a SQUARE-ROOT scale, not linear: real daily moves cluster
+        under 2% while the occasional crypto move hits 15%, so a linear
+        bar rendered almost everything as 1-2 invisible pixels. sqrt gives
+        small everyday moves real visible length while still leaving
+        headroom for the big ones (±12% saturates)."""
+        half = (WIDTH - 8) // 2
+        cx = WIDTH // 2
+        for x in range(cx - half, cx + half):
+            put_px(buf, x, y, (24, 28, 38))
+        n = int(math.sqrt(min(1.0, abs(pct) / 12.0)) * half)
+        for i in range(n):
+            x = cx + i if pct > 0 else cx - i
+            put_px(buf, x, y, col)
+            put_px(buf, x, y + 1, rim(col, 0.5))
+        for dy in (-1, 0, 1, 2):
+            put_px(buf, cx, y + dy, (90, 98, 118))     # fixed centre tick
+
     def frame(self):
         buf = blank()
         fill(buf, self.BG)
+        accent = (90, 190, 255)
 
         if not self.rows:
+            draw_header(buf, "MARKETS", accent)
             msg = "NO DATA" if self.err else "LOADING"
-            tw = 4 * len(msg) - 1
-            draw_text3x5(buf, (WIDTH - tw) // 2, 28, msg,
-                         self.DOWN if self.err else self.INK_DIM)
-            dots = "." * (1 + (self.ticks // 12) % 3)
-            draw_text3x5(buf, (WIDTH - 11) // 2, 38, dots, self.INK_DIM)
+            draw_text_centered(buf, 30, msg, self.DOWN if self.err else self.INK_DIM)
+            draw_text_centered(buf, 40, "." * (1 + (self.ticks // 12) % 3), self.INK_DIM)
             return bytes(buf)
 
         row = self.rows[self.cur]
         col = self._tint(row["pct"])
-
-        # --- spotlight ---
-        sym = row["sym"][:4]
-        draw_text3x5(buf, (WIDTH - (8 * len(sym) - 2)) // 2, 6, sym, col, scale=2)
-
-        price = self._fmt_price(row["price"])
-        draw_text3x5(buf, (WIDTH - (4 * len(price) - 1)) // 2, 24, price, self.INK)
-
         pct = row["pct"]
+
+        draw_header(buf, "MARKETS", accent,
+                    right_tag=f"{self.cur + 1}/{len(self.rows)}",
+                    stale=self.age is not None and self.age > 180)
+
+        # Symbol: the hero, big and in the move's colour.
+        draw_text_centered(buf, 11, row["sym"][:4], col, scale=2)
+
+        # Price: the precise value, bright white-ish so it reads as the
+        # authoritative number rather than competing with the symbol.
+        draw_text_centered(buf, 25, self._fmt_price(row["price"]), (215, 222, 240))
+
+        # Arrow + percentage on one baseline. Row i widens downward, so a
+        # gain puts the apex at the TOP and a loss at the BOTTOM -- getting
+        # this backwards is silent and worse than useless, since colour and
+        # arrow would disagree and the arrow is the half that still reads
+        # from across the room.
         chg = f"{abs(pct):.2f}%"
-        arrow_w = 7          # triangle is 5px wide; leave a clear gap after it
-        tw = 4 * len(chg) - 1 + arrow_w
-        ax = (WIDTH - tw) // 2
-        # A triangle, not just a +/- sign: direction should survive being
-        # glanced at from across the room even if the digits do not.
-        # Row i widens downward, so a gain puts the apex at the TOP and a loss
-        # puts it at the BOTTOM. Getting this backwards is silent and worse
-        # than useless: colour and arrow would disagree, and the arrow is the
-        # half that still reads from across the room.
-        if pct > 0.05:                                   # gain: apex on top
+        arrow_w = 7
+        ax = (WIDTH - (text_w(chg) + arrow_w)) // 2
+        if pct > 0.05:
             for i in range(3):
                 for x in range(-i, i + 1):
                     put_px(buf, ax + 2 + x, 33 + i, col)
-        elif pct < -0.05:                                # loss: apex on bottom
+        elif pct < -0.05:
             for i in range(3):
                 w = 2 - i
                 for x in range(-w, w + 1):
@@ -3980,45 +4100,19 @@ class TickerEngine:
         else:
             for x in range(5):
                 put_px(buf, ax + x, 34, col)
-        draw_text3x5(buf, ax + arrow_w, 32, chg, col)
+        draw_text3x5(buf, ax + arrow_w, 33, chg, col)
 
-        # --- divider ---
-        for x in range(4, WIDTH - 4):
-            put_px(buf, x, 43, (30, 34, 44))
+        self._draw_change_bar(buf, 41, pct, col)
 
-        # --- scrolling tape ---
+        draw_dots(buf, 46, len(self.rows), self.cur, on=accent)
+        draw_divider(buf, 49)
+
         parts = []
         for r in self.rows:
             sign = "+" if r["pct"] >= 0 else "-"
             parts.append(f"{r['sym']} {self._fmt_price(r['price'])} "
                          f"{sign}{abs(r['pct']):.1f}%")
-        tape = "   ".join(parts) + "   "
-        tape_w = 4 * len(tape)
-        if tape_w:
-            off = int(self.scroll) % tape_w
-            x = -off
-            for ch in tape:
-                if x > WIDTH:
-                    break
-                if x > -4:
-                    draw_text3x5(buf, x, 49, ch, self.INK_DIM)
-                x += 4
-            x = -off + tape_w                    # second copy for a seamless wrap
-            for ch in tape:
-                if x > WIDTH:
-                    break
-                if x > -4:
-                    draw_text3x5(buf, x, 49, ch, self.INK_DIM)
-                x += 4
-
-        # --- honesty indicator ---
-        # Prices that stopped updating must never look live. A dot beats a
-        # word here: it costs 1px and never crowds the numbers.
-        if self.age is not None and self.age > 180:
-            put_px(buf, WIDTH - 3, 2, self.STALE)
-            put_px(buf, WIDTH - 2, 2, self.STALE)
-            put_px(buf, WIDTH - 3, 3, self.STALE)
-            put_px(buf, WIDTH - 2, 3, self.STALE)
+        draw_marquee(buf, 53, "   ".join(parts), self.INK_DIM, self.scroll)
         return bytes(buf)
 
 
@@ -4110,74 +4204,104 @@ class SatelliteEngine:
         draw_text3x5(buf, (WIDTH - (4 * len(sub) - 1)) // 2, 34, sub, self.INK_DIM)
         return bytes(buf)
 
+    ACCENT = (255, 200, 60)
+
+    def _draw_stat_pair(self, buf, y, left_label, left_val, right_label, right_val):
+        """Two labelled stats on one baseline, label above value. Labels in
+        a dim tint and values bright: at this size the eye needs the value
+        to win, but the label is what makes the number mean anything."""
+        draw_text3x5(buf, 3, y, left_label, (86, 94, 116))
+        draw_text3x5(buf, 3, y + 6, left_val, self.INK)
+        rw = max(text_w(right_label), text_w(right_val))
+        rx = WIDTH - 3 - rw
+        draw_text3x5(buf, rx, y, right_label, (86, 94, 116))
+        draw_text3x5(buf, rx, y + 6, right_val, self.INK)
+
     def _frame_pass(self):
         buf = blank()
         fill(buf, self.BG)
         nxt = self.data.get("next_pass")
         secs = self.data.get("seconds_to_rise")
+        stale = bool(self.data.get("pass_age") and self.data["pass_age"] > 3600 * 2)
 
         if not nxt or secs is None:
-            msg = "NO PASS DATA" if self.data.get("err") else "LOADING"
-            draw_text3x5(buf, (WIDTH - (4 * len(msg) - 1)) // 2, 28, msg, self.INK_DIM)
-            dots = "." * (1 + (self.ticks // 12) % 3)
-            draw_text3x5(buf, (WIDTH - 11) // 2, 38, dots, self.INK_DIM)
+            draw_header(buf, "ISS PASS", self.ACCENT)
+            draw_text_centered(buf, 30, "NO PASS DATA" if self.data.get("err") else "LOADING", self.INK_DIM)
+            draw_text_centered(buf, 40, "." * (1 + (self.ticks // 12) % 3), self.INK_DIM)
             return bytes(buf)
 
         visible = nxt.get("visible")
         col = self.VISIBLE if visible else self.NOT_VISIBLE
 
-        label = "NEXT PASS"
-        draw_text3x5(buf, (WIDTH - (4 * len(label) - 1)) // 2, 4, label, self.INK_DIM)
+        draw_header(buf, "ISS PASS", self.ACCENT,
+                    right_tag=self.data.get("label", "HOME")[:6], stale=stale)
 
-        cd = self._fmt_countdown(secs)
-        draw_text3x5(buf, (WIDTH - (8 * len(cd) - 2)) // 2, 12, cd, col, scale=2)
+        draw_text_centered(buf, 11, "NEXT IN", (86, 94, 116))
+        draw_text_centered(buf, 19, self._fmt_countdown(secs), col, scale=2)
 
         # "IN DAYLIGHT/SHADOW" (the fully accurate reason) doesn't fit at
-        # 64px; NOT VISIBLE keeps the honest meaning -- this pass happens,
-        # you just will not see it with your eyes -- in a width that fits.
+        # 64px; VISIBLE / NOT VISIBLE keeps the honest meaning -- this pass
+        # happens, you just will not see it with your eyes -- in a width
+        # that fits. Drawn as a filled chip so the single most important
+        # bit of this whole view (can I actually go outside and see it?)
+        # reads instantly, before any text resolves.
         tag = "VISIBLE" if visible else "NOT VISIBLE"
-        draw_text3x5(buf, (WIDTH - (4 * len(tag) - 1)) // 2, 26, tag, col)
+        tw = text_w(tag)
+        x0 = (WIDTH - tw - 6) // 2
+        for x in range(x0, x0 + tw + 6):
+            for y in range(32, 40):
+                put_px(buf, x, y, rim(col, 0.22))
+        draw_text_centered(buf, 34, tag, col)
 
-        detail = f"{nxt['compass']} {nxt['max_elev']:.0f}DEG {nxt['duration_s']}S"
-        if 4 * len(detail) - 1 > WIDTH - 4:
-            detail = f"{nxt['compass']} {nxt['max_elev']:.0f}D {nxt['duration_s']}S"
-        draw_text3x5(buf, max(2, (WIDTH - (4 * len(detail) - 1)) // 2), 36, detail, self.INK_DIM)
-
-        for x in range(4, WIDTH - 4):
-            put_px(buf, x, 44, (30, 34, 44))
-        loc = self.data.get("label", "HOME")[:10]
-        draw_text3x5(buf, (WIDTH - (4 * len(loc) - 1)) // 2, 50, loc, self.INK_DIM)
-
-        if self.data.get("pass_age") and self.data["pass_age"] > 3600 * 2:
-            put_px(buf, WIDTH - 3, 2, self.STALE)
-            put_px(buf, WIDTH - 2, 2, self.STALE)
+        # Elevation arc: how high it climbs, drawn as a real arc from
+        # horizon to horizon with a marker at peak elevation. A number in
+        # degrees means nothing at a glance; an arc shape does.
+        cx, base_y, r = WIDTH // 2, 52, 20
+        for i in range(25):
+            t = i / 24
+            ax = cx - r + int(2 * r * t)
+            ay = base_y - int(math.sin(t * math.pi) * 9)
+            put_px(buf, ax, ay, (34, 40, 54))
+        elev = max(0.0, min(90.0, float(nxt["max_elev"])))
+        px_ = cx
+        py_ = base_y - int(math.sin(0.5 * math.pi) * 9 * (elev / 90.0))
+        put_blob(buf, px_, py_, col, outline=False)
+        draw_text3x5(buf, 2, 55, f"{nxt['compass']}", self.INK_DIM)
+        deg = f"{elev:.0f}DEG"
+        draw_text3x5(buf, WIDTH - 2 - text_w(deg), 55, deg, self.INK_DIM)
         return bytes(buf)
 
     def _frame_live(self):
         buf = blank()
         fill(buf, self.BG)
         pos = self.data.get("pos")
+        stale = bool(self.data.get("pos_age") and self.data["pos_age"] > 120)
 
         if not pos:
-            msg = "NO SIGNAL" if self.data.get("err") else "LOADING"
-            draw_text3x5(buf, (WIDTH - (4 * len(msg) - 1)) // 2, 28, msg, self.INK_DIM)
-            dots = "." * (1 + (self.ticks // 12) % 3)
-            draw_text3x5(buf, (WIDTH - 11) // 2, 38, dots, self.INK_DIM)
+            draw_header(buf, "ISS LIVE", self.ACCENT)
+            draw_text_centered(buf, 30, "NO SIGNAL" if self.data.get("err") else "LOADING", self.INK_DIM)
+            draw_text_centered(buf, 40, "." * (1 + (self.ticks // 12) % 3), self.INK_DIM)
             return bytes(buf)
 
-        label = "ISS LIVE"
-        draw_text3x5(buf, (WIDTH - (4 * len(label) - 1)) // 2, 3, label, self.ISS)
+        sunlit = pos.get("sunlit")
+        draw_header(buf, "ISS LIVE", self.ACCENT,
+                    right_tag="SUN" if sunlit else "DARK", stale=stale)
 
-        # A simple orbit ring with a moving marker -- not a literal map (a
-        # real ground-track projection is not something 64x64 can show
-        # meaningfully), just a glanceable "it's moving" flourish.
-        cx, cy, r = WIDTH // 2, 26, 13
-        for i in range(48):
-            a = i / 48 * 2 * math.pi
-            put_px(buf, cx + int(r * math.cos(a)), cy + int(r * 0.45 * math.sin(a)), self.ORBIT)
+        # Orbit ring with a moving marker -- not a literal ground track (a
+        # real projection isn't meaningful at 64x64), just a glanceable
+        # "it's moving right now" flourish. Earth disc underneath gives the
+        # ring something to orbit so it reads as an orbit, not a bare oval.
+        cx, cy, r = WIDTH // 2, 27, 15
+        for yy in range(-6, 7):
+            half = int(math.sqrt(max(0, 36 - yy * yy)))
+            for xx in range(-half, half + 1):
+                put_px(buf, cx + xx, cy + yy, (12, 26, 46))
+        for i in range(56):
+            a = i / 56 * 2 * math.pi
+            put_px(buf, cx + int(r * math.cos(a)), cy + int(r * 0.42 * math.sin(a)), self.ORBIT)
         a = self.orbit_phase
         mx = cx + int(r * math.cos(a))
-        my = cy + int(r * 0.45 * math.sin(a))
+        my = cy + int(r * 0.42 * math.sin(a))
         for dx in (-1, 0, 1):
             put_px(buf, mx + dx, my, self.ISS)
         put_px(buf, mx, my - 1, self.ISS)
@@ -4186,24 +4310,22 @@ class SatelliteEngine:
         # Miles, not km. Altitude in miles (~263) rather than feet
         # (~1,390,000): a 7-digit number is unreadable at this size and
         # the extra precision is meaningless for something 260 miles up.
-        alt = f"{km_to_mi(pos['alt_km']):.0f}MI"
-        draw_text3x5(buf, 3, 40, alt, self.INK)
-        vel = f"{kmh_to_mph(pos['vel_kmh']):.0f}MPH"
-        if 4 * len(vel) - 1 <= WIDTH - 6:
-            draw_text3x5(buf, WIDTH - 3 - (4 * len(vel) - 1), 40, vel, self.INK_DIM)
+        self._draw_stat_pair(
+            buf, 45,
+            "ALT", f"{km_to_mi(pos['alt_km']):.0f}MI",
+            "SPEED", f"{kmh_to_mph(pos['vel_kmh']):.0f}MPH")
 
         if self.data.get("configured") and "distance_km" in pos:
             dist_mi = km_to_mi(pos["distance_km"])
-            dist = f"{dist_mi:.0f}MI FROM {self.data.get('label','HOME')[:8]}"
-            if 4 * len(dist) - 1 > WIDTH - 4:
-                dist = f"{dist_mi:.0f}MI AWAY"
-            draw_text3x5(buf, max(2, (WIDTH - (4 * len(dist) - 1)) // 2), 50, dist, self.INK_DIM)
+            # Don't word-trim this one: dropping the trailing location off
+            # "11218MI FROM MYRTLE" leaves a dangling "FROM" that reads as
+            # broken. Fall back to a complete shorter phrase instead.
+            line = f"{dist_mi:.0f}MI FROM {self.data.get('label', 'HOME')}"
+            if text_w(line) > WIDTH - 4:
+                line = f"{dist_mi:.0f}MI AWAY"
+            draw_text_centered(buf, 58, line, (86, 94, 116))
         else:
-            draw_text3x5(buf, (WIDTH - (4 * 12 - 1)) // 2, 50, "SET LOCATION", self.INK_DIM)
-
-        if self.data.get("pos_age") and self.data["pos_age"] > 120:
-            put_px(buf, WIDTH - 3, 2, self.STALE)
-            put_px(buf, WIDTH - 2, 2, self.STALE)
+            draw_text_centered(buf, 58, "SET LOCATION", (86, 94, 116))
         return bytes(buf)
 
     def frame(self):
