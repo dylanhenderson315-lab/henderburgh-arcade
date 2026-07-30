@@ -52,6 +52,18 @@ class WledDDP:
         self.n_bytes = width * height * 3
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 18)
+        # A send must never be able to stall the render loop. "UDP doesn't
+        # block" is only true when the destination is resolvable: for an
+        # address on the local subnet that has gone offline, sendto() waits
+        # on ARP resolution and can park the calling thread for SECONDS.
+        # That is exactly what happened when the panel dropped off the
+        # network -- the whole arcade loop froze, self.latest stopped
+        # updating, and the web preview and mode switching looked dead even
+        # though nothing had crashed (no exception, loop_errors stayed 0).
+        # A timeout raises socket.timeout, which IS an OSError subclass, so
+        # send()'s existing `except OSError` already turns it into the
+        # intended "return False, drop the frame, keep running".
+        self.sock.settimeout(0.25)
         self._seq = 0
         self.errors = 0
         self.sent = 0
