@@ -47,12 +47,19 @@ from pathlib import Path
 CONFIG_PATH = Path(__file__).parent / "sports_config.json"
 
 # sport/league path ESPN expects, keyed by the short league code an owner
-# would actually type/select.
+# would actually type/select. EPL/NCAAF/NCAAB confirmed live before adding
+# (same shape scoreboard/summary response as the original 4 -- checked
+# real events, not assumed): EPL's summary endpoint has no
+# "winprobability" key at all (same real gap as NHL), NCAAF/NCAAB both
+# have it and it populates once a game goes live.
 LEAGUE_PATHS = {
     "NFL": "football/nfl",
     "NBA": "basketball/nba",
     "MLB": "baseball/mlb",
     "NHL": "hockey/nhl",
+    "EPL": "soccer/eng.1",
+    "NCAAF": "football/college-football",
+    "NCAAB": "basketball/mens-college-basketball",
 }
 DEFAULT_LEAGUES = ["NFL", "NBA", "MLB", "NHL"]
 
@@ -98,6 +105,29 @@ def save_config(leagues, favorite):
         {"leagues": list(leagues), "favorite": favorite}, indent=2))
 
 
+def _hex_to_rgb(hex_str, min_brightness=90):
+    """ESPN gives team colors as a bare 6-hex-digit string, no '#', and
+    real teams really do ship near-black or near-white as a primary color
+    (several soccer clubs use pure black). On this panel's pure-black
+    background that would render as invisible, which is a real rendering
+    constraint, not a reason to invent a different color -- the actual
+    hue is kept, only lifted to a floor brightness so it's visible.
+    Returns None if the field is missing/malformed so the caller can fall
+    back to a neutral color rather than guess."""
+    if not isinstance(hex_str, str) or len(hex_str) != 6:
+        return None
+    try:
+        r, g, b = (int(hex_str[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return None
+    if max(r, g, b) < min_brightness:
+        scale = min_brightness / max(1, max(r, g, b))
+        r, g, b = min(255, int(r * scale)), min(255, int(g * scale)), min(255, int(b * scale))
+        if max(r, g, b) < min_brightness:      # started at (0,0,0) -- scale can't lift that
+            r = g = b = min_brightness
+    return (r, g, b)
+
+
 def _team_row(competitor):
     team = competitor.get("team") or {}
     score = competitor.get("score")
@@ -107,6 +137,7 @@ def _team_row(competitor):
         "score": int(score) if isinstance(score, str) and score.isdigit() else score,
         "home_away": competitor.get("homeAway"),
         "winner": bool(competitor.get("winner")),
+        "color": _hex_to_rgb(team.get("color")),
     }
 
 
@@ -141,7 +172,16 @@ def _parse_event(event, league):
 
 def _fetch_scoreboard(league):
     path = LEAGUE_PATHS[league]
-    data = _get_json(SCOREBOARD_URL.format(path=path))
+    # ESPN's scoreboard with NO dates param doesn't mean "today" during a
+    # dead period -- it jumps forward to the next scheduled game, which can
+    # be months away (an NFL preseason opener shown in July, an NHL game
+    # from September). Passing today's date explicitly is what actually
+    # means "today": confirmed live against a real off-season league,
+    # which correctly returns zero events instead of a future game. A
+    # league with nothing today should show as empty, not misleadingly
+    # show something that isn't happening for months.
+    today = time.strftime("%Y%m%d")
+    data = _get_json(f"{SCOREBOARD_URL.format(path=path)}?dates={today}")
     out = []
     for ev in data.get("events") or []:
         try:

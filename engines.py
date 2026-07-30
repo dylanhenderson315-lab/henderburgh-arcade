@@ -4482,6 +4482,7 @@ class SportsEngine:
     LEAGUE_COLOR = {
         "NFL": (255, 90, 120), "NBA": (255, 140, 40),
         "MLB": (120, 200, 255), "NHL": (150, 200, 255),
+        "EPL": (100, 220, 120), "NCAAF": (255, 160, 200), "NCAAB": (255, 120, 60),
     }
 
     VIEW_TICKS = 200          # ~10s per view at this tick rate
@@ -4595,20 +4596,33 @@ class SportsEngine:
 
     def _draw_game_block(self, buf, g, y, big=False, flash_col=None):
         """One game: away line over home line, matching the standard
-        box-score convention (visitor listed first/on top)."""
+        box-score convention (visitor listed first/on top).
+
+        Each row gets a left-edge accent bar in that team's REAL color
+        (from ESPN's own team.color field, see sports.py) -- broadcast-
+        style color coding instead of a logo, same trademark reasoning as
+        the flight tracker's plane icon: no logo, just the team's actual
+        colors, which is common, unmistakable sports-broadcast visual
+        language on its own."""
         scale = 2 if big else 1
         # Glyph height is 5*scale px; the gap between the away/home lines
         # must clear that or the two rows visibly bleed into each other.
         # (8 < 10 at scale=2 did exactly that -- caught by rendering an
         # actual frame and looking at it, not just eyeballing the number.)
         gap = 11 if big else 6
+        bar_h = 5 * scale
         for i, (team, other) in enumerate(((g["away"], g["home"]), (g["home"], g["away"]))):
             txt = f"{team['abbr']} {self._score_txt(team['score'])}"
             txt = self._fit(txt, WIDTH - 4)
             w = (8 if big else 4) * len(txt) - (2 if big else 1)
             col = flash_col if flash_col else (
                 self.WIN if team["winner"] else (self.INK if g["state"] != "post" else self.INK_DIM))
-            draw_text3x5(buf, max(2, (WIDTH - w) // 2), y + i * gap, txt, col, scale=scale)
+            row_y = y + i * gap
+            bar_col = team.get("color") or self.INK_DIM
+            for by in range(bar_h):
+                put_px(buf, 1, row_y + by, bar_col)
+                put_px(buf, 2, row_y + by, bar_col)
+            draw_text3x5(buf, max(6, (WIDTH - w) // 2), row_y, txt, col, scale=scale)
 
     def _frame_pinned(self):
         buf = blank()
