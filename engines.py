@@ -4825,9 +4825,17 @@ class SportsEngine:
     def tick(self):
         self.ticks += 1
         self.data = sports.FEED.get()
-        if not self.data.get("favorite"):
-            self.view = 1          # nothing to pin: stay on the ticker
         games = self.data.get("games") or []
+        # Stay on the ticker when PINNED has nothing real to draw: either
+        # no favorite is configured at all, or one is but that team has no
+        # game today. The second case was previously missed, so with a
+        # favorite set on an off day the mode spent half of every cycle
+        # (and half of every 20s ambient slot) on a "NO <TEAM> GAME"
+        # placeholder while real games sat one view away. Only forced when
+        # the ticker actually has games -- otherwise the pinned view's
+        # message is the more informative of two empty screens.
+        if games and not self.data.get("favorite_game"):
+            self.view = 1
         if games:
             self.cur %= len(games)
         self.scroll += 0.5
