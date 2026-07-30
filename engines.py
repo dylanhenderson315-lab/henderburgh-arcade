@@ -4159,7 +4159,14 @@ class TickerEngine:
                     stale=self.age is not None and self.age > 180)
 
         # Symbol: the hero, big and in the move's colour.
-        draw_text_centered(buf, 11, row["sym"][:4], col, scale=2)
+        # fit_text, NOT a blind [:4]: seven characters fit at scale=2, and
+        # the old 4-char slice silently corrupted real symbols -- MATIC
+        # (a supported coin) rendered "MATI", and GOOGL rendered "GOOG",
+        # which is a DIFFERENT REAL TICKER (both are Alphabet share
+        # classes). Worse, the scrolling tape below showed the correct
+        # full symbol, so one screen displayed two different tickers for
+        # the same row.
+        draw_text_centered(buf, 11, fit_text(row["sym"], WIDTH - 6, scale=2), col, scale=2)
 
         # Price: the precise value, bright white-ish so it reads as the
         # authoritative number rather than competing with the symbol.
