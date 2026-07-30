@@ -4527,80 +4527,76 @@ class FlightEngine:
         #   ident 2-6 | dots 9 (own row, no text on it) | icon 15-33 |
         #   line2 35-39 | line3 43-47 | divider 50 | route 53-57 |
         #   airline 59-63 (HEIGHT=64, last legal row)
+        # Header carries the callsign itself -- it IS the identity of what
+        # you're looking at, so it earns the title slot rather than a
+        # generic "FLIGHTS" label, and the accent rule takes the altitude
+        # band colour so the band reads before any text does.
         ident = (ac.get("ident") or "UNKNOWN")[:8]
-        draw_text3x5(buf, max(2, (WIDTH - (4 * len(ident) - 1)) // 2), 2, ident, self.INK)
-
-        # Position dots: which aircraft (of how many) is on screen right
-        # now, so cycling reads as "stepping through a list" rather than
-        # an unexplained change every few seconds. Own row so it can never
-        # collide with the ident text above it regardless of callsign
-        # length (the old side-by-side layout could, for a long callsign
-        # with many aircraft tracked).
-        n = min(len(aircraft), 8)
-        if n > 1:
-            dot_w = n * 3 - 1
-            dx0 = (WIDTH - dot_w) // 2
-            for i in range(n):
-                c = self.DOT_ON if i == (self.cur % n) else self.DOT_OFF
-                put_px(buf, dx0 + i * 3, 9, c)
+        draw_header(buf, ident, col,
+                    right_tag=f"{self.cur + 1}/{len(aircraft)}",
+                    stale=bool(self.data.get("age") and self.data["age"] > 60))
 
         # Heading-oriented icon, the visual centerpiece -- colour-coded by
         # altitude band (see ALT_BANDS) since that reads as "kind of
         # traffic" better than raw distance would at this size.
-        self._draw_plane_icon(buf, WIDTH // 2, 24, ac.get("track_deg"), col)
+        self._draw_plane_icon(buf, WIDTH // 2, 22, ac.get("track_deg"), col)
 
         # .upper() defensively: aircraft type codes are conventionally
         # uppercase in ADS-B data, but "conventionally" is exactly the
         # word that just burned the airline-name field above.
         typ = (ac.get("type") or "").upper()
-        line2 = f"{typ} {alt:.0f}FT".strip() if isinstance(alt, (int, float)) else (typ or "-")
-        if 4 * len(line2) - 1 > WIDTH - 4:
-            line2 = f"{alt:.0f}FT" if isinstance(alt, (int, float)) else typ
-        draw_text3x5(buf, max(2, (WIDTH - (4 * len(line2) - 1)) // 2), 35, line2, col)
 
         # ADS-B natively reports altitude in FEET (already imperial, left
-        # as-is above) but ground speed in KNOTS and distance in NAUTICAL
-        # miles -- both aviation-standard, neither what someone reading a
-        # wall panel means. Converted to mph / statute miles for display.
+        # as-is) but ground speed in KNOTS and distance in NAUTICAL miles
+        # -- both aviation-standard, neither what someone reading a wall
+        # panel means. Converted to mph / statute miles for display.
         gs = ac.get("gs_kt")
         dist = ac.get("dist_nm")
         compass = self._compass(ac.get("dir_deg"))
-        parts = []
-        if isinstance(gs, (int, float)):
-            parts.append(f"{kt_to_mph(gs):.0f}MPH")
-        if isinstance(dist, (int, float)):
-            parts.append(f"{nm_to_mi(dist):.0f}MI {compass}".strip())
-        line3 = " ".join(parts) if parts else "-"
-        draw_text3x5(buf, max(2, (WIDTH - (4 * len(line3) - 1)) // 2), 43, line3, self.INK_DIM)
+        left = f"{kt_to_mph(gs):.0f}MPH" if isinstance(gs, (int, float)) else "-"
+        right = f"{nm_to_mi(dist):.0f}MI {compass}".strip() if isinstance(dist, (int, float)) else "-"
 
-        for x in range(4, WIDTH - 4):
-            put_px(buf, x, 50, (30, 34, 44))
+        # Altitude is the hero value: it's the number the icon's colour
+        # encodes, so making it big is what teaches the colour band
+        # without needing a legend. The type code rides with it only when
+        # it can't fit on the stats row below (see below) -- composed once
+        # here so the row is never drawn twice.
+        alt_txt = f"{alt:.0f}FT" if isinstance(alt, (int, float)) else (typ or "-")
+
+        # The type only goes on the stats row if it genuinely fits in the
+        # gap between the two side stats. Centring it unconditionally
+        # overlapped both of them on a wide case (598MPH + 45MI NW) --
+        # caught by rendering, invisible to a code read. It's the least
+        # important of the three, so it yields.
+        gap = (WIDTH - 2 - text_w(right)) - (2 + text_w(left))
+        type_fits_inline = bool(typ) and gap >= text_w(typ) + 6
+        if typ and not type_fits_inline and isinstance(alt, (int, float)):
+            alt_txt = f"{typ} {alt:.0f}FT"
+
+        draw_text_centered(buf, 33, fit_text(alt_txt, WIDTH - 4), col)
+        draw_text3x5(buf, 2, 41, left, self.INK_DIM)
+        draw_text3x5(buf, WIDTH - 2 - text_w(right), 41, right, self.INK_DIM)
+        if type_fits_inline:
+            draw_text_centered(buf, 41, typ, (86, 94, 116))
+
+        draw_dots(buf, 47, len(aircraft), self.cur, on=col, cap=8)
+        draw_divider(buf, 50)
 
         route = ac.get("route")
         if route and route.get("origin") and route.get("dest"):
-            rline = f"{route['origin']}>{route['dest']}".upper()
-            draw_text3x5(buf, max(2, (WIDTH - (4 * len(rline) - 1)) // 2), 53, rline, self.ROUTE)
+            draw_text_centered(buf, 53, f"{route['origin']}>{route['dest']}".upper(), self.ROUTE)
             # adsbdb returns mixed-case names ("United Airlines"), but the
             # font is uppercase-only -- draw_text3x5 silently skips glyphs
             # it doesn't have, so lowercase letters vanished and "United
             # Airlines" rendered as just the two capitals, "U" and "A",
-            # nothing else. Every other display string in this codebase
-            # was already uppercase at the source; this was the one place
-            # that wasn't.
-            # Width-fit against real pixels, not a blind character slice --
-            # a fixed [:16] let long names ("Southwest Airlines") clip
+            # nothing else. Width-fit against real pixels, not a blind
+            # character slice -- a fixed [:16] let long names clip
             # mid-glyph off the right edge instead of stopping cleanly.
-            airline = (route.get("airline") or "").upper()
-            while airline and 4 * len(airline) - 1 > WIDTH - 4:
-                airline = airline[:-1]
+            airline = fit_text((route.get("airline") or "").upper(), WIDTH - 4)
             if airline:
-                draw_text3x5(buf, max(2, (WIDTH - (4 * len(airline) - 1)) // 2), 59, airline, self.INK_DIM)
+                draw_text_centered(buf, 59, airline, (86, 94, 116))
         else:
-            draw_text3x5(buf, (WIDTH - (4 * 10 - 1)) // 2, 56, "NO ROUTE DATA", self.INK_DIM)
-
-        if self.data.get("age") and self.data["age"] > 60:
-            put_px(buf, WIDTH - 3, 2, self.STALE)
-            put_px(buf, WIDTH - 2, 2, self.STALE)
+            draw_text_centered(buf, 55, "NO ROUTE DATA", (86, 94, 116))
         return bytes(buf)
 
 
@@ -4797,36 +4793,39 @@ class SportsEngine:
             return self._frame_empty("PINNED TEAM", self._fit(sub, WIDTH - 4) or "NO GAME TODAY")
 
         lg_col = self.LEAGUE_COLOR.get(fg["league"], self.INK_DIM)
-        draw_text3x5(buf, (WIDTH - (4 * len(fg["league"]) - 1)) // 2, 2, fg["league"], lg_col)
+        # LIVE is the thing a sports fan is actually scanning for, so it
+        # gets the header's right slot in the live colour rather than
+        # being buried in the status line below.
+        live = fg["state"] == "in"
+        draw_header(buf, fg["league"], lg_col,
+                    right_tag="LIVE" if live else ("FINAL" if fg["state"] == "post" else ""),
+                    stale=bool(self.data.get("age") and self.data["age"] > 120))
 
         flash_col = self.FLASH if (self.score_flash > 0 and self.score_flash % 2 == 0) else None
-        self._draw_game_block(buf, fg, 11, big=True, flash_col=flash_col)
+        self._draw_game_block(buf, fg, 12, big=True, flash_col=flash_col)
 
-        detail = self._fit(fg["detail"] or "", WIDTH - 4)
-        draw_text3x5(buf, max(2, (WIDTH - (4 * len(detail) - 1)) // 2), 35, detail, self.LIVE if fg["state"] == "in" else self.INK_DIM)
-
-        for x in range(4, WIDTH - 4):
-            put_px(buf, x, 43, (30, 34, 44))
+        detail = fit_text(fg["detail"] or "", WIDTH - 4)
+        draw_text_centered(buf, 36, detail, self.LIVE if live else (86, 94, 116))
+        draw_divider(buf, 44)
 
         win_prob = self.data.get("win_prob")
         if win_prob is not None:
             is_home = fav.get("team_abbr") == fg["home"]["abbr"]
             pct = win_prob if is_home else (1.0 - win_prob)
-            label = f"{fav.get('team_abbr','')} {pct * 100:.0f}%"
-            draw_text3x5(buf, (WIDTH - (4 * len(label) - 1)) // 2, 48, label, self.WIN)
-            # A literal probability bar under the text -- the number alone
-            # reads fine up close, but the bar is what survives a glance
-            # from across the room the way the ticker's arrow does.
-            bar_w = WIDTH - 12
-            bx0 = 6
+            draw_text_centered(buf, 47, f"{fav.get('team_abbr','')} {pct * 100:.0f}% WIN", self.WIN)
+            # A real two-tone probability bar: the favourite's share in
+            # their win colour against the opponent's share, rather than a
+            # bar against empty space -- at a glance the SPLIT is the
+            # information, and an unfilled remainder reads as "loading"
+            # instead of "the other team".
+            bar_w, bx0, by = WIDTH - 12, 6, 55
             fill_w = int(bar_w * pct)
             for x in range(bar_w):
-                col = self.WIN if x < fill_w else (30, 34, 44)
-                put_px(buf, bx0 + x, 55, col)
-
-        if self.data.get("age") and self.data["age"] > 120:
-            put_px(buf, WIDTH - 3, 2, self.STALE)
-            put_px(buf, WIDTH - 2, 2, self.STALE)
+                c = self.WIN if x < fill_w else (150, 60, 70)
+                put_px(buf, bx0 + x, by, c)
+                put_px(buf, bx0 + x, by + 1, rim(c, 0.5))
+            for dy in (-1, 0, 1, 2):
+                put_px(buf, bx0 + fill_w, by + dy, (235, 240, 255))
         return bytes(buf)
 
     def _frame_ticker(self):
@@ -4846,52 +4845,23 @@ class SportsEngine:
         g = games[self.cur % len(games)]
 
         lg_col = self.LEAGUE_COLOR.get(g["league"], self.INK_DIM)
-        draw_text3x5(buf, (WIDTH - (4 * len(g["league"]) - 1)) // 2, 3, g["league"], lg_col)
+        live = g["state"] == "in"
+        draw_header(buf, g["league"], lg_col,
+                    right_tag="LIVE" if live else f"{self.cur + 1}/{len(games)}",
+                    stale=bool(self.data.get("age") and self.data["age"] > 120))
 
-        self._draw_game_block(buf, g, 11, big=True)
+        self._draw_game_block(buf, g, 12, big=True)
 
-        detail = self._fit(g["detail"] or "", WIDTH - 4)
-        draw_text3x5(buf, max(2, (WIDTH - (4 * len(detail) - 1)) // 2), 35, detail,
-                     self.LIVE if g["state"] == "in" else self.INK_DIM)
+        detail = fit_text(g["detail"] or "", WIDTH - 4)
+        draw_text_centered(buf, 36, detail, self.LIVE if live else (86, 94, 116))
 
-        for x in range(4, WIDTH - 4):
-            put_px(buf, x, 43, (30, 34, 44))
+        draw_dots(buf, 44, len(games), self.cur, on=lg_col, cap=10)
+        draw_divider(buf, 48)
 
-        # --- scrolling tape of every other game, ESPN-style ---
-        parts = []
-        for r in games:
-            sign = f"{r['away']['abbr']} {self._score_txt(r['away']['score'])} @ " \
-                   f"{r['home']['abbr']} {self._score_txt(r['home']['score'])} {r['detail']}"
-            parts.append(sign)
-        tape = "   ".join(parts) + "   "
-        tape_w = 4 * len(tape)
-        if tape_w:
-            off = int(self.scroll) % tape_w
-            x = -off
-            for ch in tape:
-                if x > WIDTH:
-                    break
-                if x > -4:
-                    draw_text3x5(buf, x, 50, ch, self.INK_DIM)
-                x += 4
-            x = -off + tape_w
-            for ch in tape:
-                if x > WIDTH:
-                    break
-                if x > -4:
-                    draw_text3x5(buf, x, 50, ch, self.INK_DIM)
-                x += 4
-
-        n = min(len(games), 8)
-        dot_w = n * 4 - 2
-        dx0 = (WIDTH - dot_w) // 2
-        for i in range(n):
-            col = self.INK if i == (self.cur % n) else self.INK_DIM
-            put_px(buf, dx0 + i * 4, HEIGHT - 3, col)
-
-        if self.data.get("age") and self.data["age"] > 120:
-            put_px(buf, WIDTH - 3, 2, self.STALE)
-            put_px(buf, WIDTH - 2, 2, self.STALE)
+        parts = [f"{r['away']['abbr']} {self._score_txt(r['away']['score'])} @ "
+                 f"{r['home']['abbr']} {self._score_txt(r['home']['score'])} {r['detail']}"
+                 for r in games]
+        draw_marquee(buf, 53, "   ".join(parts), self.INK_DIM, self.scroll)
         return bytes(buf)
 
     def frame(self):
@@ -4985,59 +4955,39 @@ class NewsEngine:
         headlines = self.data.get("headlines") or []
         label = self.data.get("label") or "NEWS"
 
-        draw_text3x5(buf, (WIDTH - (4 * len(label) - 1)) // 2, 3, label, self.INK_DIM)
-        for x in range(4, WIDTH - 4):
-            put_px(buf, x, 10, (30, 34, 44))
+        accent = (225, 60, 70)
+        stale = bool(self.data.get("age") and self.data["age"] > 1800)
 
         if not headlines:
-            msg = "NO HEADLINES" if self.data.get("err") else "LOADING"
-            draw_text3x5(buf, (WIDTH - (4 * len(msg) - 1)) // 2, 28, msg,
-                         self.LOSE if self.data.get("err") else self.INK_DIM)
-            dots = "." * (1 + (self.ticks // 12) % 3)
-            draw_text3x5(buf, (WIDTH - 11) // 2, 38, dots, self.INK_DIM)
+            draw_header(buf, label, accent, stale=stale)
+            draw_text_centered(buf, 30, "NO HEADLINES" if self.data.get("err") else "LOADING",
+                               self.LOSE if self.data.get("err") else self.INK_DIM)
+            draw_text_centered(buf, 40, "." * (1 + (self.ticks // 12) % 3), self.INK_DIM)
             return bytes(buf)
 
-        # --- spotlight: the current headline, big, scrolling ---
-        headline = headlines[self.cur % len(headlines)]
-        text = headline + "     "               # trailing gap before the loop repeats
-        text_w = 8 * len(text)                    # scale=2 glyph pitch
-        off = int(self.scroll) % text_w
-        for rep in (0, 1):
-            x = -off + rep * text_w
-            for ch in text:
-                if x > WIDTH:
-                    break
-                if x > -8:
-                    draw_text3x5(buf, x, 20, ch, self.HEADLINE, scale=2)
-                x += 8
+        draw_header(buf, label, accent,
+                    right_tag=f"{self.cur + 1}/{len(headlines)}", stale=stale)
 
-        for x in range(4, WIDTH - 4):
-            put_px(buf, x, 38, (30, 34, 44))
+        # Spotlight: the current headline, big and scrolling. Headlines
+        # run far longer than 64px even at scale=1, so there's no sensible
+        # fixed truncation -- it scrolls instead, and the smaller tape
+        # below runs the full set at a different rate so the two are
+        # independent reads rather than a race.
+        draw_marquee(buf, 18, headlines[self.cur % len(headlines)],
+                     self.HEADLINE, self.scroll, scale=2, gap="     ")
 
-        # --- full tape of every other headline, ESPN-ticker-style ---
-        tape = "   /   ".join(headlines) + "   /   "
-        tape_w = 4 * len(tape)
-        if tape_w:
-            toff = int(self.scroll * 0.6) % tape_w    # slower than the spotlight -- two independent reads, not a race
-            for rep in (0, 1):
-                x = -toff + rep * tape_w
-                for ch in tape:
-                    if x > WIDTH:
-                        break
-                    if x > -4:
-                        draw_text3x5(buf, x, 44, ch, self.INK_DIM)
-                    x += 4
+        draw_dots(buf, 34, len(headlines), self.cur, on=accent)
+        draw_divider(buf, 38)
 
-        n = min(len(headlines), 10)
-        dot_w = n * 3 - 1
-        dx0 = (WIDTH - dot_w) // 2
-        for i in range(n):
-            col = self.INK if i == (self.cur % n) else (40, 44, 56)
-            put_px(buf, dx0 + i * 3, HEIGHT - 3, col)
+        draw_marquee(buf, 45, "   /   ".join(headlines), self.INK_DIM,
+                     self.scroll * 0.6, gap="   /   ")
 
-        if self.data.get("age") and self.data["age"] > 1800:
-            put_px(buf, WIDTH - 3, 2, self.STALE)
-            put_px(buf, WIDTH - 2, 2, self.STALE)
+        # A second, dimmer rule below the tape closes the frame so it reads
+        # as a contained band rather than text running off the panel's
+        # bottom edge. The source name is deliberately NOT repeated here --
+        # it's already in the header, and repeating it just spent 5 rows
+        # saying nothing new.
+        draw_divider(buf, 53)
         return bytes(buf)
 
 
