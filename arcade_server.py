@@ -42,6 +42,7 @@ import market
 import satellite
 import sports
 import news
+import weather
 
 PORT = 7333
 HERE = Path(__file__).parent
@@ -837,6 +838,10 @@ class Handler(BaseHTTPRequestHandler):
             leagues, favorite = sports.FEED.get_config()
             self._json({"leagues": leagues, "favorite": favorite,
                         "known_leagues": sorted(sports.LEAGUE_PATHS)})
+        elif path == "/api/weather/current":
+            # Read-only: weather has no config of its own -- it reuses the
+            # ISS/flights home location via /api/satellite/location.
+            self._json(weather.FEED.get())
         elif path == "/api/news/config":
             feed_url, label = news.FEED.get_config()
             self._json({"feed_url": feed_url, "label": label,

@@ -25,6 +25,7 @@ import satellite
 import flights
 import sports
 import news
+import weather
 import tic80_core
 
 WIDTH = 64
@@ -4991,6 +4992,226 @@ class NewsEngine:
         return bytes(buf)
 
 
+class WeatherEngine:
+    """NOAA/NWS current conditions + active severe alerts.
+
+    Same discipline as every other data mode: no I/O here, reads whatever
+    weather.FEED has cached.
+
+    An active alert PREEMPTS the normal view entirely rather than taking
+    a turn in the rotation -- a tornado warning that waits 10 seconds for
+    the conditions view to finish cycling is a broken product. The alert
+    view also pulses, because on a wall panel across a room the motion is
+    what actually catches an eye that isn't already looking.
+
+    NWS returns Celsius and km/h despite being a US agency; converted
+    here at the render layer, same as every other mode.
+    """
+
+    name = "weather"
+    tick_rate = 0.05
+
+    BG = (0, 0, 0)
+    INK = (150, 160, 185)
+    INK_DIM = (86, 94, 116)
+    ACCENT = (90, 190, 255)
+    STALE = (255, 170, 40)
+
+    # NWS severity -> alert styling. Extreme/Severe get the urgent red;
+    # lesser advisories get amber so a routine coastal-flood advisory
+    # doesn't cry wolf in the same colour as a tornado warning.
+    SEVERITY_COLOR = {
+        "Extreme": (255, 45, 45), "Severe": (255, 80, 40),
+        "Moderate": (255, 170, 40), "Minor": (240, 200, 70),
+        "Unknown": (200, 200, 200),
+    }
+
+    COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+    VIEW_TICKS = 220
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.data = {"conditions": None, "alerts": [], "place": "HOME",
+                    "configured": False, "age": None, "err": None}
+        self.cur_alert = 0
+        self.hold = 0
+        self.cycling = True
+        self.ticks = 0
+        self.scroll = 0.0
+
+    # ---- input -----------------------------------------------------------
+    def input(self, cmd):
+        alerts = self.data.get("alerts") or []
+        if cmd == "left" and alerts:
+            self.cur_alert = (self.cur_alert - 1) % len(alerts)
+            self.hold = 0
+        elif cmd == "right" and alerts:
+            self.cur_alert = (self.cur_alert + 1) % len(alerts)
+            self.hold = 0
+        elif cmd in ("rotate", "drop"):
+            self.cycling = not self.cycling
+
+    def auto(self):
+        pass
+
+    # ---- simulation --------------------------------------------------------
+    def tick(self):
+        self.ticks += 1
+        self.data = weather.FEED.get()
+        self.scroll += 0.5
+        alerts = self.data.get("alerts") or []
+        if alerts:
+            self.cur_alert %= len(alerts)
+            if self.cycling and len(alerts) > 1:
+                self.hold += 1
+                if self.hold >= self.VIEW_TICKS:
+                    self.hold = 0
+                    self.cur_alert = (self.cur_alert + 1) % len(alerts)
+        self.score = len(alerts)
+
+    # ---- render --------------------------------------------------------
+    @classmethod
+    def _compass(cls, deg):
+        if deg is None:
+            return ""
+        return cls.COMPASS[int((deg + 22.5) % 360 // 45)]
+
+    def _frame_alert(self, alert):
+        buf = blank()
+        fill(buf, self.BG)
+        col = self.SEVERITY_COLOR.get(alert["severity"], self.SEVERITY_COLOR["Unknown"])
+
+        # Pulse: a wall panel has to earn attention from someone who isn't
+        # already looking at it, and motion does that where a static red
+        # screen does not.
+        k = 0.55 + 0.45 * abs(math.sin(self.ticks * 0.09))
+        pulse = tuple(min(255, int(c * k)) for c in col)
+
+        for x in range(WIDTH):
+            for y in (0, 1, 2):
+                put_px(buf, x, y, pulse)
+            for y in (HEIGHT - 3, HEIGHT - 2, HEIGHT - 1):
+                put_px(buf, x, y, pulse)
+        for y in range(HEIGHT):
+            for x in (0, 1):
+                put_px(buf, x, y, pulse)
+            for x in (WIDTH - 2, WIDTH - 1):
+                put_px(buf, x, y, pulse)
+
+        sev = alert["severity"].upper()
+        draw_text_centered(buf, 6, fit_text(sev, WIDTH - 10), pulse)
+
+        # The event name is the thing that matters ("TORNADO WARNING").
+        # Wrapped across up to three lines at the largest size that fits
+        # rather than truncated -- this is the one view where cutting the
+        # message off could actually matter to someone.
+        words = alert["event"].split()
+        lines, cur = [], ""
+        for w in words:
+            trial = f"{cur} {w}".strip()
+            if text_w(trial) <= WIDTH - 10:
+                cur = trial
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = w
+        if cur:
+            lines.append(cur)
+        # Vertically centre the wrapped block in the space between the
+        # severity label and the footer, so a 1-line event doesn't sit in
+        # the top third with dead space under it and a 3-line one still
+        # fits. (Fixed y0 looked visibly unbalanced for the common
+        # single-line case.)
+        lines = lines[:3]
+        band_top, band_bot = 15, HEIGHT - 12
+        block_h = len(lines) * 8 - 2
+        y0 = band_top + max(0, ((band_bot - band_top) - block_h) // 2)
+        for i, ln in enumerate(lines):
+            draw_text_centered(buf, y0 + i * 8, ln, (255, 255, 255))
+
+        if len(self.data.get("alerts") or []) > 1:
+            draw_dots(buf, HEIGHT - 6, len(self.data["alerts"]), self.cur_alert, on=pulse)
+        else:
+            draw_text_centered(buf, HEIGHT - 9, fit_text(self.data.get("place", ""), WIDTH - 10), rim(col, 0.8))
+        return bytes(buf)
+
+    def _frame_conditions(self):
+        buf = blank()
+        fill(buf, self.BG)
+        cond = self.data.get("conditions")
+        stale = bool(self.data.get("age") and self.data["age"] > 3600)
+
+        if not self.data.get("configured"):
+            draw_header(buf, "WEATHER", self.ACCENT)
+            draw_text_centered(buf, 28, "SET LOCATION", self.INK)
+            draw_text_centered(buf, 38, "TO SEE WEATHER", self.INK_DIM)
+            return bytes(buf)
+
+        if not cond:
+            draw_header(buf, "WEATHER", self.ACCENT, stale=stale)
+            msg = "NO DATA" if self.data.get("err") else "LOADING"
+            draw_text_centered(buf, 28, msg, self.INK_DIM)
+            if self.data.get("err"):
+                draw_text_centered(buf, 38, fit_text(str(self.data["err"]).upper(), WIDTH - 4), self.INK_DIM)
+            else:
+                draw_text_centered(buf, 38, "." * (1 + (self.ticks // 12) % 3), self.INK_DIM)
+            return bytes(buf)
+
+        draw_header(buf, fit_text(self.data.get("place", "WEATHER"), WIDTH - 20),
+                    self.ACCENT, stale=stale)
+
+        # Temperature is the hero -- it's the one number anyone actually
+        # wants from a weather display, so it gets scale=2 and the only
+        # bright colour on the screen.
+        temp_c = cond.get("temp_c")
+        if temp_c is not None:
+            draw_text_centered(buf, 12, f"{c_to_f(temp_c):.0f}F", (255, 235, 180), scale=2)
+        else:
+            draw_text_centered(buf, 14, "--F", self.INK_DIM, scale=2)
+
+        text = cond.get("text") or ""
+        if text:
+            draw_text_centered(buf, 28, fit_text(text, WIDTH - 4), self.INK)
+
+        draw_divider(buf, 37)
+
+        wind = cond.get("wind_kmh")
+        if wind is not None:
+            d = self._compass(cond.get("wind_dir_deg"))
+            wtxt = f"{kmh_to_mph(wind):.0f}MPH {d}".strip()
+            draw_text3x5(buf, 2, 41, "WIND", self.INK_DIM)
+            draw_text3x5(buf, 2, 47, wtxt, self.INK)
+
+        # Humidity and gust are genuinely often null even on a healthy
+        # station (confirmed live), so they only appear when real.
+        hum = cond.get("humidity")
+        gust = cond.get("gust_kmh")
+        if gust is not None:
+            label, val = "GUST", f"{kmh_to_mph(gust):.0f}MPH"
+        elif hum is not None:
+            label, val = "HUMIDITY", f"{hum:.0f}%"
+        else:
+            label = val = None
+        if label:
+            w = max(text_w(label), text_w(val))
+            draw_text3x5(buf, WIDTH - 2 - w, 41, label, self.INK_DIM)
+            draw_text3x5(buf, WIDTH - 2 - w, 47, val, self.INK)
+
+        draw_divider(buf, 55)
+        draw_text_centered(buf, 58, "NO ALERTS", (60, 110, 70))
+        return bytes(buf)
+
+    def frame(self):
+        alerts = self.data.get("alerts") or []
+        if alerts:
+            return self._frame_alert(alerts[self.cur_alert % len(alerts)])
+        return self._frame_conditions()
+
+
 class BootEngine:
     name = "boot"
     tick_rate = 0.045
@@ -5155,6 +5376,7 @@ class MenuEngine:
         ("flights",  "FLIGHTS",  (120, 200, 255)),
         ("sports",   "SPORTS",   (255, 140, 40)),
         ("news",     "NEWS",     (255, 226, 60)),
+        ("weather",  "WEATHER",  (90, 190, 255)),
     ]
 
     def __init__(self):
@@ -5399,6 +5621,14 @@ class MenuEngine:
             block(6, 2, 2, 1, w)
             block(2, 5, 2, 1, c)
             block(6, 5, 2, 1, c)
+        elif gid == "weather":
+            # A cloud with a sun peeking over it -- the universal weather
+            # glyph, distinct from every other icon's boxy/bar language.
+            block(2, 1, 3, 2, w)
+            block(1, 4, 7, 3, c)
+            block(2, 3, 5, 1, c)
+            put_px(buf, x0 + 1, y0 + 7, c)
+            put_px(buf, x0 + 7, y0 + 7, c)
         elif gid == "news":
             # A folded newspaper: masthead bar + column rules -- distinct
             # from the ticker's bar-chart language and the sports
@@ -7162,6 +7392,7 @@ ENGINES = {
     "flights": FlightEngine,
     "sports": SportsEngine,
     "news": NewsEngine,
+    "weather": WeatherEngine,
     "menu": MenuEngine,
     "boot": BootEngine,
 }
