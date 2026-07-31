@@ -46,6 +46,7 @@ import sports
 import news
 import weather
 import blog
+import brightness
 
 PORT = 7333
 HERE = Path(__file__).parent
@@ -803,6 +804,25 @@ class Arcade:
                     with self.lock:
                         self.latest = frame
 
+                # TIME-OF-DAY DIMMING. Applied last, to whatever is about to
+                # be sent, so it covers every mode uniformly -- a game at
+                # 3am dims exactly like the clock does.
+                #
+                # SEVERE ALERTS ARE EXEMPT, deliberately: the entire point
+                # of the global takeover is to grab attention, and a
+                # tornado warning quietly dimmed to 28% at 3am would defeat
+                # it at precisely the hour it matters most.
+                #
+                # self.latest is dimmed too, so the web preview and phone
+                # remote show what the panel actually looks like rather
+                # than a bright frame the panel never displayed.
+                if frame is not None and alert_frame is None:
+                    level = brightness.level_now()
+                    if level < 0.999:
+                        frame = brightness.apply(frame, level)
+                        with self.lock:
+                            self.latest = frame
+
                 # Push when the image CHANGED (never faster than PANEL_FPS), or
                 # when the keepalive is due so WLED can't time out of realtime
                 # and snap back to its own effect under a static picture.
@@ -906,6 +926,10 @@ class Handler(BaseHTTPRequestHandler):
             # Read-only: weather has no config of its own -- it reuses the
             # ISS/flights home location via /api/satellite/location.
             self._json(weather.FEED.get())
+        elif path == "/api/brightness":
+            cfg = brightness.load_config()
+            cfg["current_level"] = round(brightness.level_now(cfg), 3)
+            self._json(cfg)
         elif path == "/api/blog/config":
             self._json({"api_url": blog.FEED.get_config(),
                         "default_api_url": blog.DEFAULT_API_URL})
@@ -1048,6 +1072,14 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         self._json({"ok": True, "favorite": favorite})
             except (ValueError, KeyError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/brightness":
+            try:
+                j = json.loads(body or b"{}")
+                cfg = brightness.save_config(j)
+                cfg["current_level"] = round(brightness.level_now(cfg), 3)
+                self._json({"ok": True, **cfg})
+            except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/blog/source":
             try:

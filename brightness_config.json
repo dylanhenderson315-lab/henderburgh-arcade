@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "day_brightness": 1.0,
+  "night_brightness": 0.28,
+  "night_start": "22:00",
+  "night_end": "07:00",
+  "fade_minutes": 30
+}
