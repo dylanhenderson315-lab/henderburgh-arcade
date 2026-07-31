@@ -319,32 +319,32 @@ scoreboards are already known-empty from the `dates=` result).
 
 ## Known issues / in-progress work
 
-### ⚠ PANEL IS OFFLINE as of end of session 2026-07-30 — likely needs a power cycle
+### Panel lockup hazard — RESOLVED 2026-07-30, but the rule stands
 
-The Apollo M-1 at `192.168.40.24` stopped responding to ping and HTTP
-during the audit and had not recovered by the end of the session. This
-Mac's own LAN networking is fine (`192.168.40.203` responds), so it is
-the panel, not the network. The arcade service is healthy and set to
-`off`; it will drive the panel again as soon as the panel is back.
+The Apollo M-1 stopped responding to ping and HTTP during the audit on
+2026-07-30. It was power-cycled and came back healthy (uptime reset,
+RSSI -55, service streaming with 0 send errors). **No action outstanding.**
 
-**Most likely cause, and it was my (Claude's) doing:** several audit
+Cause, recorded because the rule it produced still matters: several audit
 scripts did `import arcade_server`, which constructs the module-level
 `ARCADE` singleton — a full `Arcade` with its own render thread and its
 own `WledDDP` sender. Those ran *concurrently with the launchd service*,
-so two or more independent DDP streams hit the panel at once. This file
-and `arcade_server.py` both warn that flooding WLED locks the panel hard
-enough to need a physical power cycle; that is the documented failure
-mode and it matches exactly what happened.
+so two or more independent DDP streams hit the panel at once. Both this
+file and `arcade_server.py` warn that flooding WLED locks the panel hard
+enough to need a physical power cycle; that is exactly what happened.
 
-**Recovery:** physically power-cycle the panel (unplug/replug USB-C).
+**Rule: never `import arcade_server` from a test/audit script while the
+service is running.** Test engines directly (`import engines`,
+instantiate the engine class, call `tick()`/`frame()`) — that needs no
+panel and no second render loop, and it is how every verification in this
+project should be done. If an end-to-end test genuinely needs the render
+loop, stop the service first
+(`launchctl bootout gui/$(id -u)/com.henderburgh.arcade`) so exactly one
+DDP sender exists.
 
-**Rule for future work — this is the actionable part:** never
-`import arcade_server` from a test/audit script while the service is
-running. Test engines directly (`import engines`, instantiate the engine
-class, call `tick()`/`frame()`), which needs no panel and no second
-render loop. If an end-to-end test genuinely needs the render loop, stop
-the service first (`launchctl bootout gui/$(id -u)/com.henderburgh.arcade`)
-so only one DDP sender exists.
+Related and already fixed: the render loop used to freeze for seconds
+whenever the panel went away (no DDP socket timeout) — see the self-audit
+section below.
 
 ### ⚠ ESPN rate exposure if `ambient` runs 24/7 — READ THIS FIRST
 
