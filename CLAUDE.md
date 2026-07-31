@@ -11,9 +11,10 @@ file.
 
 A 64×64 LED matrix "arcade console" built on an Apollo M-1 WLED-MM panel
 (HUB75, ESP32-S3), currently driven by a Mac mini over the network. It
-runs classic games, live data "modes" (stock ticker, ISS tracker, flight
-tracker, sports scoreboard, news headline ticker, weather + severe
-alerts, site guestbook, and an `ambient` rotation tying them together),
+runs classic games, live data "modes" (clock/dashboard, stock ticker,
+ISS tracker, flight tracker, sports scoreboard, news headline ticker,
+weather + severe alerts, site guestbook, and an `ambient` rotation tying
+them together),
 video/screen mirroring, and WLED's own ambient lighting effects — all
 through one local HTTP server with a web control page and a
 phone-optimized remote controller page.
@@ -217,6 +218,30 @@ appends them to the menu automatically.
     pulse, ~25s dwell — deliberately the quietest mode here. Overlong
     text wraps, then word-truncates, with a hard-split fallback for a
     single unbreakable word.
+
+- **clock** (`ClockEngine`, 2026-07-31) — **the panel's resting state and
+  `DEFAULT_MODE`.** Time (12-hour hero, blinking colon), date, current
+  temperature, next ISS pass countdown. Composed from `weather.FEED` and
+  `satellite.FEED`; **no `clock.py`** because it has no I/O to isolate
+  (`time.localtime()` is a local call) — an empty feed module purely to
+  match the pattern would be cargo-cult. Degrades one field at a time and
+  the clock itself never depends on a feed.
+
+  **How the three "idle" concepts relate — decided 2026-07-31:**
+  - `clock` = resting state. What's on when nothing was chosen.
+  - `off` = explicit release to WLED/Home Assistant lighting. **Kept, not
+    replaced** — the panel doubles as a house lamp and that handoff is a
+    real capability.
+  - `ambient` = an active choice to watch live data cycle. **Clock is not
+    in `AmbientEngine.SEQUENCE`**: its `has_content()` is always true, so
+    it could never be skipped and would eat a dwell slot every lap,
+    displacing the data ambient exists to show. It *is* ambient's
+    empty-state fallback (a clock beats a "NO DATA YET" screen).
+
+  Both midnight and noon are handled via `strftime("%I")`, not arithmetic:
+  `hour % 12` yields 0 for *both* 00:00 and 12:00, which is the classic
+  bug. All 10 edge times are covered by the verification described in the
+  self-audit section.
 
 **`ambient` — the master rotation mode** (`AmbientEngine`). Cycles
 flights → ISS → weather → sports → news → blog (guestbook), ~20s each,
