@@ -271,6 +271,33 @@ tick when NWS drops the alert. **Deliberate cost:** this reads
 out (a takeover that only worked while already viewing weather would be
 pointless).
 
+**Time-based night dimming** (`brightness.py`, 2026-07-31) — applied in
+the render loop to whatever is about to be sent, so it covers **every**
+mode uniformly (a game at 3am dims exactly like the clock). Necessary
+because the panel now rests on the clock and is therefore lit 24h.
+
+- **At the render layer, not WLED's `bri`** — renderer-agnostic (the
+  future Bonnet path gets it free), no network round-trip, deterministic
+  and testable without hardware. Same reasoning as unit conversion.
+- **No ambient light sensor on this rig.** PRODUCTION.md assumes one for
+  the sellable device; the Apollo M-1 exposes none. When a sensor exists,
+  only `level_at()` changes — everything above takes a 0..1 scalar.
+- **Smooth fade** (default 30 min), because it cost almost nothing: one
+  lerp, plus a cached 256-byte table applied with `bytes.translate()`,
+  which runs in C over the whole 12KB frame. `fade_minutes: 0` gives an
+  instant switch.
+- **Severe alerts are exempt** — the global takeover exists to grab
+  attention, and a tornado warning dimmed to 28% at 3am defeats it at
+  exactly the hour it matters. Verified: 51.8 vs 168.3 mean luminance.
+- Config via `/api/brightness` (`enabled`, `day_brightness`,
+  `night_brightness`, `night_start`, `night_end`, `fade_minutes`).
+  Malformed values fall back to defaults rather than raising.
+- **The midnight wrap is the trap here**: a naive `start <= t < end` is
+  false for *every* minute of a 22:00→07:00 window. All arithmetic is
+  "minutes since night began, modulo 1440", so wrapping needs no special
+  case. Covered by tests along with fade=0, disabled, `start == end`,
+  malformed times, fade longer than the window, and non-wrapping windows.
+
 **Units are imperial everywhere**, converted at the **render layer**
 (`km_to_mi`, `kmh_to_mph`, `kt_to_mph`, `nm_to_mi`, `c_to_f` in
 `engines.py`) — feed modules still report whatever their upstream API
