@@ -66,7 +66,22 @@ DEFAULT_LEAGUES = ["NFL", "NBA", "MLB", "NHL"]
 SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
 SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/summary?event={event_id}"
 
-SCOREBOARD_REFRESH = 20.0     # 15-30s per the spec; games don't need faster
+# ESPN's site API is undocumented and unofficial: no published rate
+# limit, no terms covering this use, no support channel. `ambient` mode
+# is designed to be left running for hours, which made a flat 20s poll
+# per league roughly 17k requests/day (see CLAUDE.md). These tiers keep
+# the fast poll exactly where scores actually change and stop spending
+# requests to be told nothing happened.
+SCOREBOARD_REFRESH_LIVE = 20.0    # a game is IN PROGRESS -- scores change, stay fast
+SCOREBOARD_REFRESH_IDLE = 300.0   # games today but none live yet / all final
+SCOREBOARD_REFRESH_EMPTY = 1800.0 # no games at all today (off-season)
+# Honest tradeoff of the IDLE tier: a game kicking off is noticed up to 5
+# minutes late, after which the league flips to the LIVE tier and updates
+# every 20s. A scoreboard being 5 minutes late to say "0-0, 1st" is worth
+# roughly a 15x cut in requests against an API that could withdraw
+# access at any time.
+ERROR_BACKOFF_BASE = 30.0         # first retry delay after a failure
+ERROR_BACKOFF_MAX = 600.0         # never hammer a throttled/broken endpoint
 WINPROB_REFRESH = 20.0        # only polled for the pinned team's own live game
 CONFIG_CHECK = 10.0
 IDLE_STOP = 120.0
@@ -222,6 +237,8 @@ class SportsFeed:
         self._games = {}           # league -> [game dicts]
         self._updated = {}         # league -> epoch seconds
         self._last_try = {}        # league -> epoch seconds
+        self._interval = {}        # league -> current poll interval (adaptive)
+        self._fails = {}           # league -> consecutive failure count
         self._win_prob = None      # 0..1 or None
         self._win_prob_updated = 0.0
         self._win_prob_try = 0.0
@@ -274,6 +291,8 @@ class SportsFeed:
             self.leagues = accepted or list(DEFAULT_LEAGUES)
             for lg in self.leagues:
                 self._last_try[lg] = 0.0     # refresh immediately
+                self._interval[lg] = 0.0
+                self._fails[lg] = 0
             favorite = self.favorite
         save_config(self.leagues, favorite)
         return list(self.leagues), rejected
@@ -332,13 +351,27 @@ class SportsFeed:
                 self.leagues, self.favorite = leagues, favorite
                 self._win_prob_try = 0.0
 
+    @staticmethod
+    def _interval_for(games):
+        """How long to wait before polling this league again, from what it
+        just returned. Anything in progress keeps the fast poll; a league
+        with nothing on today is provably not worth asking again soon."""
+        if any(g.get("state") == "in" for g in games):
+            return SCOREBOARD_REFRESH_LIVE
+        if games:
+            return SCOREBOARD_REFRESH_IDLE
+        return SCOREBOARD_REFRESH_EMPTY
+
     def _refresh_scoreboards(self):
         now = time.time()
         with self._lock:
             leagues = list(self.leagues)
         for lg in leagues:
             with self._lock:
-                if now - self._last_try.get(lg, 0.0) < SCOREBOARD_REFRESH:
+                # Default to the fast interval so a league that has never
+                # been fetched is polled immediately on first use.
+                wait = self._interval.get(lg, 0.0)
+                if now - self._last_try.get(lg, 0.0) < wait:
                     continue
                 self._last_try[lg] = now
             try:
@@ -346,9 +379,19 @@ class SportsFeed:
                 with self._lock:
                     self._games[lg] = games
                     self._updated[lg] = time.time()
+                    self._interval[lg] = self._interval_for(games)
+                    self._fails[lg] = 0
                     self._err = None
             except Exception as e:                     # noqa: BLE001 - never die
                 with self._lock:
+                    # Exponential backoff on failure. A throttled or broken
+                    # endpoint must not be retried every 20s forever -- that
+                    # is exactly the behaviour that would earn a block from
+                    # an API with no rate limit published and no way to ask.
+                    self._fails[lg] = self._fails.get(lg, 0) + 1
+                    self._interval[lg] = min(
+                        ERROR_BACKOFF_MAX,
+                        ERROR_BACKOFF_BASE * (2 ** (self._fails[lg] - 1)))
                     self._err = f"{type(e).__name__}"
 
     def _refresh_win_prob(self):
