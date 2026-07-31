@@ -17,6 +17,7 @@ Polished for LED readability: pure black bg, saturated colours, simple silhouett
 import json
 import math
 import random
+import time
 from collections import deque
 from pathlib import Path
 
@@ -5339,6 +5340,142 @@ class WeatherEngine:
         return self._frame_conditions()
 
 
+class ClockEngine:
+    """Clock + at-a-glance dashboard. The panel's resting state.
+
+    This is what the service starts in and what it falls back to, so it is
+    the mode most likely to be on the wall at any given moment. Designed
+    accordingly: readable across a room, calm, and never showing anything
+    it isn't sure about.
+
+    NO clock.py feed module, deliberately. Every other data mode has one
+    because it has network I/O to isolate; this one has none --
+    time.localtime() is a local call, not I/O -- and it composes two feeds
+    that are ALREADY pure-I/O modules (weather.FEED, satellite.FEED).
+    Adding an empty feed module to match the pattern would be cargo-cult,
+    not consistency.
+
+    Degrades a field at a time: no weather -> no temperature line, no ISS
+    prediction -> no countdown line, and the clock itself never depends on
+    either. The time is the one thing on this panel that cannot be stale
+    or wrong, so it must never be blocked by something that can.
+    """
+
+    name = "clock"
+    tick_rate = 0.1          # 10Hz is plenty; only the colon blinks per second
+
+    BG = (0, 0, 0)
+    ACCENT = (120, 200, 255)
+    TIME = (235, 242, 255)
+    DATE = (120, 130, 158)
+    TEMP = (255, 200, 90)
+    ISS = (255, 226, 60)
+    DIM = (70, 76, 92)
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.ticks = 0
+        self.show_seconds = False     # face button toggles a seconds readout
+        self.wx = {}
+        self.sat = {}
+
+    def has_content(self):
+        """Always true -- local time is always available. Present for
+        contract uniformity (AmbientEngine._available calls this
+        unguarded); see the note there about why clock is NOT in the
+        rotation."""
+        return True
+
+    # ---- input -----------------------------------------------------------
+    def input(self, cmd):
+        if cmd in ("rotate", "drop"):
+            self.show_seconds = not self.show_seconds
+
+    def auto(self):
+        pass          # a clock is already its own ambient state
+
+    # ---- simulation --------------------------------------------------------
+    def tick(self):
+        self.ticks += 1
+        # Reads the two shared feeds the same way every other engine does.
+        # Cheap cached reads; also keeps both feeds warm while resting, so
+        # switching to weather or ISS from here shows data immediately
+        # instead of a cold LOADING screen.
+        self.wx = weather.FEED.get()
+        self.sat = satellite.FEED.get()
+
+    # ---- render --------------------------------------------------------
+    @staticmethod
+    def _hhmm(t, blink_on):
+        """12-hour, no leading zero, blinking separator.
+
+        The two classic off-by-one traps live here and are both handled by
+        strftime("%I") rather than by arithmetic on tm_hour: midnight
+        (tm_hour 0) must read 12, and noon (tm_hour 12) must also read 12.
+        Doing `hour % 12` gives 0 for both, which is the bug."""
+        h = time.strftime("%I", t).lstrip("0") or "12"
+        sep = ":" if blink_on else " "
+        return f"{h}{sep}{time.strftime('%M', t)}"
+
+    def frame(self):
+        buf = blank()
+        fill(buf, self.BG)
+        t = time.localtime()
+
+        # Blink on a real half-second boundary from the clock itself, not
+        # a tick counter -- a tick-derived blink drifts against the actual
+        # seconds and looks subtly wrong next to any other clock.
+        blink_on = (t.tm_sec % 2) == 0
+
+        for x in range(WIDTH):
+            put_px(buf, x, 0, self.ACCENT)
+            put_px(buf, x, 1, rim(self.ACCENT, 0.45))
+
+        # --- date ---
+        date = f"{time.strftime('%a', t)} {time.strftime('%b', t)} {t.tm_mday}".upper()
+        draw_text_centered(buf, 6, fit_text(date, WIDTH - 4), self.DATE)
+
+        # --- time (hero) ---
+        hhmm = self._hhmm(t, blink_on)
+        draw_text_centered(buf, 16, hhmm, self.TIME, scale=2)
+        # AM/PM tucked to the right of the hero, small -- it matters but
+        # never competes with the digits for attention.
+        ampm = time.strftime("%p", t).upper()
+        hero_w = text_w(hhmm, 2)
+        ax = (WIDTH - hero_w) // 2 + hero_w + 2
+        if ax + text_w(ampm) <= WIDTH - 1:
+            draw_text3x5(buf, ax, 21, ampm, self.DIM)
+
+        if self.show_seconds:
+            draw_text_centered(buf, 28, time.strftime("%S", t), self.DIM)
+
+        draw_divider(buf, 36)
+
+        # --- temperature (only if the weather feed actually has one) ---
+        y = 41
+        cond = (self.wx or {}).get("conditions")
+        temp_c = cond.get("temp_c") if cond else None
+        if isinstance(temp_c, (int, float)):
+            draw_text_centered(buf, y, f"{c_to_f(temp_c):.0f}F", self.TEMP)
+            y += 9
+        elif self.wx.get("configured"):
+            # Configured but no reading yet: say so rather than leave a
+            # gap that looks like the mode is broken.
+            draw_text_centered(buf, y, "--F", self.DIM)
+            y += 9
+
+        # --- next ISS pass (only if there is a real prediction) ---
+        secs = (self.sat or {}).get("seconds_to_rise")
+        if isinstance(secs, (int, float)) and secs > 0:
+            label = f"ISS {SatelliteEngine._fmt_countdown(secs)}"
+            draw_text_centered(buf, y, fit_text(label, WIDTH - 4), self.ISS)
+
+        return bytes(buf)
+
+
 class BlogEngine:
     """Calm idle mode showing the latest posts from the HENDERBURGH site.
 
@@ -5490,6 +5627,15 @@ class AmbientEngine:
     exactly as it does on its own, and a fix to any of them lands here for
     free. Nothing about their rendering is duplicated.
 
+    CLOCK IS DELIBERATELY NOT IN SEQUENCE. Clock is the panel's *resting*
+    state (what is on when nothing has been chosen); ambient is an active
+    choice to watch live data cycle. Putting clock in the rotation would
+    also break the rotation's own contract: has_content() is always true
+    for a clock, so it could never be skipped and would consume a full
+    dwell slot of every lap, displacing the data you actually selected
+    this mode to see. It IS used as ambient's empty-state fallback, since
+    a clock beats a "no data" screen.
+
     All five sub-engines are ticked every tick, not just the visible one.
     That is deliberate and load-bearing: each engine's tick() is what
     calls its FEED.get(), and a feed whose get() stops being called goes
@@ -5517,6 +5663,9 @@ class AmbientEngine:
     def __init__(self):
         self.score = 0
         self.engines = {n: ENGINES[n]() for n in self.SEQUENCE}
+        # Not part of SEQUENCE -- see the class docstring for why clock is
+        # excluded from the rotation but used as the empty-state fallback.
+        self._fallback = ClockEngine()
         self.reset()
 
     def reset(self):
@@ -5594,17 +5743,13 @@ class AmbientEngine:
     def frame(self):
         avail = self._available()
         if not avail:
-            buf = blank()
-            fill(buf, self.BG)
-            draw_text_centered(buf, 22, "AMBIENT", self.INK)
-            # Kept short enough to actually FIT at 64px: "WAITING FOR DATA"
-            # is 63px against a 60px budget, so fit_text word-truncated it to
-            # a dangling "WAITING FOR". Caught by rendering it and reading
-            # the pixels -- the string length was the bug, not the fitter.
-            draw_text_centered(buf, 34, "NO DATA YET", self.INK_DIM)
-            dots = "." * (1 + (self.ticks // 12) % 3)
-            draw_text_centered(buf, 44, dots, self.INK_DIM)
-            return bytes(buf)
+            # Fall back to the clock rather than a "NO DATA YET" screen.
+            # Clock needs no network and cannot be empty, so the panel
+            # still shows something true instead of admitting defeat --
+            # and this is exactly the situation (everything unreachable)
+            # where a wall display is most likely to be looked at.
+            self._fallback.tick()
+            return self._fallback.frame()
         return self.current.frame()
 
 
@@ -5773,6 +5918,7 @@ class MenuEngine:
         ("sports",   "SPORTS",   (255, 140, 40)),
         ("news",     "NEWS",     (255, 226, 60)),
         ("weather",  "WEATHER",  (90, 190, 255)),
+        ("clock",    "CLOCK",    (120, 200, 255)),
         ("blog",     "BLOG",     (176, 96, 255)),
         ("ambient",  "AMBIENT",  (176, 96, 255)),
     ]
@@ -6027,6 +6173,23 @@ class MenuEngine:
             block(2, 3, 5, 1, c)
             put_px(buf, x0 + 1, y0 + 7, c)
             put_px(buf, x0 + 7, y0 + 7, c)
+        elif gid == "clock":
+            # A clock face: ring plus two hands. The most literal icon in
+            # the set, deliberately -- this is the resting state and should
+            # be instantly recognisable rather than clever.
+            for xx in range(3, 7):
+                put_px(buf, x0 + xx, y0 + 0, c)
+                put_px(buf, x0 + xx, y0 + 9, c)
+            for yy in range(3, 7):
+                put_px(buf, x0 + 0, y0 + yy, c)
+                put_px(buf, x0 + 9, y0 + yy, c)
+            for dx, dy in ((1,1),(2,1),(1,2),(8,1),(7,1),(8,2),(1,8),(1,7),(2,8),(8,8),(8,7),(7,8)):
+                put_px(buf, x0 + dx, y0 + dy, c)
+            put_px(buf, x0 + 4, y0 + 3, w)      # hour hand (up)
+            put_px(buf, x0 + 4, y0 + 4, w)
+            put_px(buf, x0 + 5, y0 + 5, w)      # minute hand (right)
+            put_px(buf, x0 + 6, y0 + 5, w)
+            put_px(buf, x0 + 4, y0 + 5, w)      # centre pin
         elif gid == "blog":
             # A quote/speech bubble with a tail -- "someone wrote something",
             # distinct from the news tile's newspaper-column language.
@@ -7812,6 +7975,7 @@ ENGINES = {
     "sports": SportsEngine,
     "news": NewsEngine,
     "weather": WeatherEngine,
+    "clock": ClockEngine,
     "blog": BlogEngine,
     "ambient": AmbientEngine,
     "menu": MenuEngine,

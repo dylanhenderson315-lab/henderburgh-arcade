@@ -18,6 +18,8 @@ Phone controller (game picker + touch controls, designed for the panel): /remote
 
 Modes: any engine name from engines.ENGINES, plus '<name>-demo' for auto-play,
   plus mirror | video | cast | off.
+  'clock' is the resting/default state -- the panel shows time, date, temp
+         and the next ISS pass rather than sitting dark.
   'off'  releases the panel; WLED/Home Assistant resumes its own lighting.
   'on'   is shorthand the UI sends to resume whatever was last selected.
 
@@ -60,7 +62,16 @@ PANEL_FPS = 16                     # cap on packets actually SENT to the panel
 # sent when the image CHANGES, so a static picture would silently hand the panel
 # back mid-session. Re-send the last frame this often to hold the takeover.
 KEEPALIVE_S = 1.0
-DEFAULT_MODE = "off"               # start released; user Turns On to take over
+# The panel RESTS on the clock rather than sitting dark. A 64x64 display
+# on a wall doing nothing is the one state that earns nothing, and clock
+# needs no network so it works even with every feed down.
+#
+# "off" is deliberately KEPT as an explicit, user-chosen action, not
+# replaced: it releases the panel so WLED/Home Assistant resumes its own
+# lighting (see _release_panel). That handoff is a real capability -- the
+# panel doubles as a house lamp -- and folding it into "resting state"
+# would have removed it.
+DEFAULT_MODE = "clock"             # resting state; "off" still releases to WLED
 RESUME_GAME = "boot"                # "Turn On" always plays the boot curtain, then the menu
 FRAME_BYTES = WIDTH * HEIGHT * 3
 CAST_TIMEOUT = 5.0                 # s without a phone frame -> report cast idle
@@ -74,7 +85,13 @@ class Arcade:
     def __init__(self):
         self.lock = threading.Lock()
         self.panel = get_renderer()
-        self.engine = ENGINES["snake"]()
+        # Engine MUST match self.mode at startup. This was hardcoded to
+        # snake while self.mode came from DEFAULT_MODE, which was harmless
+        # only because DEFAULT_MODE used to be "off" (the loop skips
+        # rendering entirely in that mode, so the mismatch never showed).
+        # The moment the default became a real rendering mode, the panel
+        # drew snake while the API reported "clock".
+        self.engine = ENGINES.get(DEFAULT_MODE, ENGINES["snake"])()
         self.mode = DEFAULT_MODE
         self.last_game = RESUME_GAME
         # Pause freezes game logic only. The render loop keeps running and
@@ -1172,7 +1189,7 @@ def main():
     print(f"    Panel:        {ARCADE.panel.ip}")
     print(f"    Control page: http://localhost:{PORT}")
     print(f"    From phone:   http://<this-mac-LAN-ip>:{PORT}/remote")
-    print(f"    Starts:       {DEFAULT_MODE} (panel released; Turn On to take over)")
+    print(f"    Starts:       {DEFAULT_MODE} (resting state; POST /api/mode/off releases to WLED)")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 
