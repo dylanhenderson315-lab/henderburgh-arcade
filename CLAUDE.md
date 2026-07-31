@@ -398,118 +398,35 @@ Related and already fixed: the render loop used to freeze for seconds
 whenever the panel went away (no DDP socket timeout) — see the self-audit
 section below.
 
-### ⚠ ESPN rate exposure if `ambient` runs 24/7 — READ THIS FIRST
+### ESPN request volume — MITIGATED 2026-07-31 (was the top open risk)
 
-**If `ambient` mode is left running around the clock, sports mode alone
-issues roughly 17,000 requests per day to ESPN's undocumented, unofficial
-API at the current config — and ~30,000/day if all 7 supported leagues
-are enabled. ESPN publishes no rate limit and offers no support channel.**
+`ambient` is designed to run for hours, which made a flat 20s poll per
+league ~17,280 requests/day against an **undocumented, unofficial API
+with no published rate limit, no terms covering this use, and no support
+channel**. Now mitigated in `sports.py`:
 
-The arithmetic, so it can be checked rather than trusted: `ambient` ticks
-every sub-engine on every tick (required — see the ambient entry above),
-so sports polls continuously whenever ambient is up. `SCOREBOARD_REFRESH`
-is 20s and it makes **one call per configured league per refresh**:
+- Poll interval is derived per league from what it last returned:
+  **live game → 20s** (unchanged, this is where it matters), **games
+  today but none live → 300s**, **no games at all → 1800s**.
+- **Exponential backoff on failure** (30s doubling to a 600s cap, reset
+  on success). Retrying a throttled endpoint every 20s forever is exactly
+  what earns a block from an API you cannot ask permission from.
 
-| leagues enabled | calls/day |
-|---|---|
-| 4 (`DEFAULT_LEAGUES`, and what `sports_config.json` holds today) | **~17,280** |
-| 7 (all of `LEAGUE_PATHS` — EPL/NCAAF/NCAAB added) | **~30,240** |
+Measured against real leagues, not estimated: on 2026-07-31 NFL/NBA/NHL
+were off-season (EMPTY tier) while MLB had a live game (LIVE tier) →
+**17,280 → 4,464 req/day, a 3.9x cut with no loss of responsiveness on
+the league actually playing.** Volume still scales with league count, so
+enabling all 7 raises it.
 
-A live pinned game adds one more call per 20s on top. Note the volume
-scales linearly with league count, so enabling the three college/soccer
-leagues nearly doubles it.
+**Accepted tradeoff:** a game kicking off is noticed up to 5 minutes
+late, after which that league flips to the LIVE tier and updates every
+20s.
 
-Nothing has failed yet and no limit is documented, so this is a genuine
-unknown rather than an observed problem — it has never actually been run
-for a full day. **Treat it as untested, not as safe.** Failure would most
-likely appear as sports mode erroring or emptying during long ambient
-sessions (and, because `has_content()` would then return False, silently
-vanishing from the rotation rather than showing an error).
-
-Two cheap mitigations exist and neither is implemented, deliberately —
-behaviour was left alone by request on 2026-07-30:
-  1. Raise `SCOREBOARD_REFRESH` (60s cuts it to ~10k/day with no
-     meaningful loss — scores do not change faster than that).
-  2. Skip leagues already known to have no games today. The `dates=`
-     response for an off-season league is empty, so those calls are
-     provably wasted; on 2026-07-30 only MLB had games (NFL/NBA/NHL all
-     off-season), so 3 of the 4 configured leagues were polled every 20s
-     purely to be told "no games" — that alone is ~75% of current volume.
-
-This is also the single biggest open risk for the production device,
-where it multiplies by unit count — see `PRODUCTION.md`.
-
-**Home Assistant notification pass-through — NOT BUILT, blocked on auth
-(2026-07-30).** Requested (doorbell / package / presence events flashing
-on the panel). Deliberately **not started**, because the premise that
-"the HA client/auth already works" does not hold right now:
-
-- HA is up: `http://192.168.40.203:8123/` returns 200.
-- The `HA_TOKEN` in `~/oura-dashboard/.env` is **rejected with 401** on
-  every endpoint tried (`/api/`, `/api/states`, `/api/config`). It is a
-  183-char JWT, so it's a real token shape — expired or revoked, not
-  malformed. `.env.example` holds only a placeholder; no other token
-  exists on disk.
-- Without `/api/states` there is **no way to see what entities this setup
-  actually exposes**, and the request explicitly said to check that.
-  Writing a module against guessed entity IDs
-  (`binary_sensor.doorbell`, `device_tracker.*`, …) would be inventing
-  the integration — the exact thing this project's rules forbid — and it
-  would fail silently on a setup whose entities are named differently.
-
-**To unblock:** create a fresh long-lived access token in HA (profile →
-Security → Long-lived access tokens) and put it in `~/oura-dashboard/.env`
-as `HA_TOKEN=`. Then `GET /api/states` enumerates real entities and this
-can be built against what's genuinely there. The panel-side half (a
-notification flash/scroll overlay) is straightforward once the event
-source is real; the render-loop takeover added for severe weather is the
-obvious pattern to reuse for it.
-
-**Audio-reactive visualizer — paused, waiting on the user (as of
-2026-07-30).** Plan: WLED-MM's real AudioReactive usermod (the panel has
-a physical Rev 6 mic add-on) broadcasts analyzed audio (volume + 16-band
-FFT) over UDP multicast (239.0.0.1:11988, "V2" packet format, confirmed
-against the real WLED-MM firmware source — see `audio_sync.py`'s
-docstring for the exact byte layout) so the arcade service can build a
-real EQ/VU visualizer without capturing or fabricating any audio itself
-— explicit standing rule from the user: never fake a waveform, same
-"never invent what an effect looks like" principle as `backgrounds.py`.
-
-`audio_sync.py` (the UDP listener, pure I/O, same FEED pattern as every
-other data module) is written and tested — it correctly listens and
-correctly reports zero packets when none arrive, no fabricated fallback.
-Blocked on: the panel's mic needed real config fixes (sync mode → Send,
-mic type → Generic I2S, a genuine physical power-cycle, not just a
-software reboot) which are now all done and confirmed via the panel's own
-`/json/si` status endpoint (`Audio Source: I2S digital - quiet`, `Sound
-Processing: running`). Despite that, **no UDP packets are reaching the
-Mac** even though the panel's own status shows it actively transmitting.
-Ruled out: firewall (both relevant Python binaries are `Permitted`),
-wrong network interface/multicast route (verified correct via
-`route get`), wrong packet format (struct layout verified against real
-firmware source, `struct.calcsize` matches `sizeof()` exactly).
-**Leading suspect: IGMP snooping on the router/AP silently dropping
-multicast traffic** — a well-documented WLED Sound Sync gotcha on
-consumer/mesh routers, and not something checkable from either device;
-needs the user to check the router's admin UI. Do not resume building
-the visualizer engine until real varying packet data is confirmed
-flowing — that was an explicit, repeated instruction this session.
-
-**`stream.py` is orphaned** — nothing in the current codebase imports it
-(confirmed via grep). Needs a decision: wire it in, or delete it. User
-explicitly deferred this to "Thursday or on reset" — not a "do it now"
-item, don't touch without being asked.
-
-**Frontend audit (`arcade.html`, `remote.html`) — also explicitly
-deferred** by the user alongside the `stream.py` decision, same "Thursday
-or on reset" condition.
-
-## Self-audit 2026-07-30 — what was checked, fixed, and what still feels risky
-
-A deliberate logic-level audit (not just rendered output) was run across
-every engine. Five real bugs were found and fixed, each committed
-separately. Recording the *method* as much as the results, because the
-methods are what found things that code review had missed repeatedly.
+**Still true and still unverified:** nothing has been run for a full
+24h, and ESPN's actual tolerance remains unknown. If sports starts
+erroring or emptying during long ambient sessions this is still the first
+place to look — but it now backs off instead of hammering. For the
+production device this multiplies by unit count; see `PRODUCTION.md`.
 
 ### Fixed
 1. **Ticker showed a corrupted, sometimes wrong-but-real symbol.**
