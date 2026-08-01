@@ -5649,8 +5649,43 @@ class SportsEngine(Browsable):
             return "LIVE"
         return "FINAL" if ev["state"] == "post" else ""
 
+    # ---- per-sport render dispatch ---------------------------------------
+    # WHY THIS EXISTS. One generic renderer had to satisfy every sport at
+    # once, so every layout decision was made for the WORST CASE across
+    # seven of them -- and the worst case is what all of them then got.
+    # The tell that it was under-serving: the "one renderer" rule was
+    # already broken twice, for golf (a leaderboard, not a fixture) and
+    # tennis (string scores too wide for the score slot). Those two broke
+    # loudly enough to force an exception; the rest were quietly flattened
+    # into two rows of ABBREV + score.
+    #
+    # So: a sport claims a renderer, or falls back to the generic one.
+    # Adding a sport-specific renderer is purely additive -- anything
+    # unclaimed renders exactly as it does today.
+    #
+    # Contract for a renderer: take (buf, ev), draw the WHOLE frame
+    # including its own header, return None. The caller owns blank/fill
+    # and returns the bytes.
+    def _sport_renderer(self, ev):
+        return self.SPORT_RENDERERS.get(ev.get("sport"))
+
     def _frame_universal(self):
-        """One event from ANY sport, in the shared data-mode chrome.
+        """One event from ANY sport, dispatched to that sport's renderer
+        when it has one, else the generic two-row fallback."""
+        ev = self._current_event()
+        if not ev:
+            return self._frame_empty("SPORTS", "NOTHING ON RIGHT NOW")
+        fn = self._sport_renderer(ev)
+        if fn:
+            buf = blank()
+            fill(buf, self.BG)
+            fn(self, buf, ev)
+            return bytes(buf)
+        return self._frame_universal_generic()
+
+    def _frame_universal_generic(self):
+        """The original shared two-row layout. Still the fallback for any
+        sport without its own renderer -- deliberately unchanged.
 
         Deliberately renders whatever the sport actually provides rather
         than forcing every sport into a two-team score: golf gets its
@@ -5790,6 +5825,11 @@ class SportsEngine(Browsable):
         ev = self.golf_event or {}
         n = sum(1 for x in (ev.get("competitors") or []) if x.get("place") == place)
         return n > 1
+
+    # Populated as each sport gets its own renderer. Empty here means
+    # every sport still takes the generic path, so this step changes
+    # nothing on screen -- it only creates the seam.
+    SPORT_RENDERERS = {}
 
     def _frame_event_detail(self, ev):
         """EXPANDED single event -- the same visual language as GAME DAY
