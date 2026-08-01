@@ -161,11 +161,13 @@ appends them to the menu automatically.
 **Data modes**, in build order:
 - **ticker** (`market.py`/`TickerEngine`) — crypto (CoinGecko) + stocks
   (Yahoo Finance v8 chart), config-driven watchlist.
-- **satellite** (`satellite.py`/`SatelliteEngine`) — ISS live position
-  (wheretheiss.at) + next visible pass prediction (polluxlabs), framed as
-  an "ISS countdown." Owns `location_config.json`, the project's one
-  source of truth for the owner's home coordinates — reused by flights,
-  don't duplicate it.
+- **satellite** (`satellite.py` + `skypass.py` / `SatelliteEngine`) —
+  **UNIFIED 2026-08-02**, see the dedicated section below for the full
+  before/after. Was three views (ISS PASS / ISS LIVE / SKY) sharing an
+  engine but not a design; now two (UPCOMING / OVERHEAD-NOW) over ONE
+  pass list that includes the ISS as an entry. Owns
+  `location_config.json`, the project's one source of truth for the
+  owner's home coordinates — reused by flights, don't duplicate it.
 - **flights** (`flights.py`/`FlightEngine`) — nearby ADS-B traffic
   (adsb.lol) + route/airline enrichment (adsbdb), reuses satellite's
   location config. Heading-oriented plane icon (procedurally rotated from
@@ -333,31 +335,97 @@ so ticking only the visible one would make every mode come up cold, get
 skipped by `has_content()`, and collapse the rotation. It also leaves a
 mode immediately if it goes empty mid-dwell.
 
-**`sky` — visible passes of ANY bright satellite** (`skypass.py`, third
-view of the satellite mode, 2026-08-01). The two ISS views are unchanged;
-this is additive.
+**Satellite modes — UNIFIED 2026-08-02** (`satellite.py` + `skypass.py` /
+`SatelliteEngine`). Was three views built over several sessions (ISS PASS,
+ISS LIVE, SKY — SKY added 2026-08-01 as a third, additive view alongside
+the two ISS ones). **They shared an engine but not a design**, and were
+collapsed into one coherent system. Full reasoning below; this is the
+current, correct picture — anything describing three satellite views or
+an "ISS-only" pass predictor is stale.
 
-- **Computed locally from CelesTrak TLEs**, not fetched from a pass API.
-  N2YO needs a registered key (one key cannot serve a shipped product —
-  PRODUCTION.md), and **polluxlabs is ISS-only**: it accepts
-  `satid`/`norad`/`sat` and *ignores all three*, returning ISS (ZARYA)
-  every time. Verified, don't retry it.
+**Why unify rather than level one up to the other.** SKY's live-pass arc
+(real rise/peak azimuth, real progress along the pass) was already
+better, more honest code than ISS LIVE's decorative orbit ring — the ring
+was never a real ground-track projection. But ISS PASS's chip-style
+urgency treatment ("GO OUTSIDE" filled in colour, reading before any text
+resolves) was better than SKY's plain coloured text. Effort had landed
+unevenly across a 2×2 grid (ISS/SKY × waiting/live), not split cleanly
+between "ISS gets two views" and "everything else gets one" — so leveling
+either system up to the other would have been wrong in half the cases.
+
+**Two states now: UPCOMING and OVERHEAD-NOW.**
+
+- **ONE list, `skypass.FEED`, which already includes the ISS.** It is
+  genuinely one of the ~157 naked-eye objects in CelesTrak's `visual`
+  catalogue, so it needed no special injection — it is simply an entry,
+  sorted the same chronological way as everything else. On a night it
+  isn't visible (the normal case — verified zero visible ISS passes over
+  this location for multiple consecutive days, both before and after the
+  unification), it is just absent, same as any quiet object, rather than
+  a screen padded with stale ISS trivia because the mode had nothing
+  better to show.
+- **ONE arc renderer** (`_draw_pass_arc`) for OVERHEAD-NOW, used by every
+  object including the ISS — SKY's version, kept because it was the more
+  accurate of the two live treatments.
+- **ONE chip treatment** (`_draw_chip`) for UPCOMING, extended from ISS's
+  version to every object. GO OUTSIDE / GOOD PASS / VISIBLE now applies
+  system-wide; SKY's old plain-text quality line is gone.
+- **ONE accent colour** for the whole mode (`ACCENT`, was a gold/blue
+  split with no shared meaning).
+- **The ISS keeps exactly one real distinction**: continuous live
+  telemetry (altitude/speed/sunlit from `satellite.py`'s wheretheiss.at
+  poller) that nothing else in the catalogue has. It appears as a SLOT
+  inside the shared layout only when the current list entry IS the ISS —
+  altitude+sunlit while waiting, speed while overhead — the same pattern
+  as MLB's diamond appearing inside the shared sports renderer, not a
+  second screen. A small accent tint on its own name is the only other
+  visual distinction it gets.
+
+**`satellite.py`'s own ISS-only pass predictor (polluxlabs) is RETIRED.**
+It had already been cross-validated against `skypass.py`'s SGP4
+predictions before the cut — rise times agreed within 3–14s (scan step is
+20s, so resolution-limited) and peak elevation within 0.1–0.4°, *and* both
+independently found zero visible ISS passes over the same three-day
+window. Maintaining two pipelines that already proved they agree was pure
+duplication. `satellite.py` keeps **only** the continuous live-position
+poller (wheretheiss.at) — that data has no equivalent anywhere else, which
+is why it stayed. `ClockEngine`'s "next ISS pass" countdown now reads the
+ISS entry out of `skypass`'s unified list, matched by **NORAD catalog
+number 25544**, not by name string — a CelesTrak display-name formatting
+change cannot silently break the match the way a string comparison could.
+
+**`ambient_weight()` now considers the best pass across the WHOLE list**,
+not the ISS alone — the ISS being invisible for days must not suppress
+real dwell time for a genuinely bright pass from something else.
+
+**`SatelliteEngine` is now a real `Browsable` subclass** (tap-to-step,
+hold-to-accelerate through the pass list) instead of hand-rolled
+left/right — matches the system-wide scroll-control convention, and
+`/api/state`'s `browse` reporting (see keyboard section) picks it up
+automatically with no special-casing needed.
+
 - Catalogue is CelesTrak's **`visual` GROUP** (157 objects) — naked-eye
   observable, curated upstream, so no invented magnitude cutoff.
 - **"Visible" = satellite sunlit AND observer in darkness.** Both are
   computed. Overhead at noon is invisible; in Earth's shadow at midnight
   equally so.
-- **Validated against polluxlabs on both axes**: ISS rise times within
-  3–14s (scan step is 20s, so resolution-limited) and peak elevation
-  within 0.1–0.4°, *and* both independently report zero visible ISS passes
-  over this location for three days. The second check matters — it shows
-  the visibility filter isn't over-reporting.
 - **Requires `sgp4`** — the first non-stdlib dependency outside
-  mirror/video (`requirements.txt` added). The launchd service already runs
+  mirror/video (`requirements.txt`). The launchd service already runs
   `.venv/bin/python`, so this is fine, but it **degrades honestly**:
   `HAVE_SGP4 == False` shows "PREDICTOR UNAVAILABLE" rather than guessing.
   A hand-rolled propagator was rejected — a subtly wrong SGP4 produces
   confidently wrong times.
+- **Layout bug from `render_audit.py`, not review**: the countdown row
+  started 1px after a scale-2 name ended and collided on longer names
+  ("TERRA" overlapped "1H 50M"). Fixed with a y-cursor. Also widened the
+  name-fit budget from `WIDTH-6` to `WIDTH-4` — the tighter one truncated
+  exactly-15-character names like "SPACEMOBILE-001" for no real reason.
+- **Honest gap**: OVERHEAD-NOW was verified structurally (real payload
+  shapes, synthetic timing to force the state) but not yet against a live
+  pass — none fell in the window during the session it was built. The
+  per-object arc and the ISS speed slot both still need one real pass to
+  move from "structurally correct" to "verified", same bar as everywhere
+  else here. Check for a pass window early in the next session.
 
 **Global severe-weather takeover** — an Extreme/Severe NWS alert
 preempts **any** mode (game, video, mirror, anything), not just weather.
