@@ -5513,24 +5513,25 @@ class ClockEngine:
         # seconds and looks subtly wrong next to any other clock.
         blink_on = (t.tm_sec % 2) == 0
 
-        for x in range(WIDTH):
-            put_px(buf, x, 0, self.ACCENT)
-            put_px(buf, x, 1, rim(self.ACCENT, 0.45))
+        # Shared header, like every other mode -- this was hand-rolling its
+        # own accent rule, the one place in the product not using the
+        # common chrome. The title carries the weather station's location,
+        # which also fixes a real gap: the clock showed a temperature with
+        # nothing saying where it was measured.
+        place = (self.wx or {}).get("place") or ""
+        draw_header(buf, place or "HENDERBURGH", self.ACCENT,
+                    right_tag=time.strftime("%p", t).upper())
 
         # --- date ---
         date = f"{time.strftime('%a', t)} {time.strftime('%b', t)} {t.tm_mday}".upper()
-        draw_text_centered(buf, 6, fit_text(date, WIDTH - 4), self.DATE)
+        draw_text_centered(buf, 10, fit_text(date, WIDTH - 4), self.DATE)
 
         # --- time (hero) ---
+        # AM/PM moved into the header's right tag, so the hero is purely
+        # the digits and can be centred on the full panel width instead of
+        # being offset by a suffix.
         hhmm = self._hhmm(t, blink_on)
-        draw_text_centered(buf, 16, hhmm, self.TIME, scale=2)
-        # AM/PM tucked to the right of the hero, small -- it matters but
-        # never competes with the digits for attention.
-        ampm = time.strftime("%p", t).upper()
-        hero_w = text_w(hhmm, 2)
-        ax = (WIDTH - hero_w) // 2 + hero_w + 2
-        if ax + text_w(ampm) <= WIDTH - 1:
-            draw_text3x5(buf, ax, 21, ampm, self.DIM)
+        draw_text_centered(buf, 18, hhmm, self.TIME, scale=2)
 
         if self.show_seconds:
             draw_text_centered(buf, 28, time.strftime("%S", t), self.DIM)
