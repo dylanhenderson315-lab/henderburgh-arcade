@@ -33,6 +33,8 @@ import time
 import urllib.error
 import urllib.request
 
+import paneltext
+
 import satellite
 
 POSITION_URL = "https://api.adsb.lol/v2/point/{lat}/{lon}/{radius_nm}"
@@ -63,7 +65,7 @@ def _ident(ac):
     for key in ("flight", "r", "hex"):
         v = (ac.get(key) or "").strip()
         if v:
-            return v.upper()
+            return paneltext.panel_text(v)
     return "UNKNOWN"
 
 

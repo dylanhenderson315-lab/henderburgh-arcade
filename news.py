@@ -36,6 +36,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+
+import paneltext
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -90,7 +92,10 @@ def _fetch_headlines(feed_url):
     for item in root.findall(".//item")[:MAX_HEADLINES]:
         title = _clean_title(item.findtext("title") or "")
         if title:
-            headlines.append(title.upper())     # font is uppercase-only, see engines.py
+            # paneltext, NOT .upper(): RSS titles carry curly quotes,
+            # en-dashes and accented names, all of which .upper()
+            # leaves intact and the font then silently DROPS.
+            headlines.append(paneltext.panel_text(title))
     return headlines, channel_title
 
 
@@ -130,7 +135,7 @@ class NewsFeed:
             updated, err = self._updated, self._err
         self._ensure_thread()
         age = (now - updated) if updated else None
-        return {"headlines": headlines, "label": label.upper()[:24], "age": age, "err": err}
+        return {"headlines": headlines, "label": paneltext.panel_text(label)[:24], "age": age, "err": err}
 
     def get_config(self):
         with self._lock:

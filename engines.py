@@ -6253,7 +6253,14 @@ class SportsEngine(Browsable):
         draw_header(buf, ev["league_name"] or "SOCCER", accent, right_tag=f"{pos}/{total}")
         self._draw_league_rail(buf, ev)
 
-        y = 12
+        # Laid out with a CURSOR. Fixed offsets put the divider and the
+        # clock straight through the second team's score row -- each team
+        # block is 10px of score PLUS a form line, and the constants below
+        # were written for a block without one. The render audit caught it
+        # ("LOU" overlapping "90'+4'"); it was invisible in a spot check
+        # because the overlapping elements sat in different columns for
+        # the matches I happened to look at.
+        y = 9
         for c in ev["competitors"][:2]:
             bar = c.get("color") or self.INK_DIM
             for by in range(9):
@@ -6266,37 +6273,44 @@ class SportsEngine(Browsable):
             draw_text3x5(buf, 5, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
             if sc_txt:
                 draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
+            y += 11
             # Form beneath the score row -- most recent result rightmost,
             # matching how a real match programme lists it.
             form = c.get("form")
             if form:
-                draw_text3x5(buf, 5, y + 10, form, self.INK_DIM)
-            y += 20
+                draw_text3x5(buf, 5, y, form, self.INK_DIM)
+                y += 6
+            y += 2
 
-        draw_divider(buf, 38)
+        draw_divider(buf, y)
+        y += 3
+
         shootouts = [c.get("shootout") for c in ev["competitors"][:2]]
         if all(s is not None for s in shootouts):
             # Decided on penalties: that IS the headline once it happens,
             # not a footnote under a tied scoreline.
-            draw_text_centered(buf, 41, "PENALTIES", self.LIVE)
+            draw_text_centered(buf, y, "PENALTIES", self.LIVE)
+            y += 7
             pk = "-".join(str(s) for s in shootouts)
-            draw_text_centered(buf, 48, pk, self.HERO_INK, scale=2)
+            if y + 10 <= HEIGHT:
+                draw_text_centered(buf, y, pk, self.HERO_INK, scale=2)
+                y += 11
         else:
             clock = ev.get("clock") or ""
-            live = ev["live"]
-            draw_text_centered(buf, 41, fit_text(clock, WIDTH - 6),
-                               self.LIVE if live else self.INK_DIM)
+            if clock:
+                draw_text_centered(buf, y, fit_text(clock, WIDTH - 6),
+                                   self.LIVE if ev["live"] else self.INK_DIM)
+                y += 7
             detail = ev.get("detail") or ""
-            if detail and detail != clock:
-                draw_text_centered(buf, 49, fit_text(detail, WIDTH - 6), self.INK)
+            if detail and detail != clock and y + 5 <= HEIGHT:
+                draw_text_centered(buf, y, fit_text(detail, WIDTH - 6), self.INK)
+                y += 7
 
-        # Aggregate, when ESPN supplies one -- see docstring on
-        # verification status.
-        agg = ev.get("series")
-        if agg:
-            draw_text_centered(buf, 57, fit_text(agg, WIDTH - 6), self.INK_DIM)
-        elif ev.get("note"):
-            draw_text_centered(buf, 57, fit_text(ev["note"], WIDTH - 6), self.INK_DIM)
+        # Aggregate when ESPN supplies one -- see docstring on verification
+        # status -- else any match note. Only if a row is actually left.
+        extra = ev.get("series") or ev.get("note") or ""
+        if extra and y + 5 <= HEIGHT:
+            draw_text_centered(buf, y, fit_text(extra, WIDTH - 6), self.INK_DIM)
 
     def _draw_movement(self, buf, x, y, move, color_up, color_dn):
         """Small arrow for leaderboard movement: negative = moved UP
@@ -6337,11 +6351,17 @@ class SportsEngine(Browsable):
         for i, c in enumerate(comps[:rows]):
             y = 10 + i * 8
             pos_txt = str(c.get("place") or i + 1)
-            draw_text3x5(buf, 2, y, fit_text(pos_txt, 12), self.INK_DIM)
-            self._draw_movement(buf, 14, y, c.get("movement"), self.WIN, self.LOSE)
-            name_w = WIDTH - 2 - 12 - 5 - 20
-            draw_text3x5(buf, 19, y, fit_person(c.get("abbr"), name_w), self.HERO_INK)
             sc = c.get("score") or "-"
+            # Budget the name from the ACTUAL score width rather than a
+            # guessed constant. The constant reserved 20px for a score
+            # that is usually 11px, and cut "E. HENSELEIT" down to
+            # "HENSEL" -- a damaged name, not an abbreviation. Columns are
+            # tightened too, which buys the surname a few more characters.
+            draw_text3x5(buf, 1, y, fit_text(pos_txt, 10), self.INK_DIM)
+            self._draw_movement(buf, 12, y, c.get("movement"), self.WIN, self.LOSE)
+            name_x = 16
+            name_w = (WIDTH - 2 - text_w(sc)) - name_x - 2
+            draw_text3x5(buf, name_x, y, fit_person(c.get("abbr"), name_w), self.HERO_INK)
             draw_text3x5(buf, WIDTH - 2 - text_w(sc), y,
                          sc, self.WIN if str(sc).startswith("-") else self.INK)
 
@@ -9959,8 +9979,11 @@ class GameDayEngine(Browsable):
             draw_text_centered(buf, 46, f"R{rnd}  {t}", self.INK)
         loser = f.get("loser")
         if loser:
-            draw_text_centered(buf, 54, fit_text(f"DEF {loser}", WIDTH - 8),
-                               self.INK_DIM, x_min=3)
+            # fit_person on the NAME, then prefix -- fitting the whole
+            # "DEF D. RODRIGUEZ" string dropped trailing words and left
+            # "DEF D.", losing the very thing the line exists to say.
+            shown = fit_person(loser, WIDTH - 8 - text_w("DEF "))
+            draw_text_centered(buf, 54, f"DEF {shown}", self.INK_DIM, x_min=3)
         return bytes(buf)
 
     def _frame_upcoming(self, f):

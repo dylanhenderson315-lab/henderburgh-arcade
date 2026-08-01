@@ -1,0 +1,250 @@
+"""
+render_audit.py -- catch silent text damage before it reaches the panel.
+
+    .venv/bin/python render_audit.py            # every mode, real feed data
+    .venv/bin/python render_audit.py sports     # one mode
+    .venv/bin/python render_audit.py --strict   # exit 1 on truncation too
+
+WHY THIS EXISTS. The single most persistent bug class in this project is
+text that is SILENTLY damaged on its way to the panel. It has shipped at
+least nine times, and twice more in one afternoon while building the
+per-sport renderers. It is invisible to a code read, and easy to miss on
+the panel, because the output always looks like *a* plausible string:
+
+    lowercase symbols vanishing        -> a shorter, still-real ticker
+    "United Airlines"                  -> "U A"
+    "AWAY 3 @ HOME 5"                  -> "AWAY 3  HOME 5"  (lost @)
+    "3RD & 7"                          -> "3RD  7"          (lost &)
+    "Rasmus Hojgaard"                  -> "HJGAARD"         (lost stroked O)
+    "7-6(7-5)"                         -> "7-67-5"          (a DIFFERENT score)
+    "T. POSTARNAKOVA"                  -> "T."              (lost the identity)
+    a golf footer at y=60              -> bottom row clipped off-panel
+
+Every one of those was found by instrumenting the renderer and driving it
+with real data. This makes that instrumentation permanent and repeatable
+instead of an ad-hoc script rewritten per session.
+
+FOUR CLASSES OF DAMAGE ARE CHECKED:
+
+  DROPPED   a character the 3x5 font has no glyph for. draw_text3x5 skips
+            it silently -- no error, no substitute.
+  OVERFLOW  a draw whose box leaves the 64x64 panel. Partially-drawn
+            glyphs at the edge, or a row below y=59 clipping.
+  TRUNCATED fit_text/fit_person shortened a string. Not always a bug -- a
+            long headline SHOULD abbreviate -- so it is reported
+            separately and only fails the run under --strict.
+  COLLISION two text draws sharing pixels. Fixed layouts collide the
+            moment content varies (a longer record, a team with a longer
+            name), which is exactly how the MMA name/record and the
+            tennis venue/record overlaps happened.
+
+Marquees legitimately draw partially off-panel at both edges to loop
+seamlessly, so draws flagged by a renderer known to marquee are reported
+but not failed -- see MARQUEE_OK.
+
+NEVER import arcade_server here. Constructing a second Arcade alongside
+the launchd service puts two DDP senders on the panel and locks it hard
+enough to need a physical power cycle (see CLAUDE.md). This imports
+`engines` only, which needs no panel and no render loop.
+"""
+import sys
+import time
+
+import engines
+
+# Modes that scroll a marquee, which draws glyphs deliberately off-edge.
+# `ambient` inherits this: it composes real instances of the other
+# modes and delegates frame(), so a news marquee inside ambient is
+# the same marquee.
+MARQUEE_OK = {"news", "ticker", "sports", "gameday", "ambient"}
+
+# Modes worth auditing: the data modes and event modes, which are the ones
+# rendering externally-sourced text. Games draw their own sprites and have
+# no API strings to damage.
+TEXT_MODES = ["ticker", "satellite", "flights", "sports", "news", "weather",
+              "clock", "blog", "ambient", "gameday"]
+
+
+class Audit:
+    """Wraps the renderer's text primitives and records what they did."""
+
+    def __init__(self):
+        self.draws = []
+        self.dropped = []
+        self.overflow = []
+        self.truncated = []
+        self._orig_text = None
+        self._orig_fit = None
+        self._orig_person = None
+
+    def install(self):
+        self._orig_text = engines.draw_text3x5
+        self._orig_fit = engines.fit_text
+        self._orig_person = engines.fit_person
+
+        def draw_text3x5(buf, x, y, text, color, scale=1):
+            s = str(text)
+            for ch in s:
+                if ch not in engines._FONT3x5:
+                    self.dropped.append((s, ch))
+            w = engines.text_w(s, scale)
+            h = 5 * scale
+            if s.strip():
+                if x < 0 or x + w > engines.WIDTH or y < 0 or y + h > engines.HEIGHT:
+                    self.overflow.append((s, x, y, w, scale))
+                self.draws.append((x, y, w, h, s))
+            return self._orig_text(buf, x, y, text, color, scale)
+
+        def fit_text(s, max_px, scale=1):
+            out = self._orig_fit(s, max_px, scale)
+            if s and out != str(s):
+                self.truncated.append(("fit_text", str(s), out))
+            return out
+
+        def fit_person(name, max_px, scale=1):
+            out = self._orig_person(name, max_px, scale)
+            if name and out != str(name).strip():
+                self.truncated.append(("fit_person", str(name), out))
+            return out
+
+        engines.draw_text3x5 = draw_text3x5
+        engines.fit_text = fit_text
+        engines.fit_person = fit_person
+
+    def remove(self):
+        engines.draw_text3x5 = self._orig_text
+        engines.fit_text = self._orig_fit
+        engines.fit_person = self._orig_person
+
+    def reset_frame(self):
+        self.draws = []
+
+    def collisions(self):
+        """Text draws that share pixels within a single frame.
+
+        Compares axis-aligned boxes: cheap, and the false-positive rate is
+        low because glyph boxes are tight. Two draws that legitimately
+        interleave (none currently do) would need an exception here."""
+        hits = []
+        for i in range(len(self.draws)):
+            xa, ya, wa, ha, sa = self.draws[i]
+            for j in range(i + 1, len(self.draws)):
+                xb, yb, wb, hb, sb = self.draws[j]
+                if (xa < xb + wb and xb < xa + wa
+                        and ya < yb + hb and yb < ya + ha):
+                    hits.append((sa, sb))
+        return hits
+
+
+def drive(mode, audit, ticks=60, settle=0.25):
+    """Tick a mode until its feed is warm, then render every state it can
+    reach: each browse position, and each internal view."""
+    eng = engines.ENGINES[mode]()
+    frames = 0
+    collisions = []
+
+    for _ in range(ticks):
+        eng.tick()
+        if getattr(eng, "universal", None) or getattr(eng, "data", None):
+            pass
+        time.sleep(settle if _ < 12 else 0)
+
+    def snap(label):
+        nonlocal frames
+        audit.reset_frame()
+        try:
+            eng.frame()
+        except Exception as e:                    # noqa: BLE001 - report, don't abort
+            print("    !! %s raised %s: %s" % (label, type(e).__name__, e))
+            return
+        frames += 1
+        for a, b in audit.collisions():
+            collisions.append((label, a, b))
+
+    snap("default")
+
+    # Walk every browsable position on both axes.
+    n = len(getattr(eng, "universal", None) or [])
+    if n:
+        for i in range(min(n, 60)):
+            eng.ucur = i
+            snap("event %d" % i)
+        if getattr(eng, "browse_v", None) is not None:
+            for i in range(len(eng._league_order())):
+                eng._step_v(1)
+                snap("league %d" % i)
+    else:
+        for i in range(8):
+            if hasattr(eng, "_step"):
+                try:
+                    eng._step(1)
+                except Exception:                 # noqa: BLE001
+                    break
+            eng.tick()
+            snap("step %d" % i)
+
+    # Internal view cycles (satellite/weather/sports pinned, etc).
+    for v in range(4):
+        if hasattr(eng, "view"):
+            eng.view = v
+            snap("view %d" % v)
+        if hasattr(eng, "panels") and eng.panels:
+            eng.panel_i = v % len(eng.panels)
+            snap("panel %d" % v)
+
+    return frames, collisions
+
+
+def main(argv):
+    strict = "--strict" in argv
+    wanted = [a for a in argv[1:] if not a.startswith("-")] or TEXT_MODES
+
+    audit = Audit()
+    audit.install()
+    bad = 0
+    try:
+        for mode in wanted:
+            if mode not in engines.ENGINES:
+                print("skip %s (not a mode)" % mode)
+                continue
+            audit.dropped = []
+            audit.overflow = []
+            audit.truncated = []
+            frames, collisions = drive(mode, audit)
+
+            dropped = sorted(set(audit.dropped))
+            overflow = sorted({o for o in audit.overflow})
+            trunc = sorted(set(audit.truncated))
+            marquee = mode in MARQUEE_OK
+
+            status = "ok"
+            if dropped or collisions or (overflow and not marquee):
+                status = "FAIL"
+                bad += 1
+            elif trunc and strict:
+                status = "FAIL"
+                bad += 1
+            elif trunc or overflow:
+                status = "warn"
+
+            print("%-10s %-5s %3d frames" % (mode, status, frames))
+            for s, ch in dropped[:8]:
+                print("    DROPPED   %r missing %r" % (s, ch))
+            if overflow:
+                note = "  (marquee, expected)" if marquee else ""
+                for o in overflow[:6]:
+                    print("    OVERFLOW  %r at x=%s y=%s w=%s scale=%s%s"
+                          % (o[0], o[1], o[2], o[3], o[4], note))
+            for label, a, b in collisions[:6]:
+                print("    COLLISION %s: %r overlaps %r" % (label, a, b))
+            for kind, src, out in trunc[:6]:
+                print("    TRUNCATED %s: %r -> %r" % (kind, src, out))
+    finally:
+        audit.remove()
+
+    print("\n%d mode(s) failed" % bad)
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

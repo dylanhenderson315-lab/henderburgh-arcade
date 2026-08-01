@@ -36,6 +36,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+
+import paneltext
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "blog_config.json"
@@ -61,7 +63,9 @@ def _clean(s):
     text and are the most mixed-case source in the whole project, so this
     is the single most likely place for that bug to recur.
     """
-    return _WS_RE.sub(" ", str(s or "").strip()).upper()
+    # Visitor-submitted text: the least predictable source here, so it
+    # goes through the shared fold rather than a bare .upper().
+    return _WS_RE.sub(" ", paneltext.panel_text(s))
 
 
 def load_config():

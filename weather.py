@@ -49,6 +49,8 @@ import time
 import urllib.error
 import urllib.request
 
+import paneltext
+
 import satellite
 
 # NWS requires a User-Agent identifying the application; they explicitly
@@ -174,8 +176,8 @@ def _fetch_point(lat, lon):
     if not stations_url:
         return None
     rel = (props.get("relativeLocation") or {}).get("properties") or {}
-    city = (rel.get("city") or "").upper()
-    state = (rel.get("state") or "").upper()
+    city = paneltext.panel_text(rel.get("city"))
+    state = paneltext.panel_text(rel.get("state"))
     sd = _get_json(stations_url)
     feats = sd.get("features") or []
     if not feats:
@@ -205,7 +207,7 @@ def _read_observation(station):
         "gust_kmh": _val(p.get("windGust")),
         "wind_dir_deg": _val(p.get("windDirection")),
         "humidity": _val(p.get("relativeHumidity")),
-        "text": (p.get("textDescription") or "").upper(),
+        "text": paneltext.panel_text(p.get("textDescription")),
     }
 
 
@@ -254,15 +256,15 @@ def _fetch_alerts(lat, lon):
     out = []
     for f in d.get("features") or []:
         p = f.get("properties") or {}
-        event = (p.get("event") or "").upper()
+        event = paneltext.panel_text(p.get("event"))
         if not event:
             continue
         out.append({
             "event": event,
             "severity": p.get("severity") or "Unknown",
             "urgency": p.get("urgency") or "Unknown",
-            "headline": (p.get("headline") or "").upper(),
-            "area": (p.get("areaDesc") or "").upper(),
+            "headline": paneltext.panel_text(p.get("headline")),
+            "area": paneltext.panel_text(p.get("areaDesc")),
         })
     out.sort(key=lambda a: SEVERITY_ORDER.index(a["severity"])
              if a["severity"] in SEVERITY_ORDER else len(SEVERITY_ORDER))
