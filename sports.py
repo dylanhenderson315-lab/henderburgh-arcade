@@ -435,6 +435,8 @@ class SportsFeed:
         self._golf_prev = None
         self._golf_move = None
         self._golf_move_at = 0.0
+        self._golf_field = None       # (meta, [competitors]) full-field fallback
+        self._golf_field_try = 0.0
         self._thread = None
         self._err = None
 
@@ -559,6 +561,11 @@ class SportsFeed:
             pinned = self._golf_player
         if pinned:
             _, pc = find_pinned_golfer(events, pinned)
+            if pc is None:
+                # Not in the header's top 25 -- go to the full field. Only
+                # reached when someone IS pinned and was NOT already found,
+                # so it costs nothing in the common case.
+                pc = self._pinned_from_field(events, pinned)
             cur = (pc.get("place"), _par_value(pc.get("score"))) if pc else None
             with self._lock:
                 mv = golfer_move(self._golf_prev, cur)
@@ -597,6 +604,10 @@ class SportsFeed:
         rank = {"in": 0, "pre": 1, "post": 2}
         events.sort(key=lambda e: rank.get(e["state"], 3))
         gev, gc = find_pinned_golfer(events, golf_player)
+        if golf_player and gc is None:
+            gc = self._pinned_from_field(events, golf_player)
+            if gc is not None:
+                gev = self.golf_field_event()
         return {"events": events, "age": age,
                 "leagues": sorted({(e["sport"], e["league"]) for e in events}),
                 "golf_player": golf_player, "golf_event": gev, "golf_pinned": gc,
@@ -619,6 +630,54 @@ class SportsFeed:
                 # Changed under us (edited file / other process): drop the
                 # baseline so the new player cannot flash on arrival.
                 self._golf_player, self._golf_prev, self._golf_move = gp, None, None
+
+    def _pinned_from_field(self, events, pinned):
+        """Pinned golfer from the whole field, or None.
+
+        Only tours that actually have a live leaderboard in the header are
+        queried, so this never fires out of season, and it is rate-limited
+        independently of the header poll."""
+        tours = sorted({e["league"].lower() for e in events
+                        if e.get("leaderboard") and e.get("state") in ("in", "pre")})
+        if not tours:
+            return None
+        now = time.time()
+        with self._lock:
+            if now - self._golf_field_try < GOLF_FIELD_REFRESH and self._golf_field is not None:
+                cached = self._golf_field
+                return self._match_in_field(cached, pinned)
+            self._golf_field_try = now
+        found = None
+        for tour in tours:
+            try:
+                meta, field = _fetch_golf_field(tour)
+            except Exception:                    # noqa: BLE001 - never die
+                continue
+            if not field:
+                continue
+            with self._lock:
+                self._golf_field = (meta, field)
+            hit = self._match_in_field((meta, field), pinned)
+            if hit:
+                found = hit
+                break
+        return found
+
+    @staticmethod
+    def _match_in_field(cached, pinned):
+        if not cached:
+            return None
+        meta, field = cached
+        fake = dict(meta)
+        fake["competitors"] = field
+        _, c = find_pinned_golfer([fake], pinned)
+        return c
+
+    def golf_field_event(self):
+        """Tournament meta for a pinned player found only in the full
+        field -- the header event object does not describe them."""
+        with self._lock:
+            return dict(self._golf_field[0]) if self._golf_field else None
 
     def set_golf_player(self, name):
         cleaned = save_golf_player(name)
@@ -953,3 +1012,96 @@ def golfer_move(prev, cur):
         if p_place == 1:
             return "LOST LEAD"
     return None
+
+
+# ---- full-field golf lookup -------------------------------------------
+# The header endpoint carries only the TOP 25 of a leaderboard. That is
+# fine for showing the leaders, but it silently breaks the pinned player
+# the moment they are 26th or worse -- which is most players most of the
+# time, and exactly when you most want to know where they are.
+#
+# So when a pinned golfer is not in the top 25, fall back to the per-tour
+# scoreboard, which returns the ENTIRE field (147 players at the Rocket
+# Classic, 144 at the AIG Women's Open, both verified live).
+#
+# Cost discipline, same as everywhere else here: this runs ONLY when a
+# golfer is pinned, ONLY when they were not already found in the header,
+# and ONLY for tours that currently have a leaderboard -- never
+# speculatively, and never for the whole field when the header already
+# answered the question.
+GOLF_FIELD_URL = "https://site.api.espn.com/apis/site/v2/sports/golf/{tour}/scoreboard"
+GOLF_FIELD_REFRESH = 60.0
+
+
+def _golf_thru(competitor, period):
+    """Holes completed in the CURRENT round, or None.
+
+    The full-field payload has no `thru` (the header does), but it does
+    carry `linescores` as one entry per round, each with a nested per-hole
+    list -- so counting the holes in the current round recovers it rather
+    than leaving the most useful number blank.
+    """
+    rounds = competitor.get("linescores") or []
+    if not rounds:
+        return None
+
+    def played(r):
+        return sum(1 for h in (r.get("linescores") or []) if h.get("value") is not None)
+
+    # The event's own `period` is None on this endpoint (unlike the
+    # header), and the rounds list always contains ALL FOUR rounds --
+    # including future ones with zero holes. So the current round is the
+    # LAST one with any holes actually played; taking rounds[-1] always
+    # picked an empty round 4 and reported None for everybody.
+    cur = None
+    if period:
+        cur = next((r for r in rounds if r.get("period") == period and played(r)), None)
+    if cur is None:
+        for r in reversed(rounds):
+            if played(r):
+                cur = r
+                break
+    if cur is None:
+        return None
+    n = played(cur)
+    # 18 means that round is complete, which is "F" on a real leaderboard
+    # rather than "thru 18"; the caller renders it as finished.
+    return n or None
+
+
+def _fetch_golf_field(tour):
+    """Whole field for a tour, normalised like a header competitor."""
+    d = _get_json(GOLF_FIELD_URL.format(tour=tour))
+    events = d.get("events") or []
+    if not events:
+        return None, []
+    ev = events[0]
+    comp = (ev.get("competitions") or [{}])[0]
+    period = (ev.get("status") or {}).get("period")
+    out = []
+    for c in comp.get("competitors") or []:
+        ath = c.get("athlete") or {}
+        full = paneltext.panel_text(ath.get("displayName") or ath.get("fullName"))
+        if not full:
+            continue
+        out.append({
+            "id": c.get("id"),
+            "is_team": False,
+            "abbr": paneltext.panel_text(ath.get("shortName") or full),
+            "full": full,
+            "score": paneltext.panel_text(c.get("score")),
+            "place": _num_or_none(c.get("order")),
+            "thru": _golf_thru(c, period),
+            "hole": None, "tee_time": None, "player_state": None,
+            "winner": False, "home_away": None, "color": None,
+            "alt_color": None, "record": None, "seed": None,
+        })
+    meta = {
+        "league": paneltext.panel_text(tour),
+        "league_name": paneltext.panel_text(tour),
+        "name": paneltext.panel_text(ev.get("name")),
+        "detail": paneltext.panel_text(((ev.get("status") or {}).get("type") or {}).get("description")),
+        "leaderboard": True,
+        "state": ((ev.get("status") or {}).get("type") or {}).get("state") or "in",
+    }
+    return meta, out
