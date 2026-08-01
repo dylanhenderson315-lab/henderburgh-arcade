@@ -116,6 +116,14 @@ recorded peek of the real LED buffer via WLED's liveview websocket. The
 in-file software generators are dead code for any real display path,
 kept only as offline experiment helpers.
 
+**ALL external display text goes through `paneltext.panel_text()`** — see
+that module's docstring for the full nine-instance tally of this bug. The
+fold used to live privately inside `mma.py`, which is exactly how
+`sports.py`'s universal feed reintroduced it later (a live PGA leader,
+"Hojgaard", rendered as "HJGAARD"). **A per-module fold is not a fix; it
+is a fix waiting to be missed by the next module.** Unsupported characters
+become a space rather than vanishing, so a loss is visible.
+
 **The 3×5 font (`_FONT3x5`/`draw_text3x5` in `engines.py`) is
 uppercase-only** (52 glyphs: `A-Z`, `0-9`, space and ``!$%&'+,-./:<>?@``)
 and silently drops any character it doesn't have —
@@ -646,6 +654,34 @@ payload, and this is the trap:
 - Tennis carries `linescores`, `tournamentSeed` and completed-match
   `notes[]`; soccer carries `form`; MMA carries `cardSegment`,
   `matchNumber` and a weight class in `competitionType`.
+
+**Golf — pinned player** (2026-08-01). `sports.load_golf_player()` /
+`save_golf_player()` store a name in the same `sports_config.json`;
+`/api/sports/golf_player` and the control panel set it. The pinned view
+leads with **position / score to par / through-hole**, because golf's
+question is "where is MY player", not "what is the score".
+
+- **Notable moves only** — eagle, birdie, bogey, taking or losing the lead
+  — flashed through the shared `Pulse`. Routine holes deliberately do not
+  flash.
+- **Detection lives in the FEED, not the engine.** Only the feed sees
+  consecutive polls (which is what a "move" is defined against), and the
+  engine is recreated on every mode switch, so a baseline kept there would
+  make the pin flash on arrival. Pinning a new player clears the baseline.
+- **Score to par is a STRING and `E` means even par** — `_par_value()`
+  handles it; `int()` on it raises, and treating `E` as missing compares
+  wrongly.
+- **Name matching is forgiving on purpose**: the board shows
+  "R. HOJGAARD", a person types "Rasmus Hojgaard" or "hojgaard". Exact,
+  surname, and substring all match.
+- `save_config()` **preserves keys it does not own**, so setting a
+  favourite team cannot wipe the pinned golfer.
+- **Trap that actually bit:** `tick()` forces `view = 1` whenever the
+  configured leagues have any game, so the golfer view (at `view == 0`)
+  was *unreachable* until a pinned golfer was made to count as real
+  view-0 content. It rendered perfectly in isolation and never appeared
+  on the panel — only an end-to-end pixel match against the real panel
+  caught it.
 
 **Select-to-expand**: `rotate` expands the event under the cursor into a
 full-detail view, `drop` (or `rotate` again) returns to the ticker at the
