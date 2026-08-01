@@ -8893,6 +8893,18 @@ class GameDayEngine(Browsable):
         else:
             self.pulse.note(("card", (card or {}).get("done")))
 
+        # Declare fight-statistics interest for whatever fight is ON
+        # SCREEN, and only while it's live or just finished -- a fight
+        # that hasn't started yet has nothing but honest zeros ESPN
+        # itself hasn't started counting, so there's no call worth making
+        # for it. See mma.UfcFeed.want_stats().
+        disp = self._displayed_index()
+        df = next((x for x in fights if x["index"] == disp), None)
+        if df and df["state"] in ("in", "post") and card:
+            aids = [fr.get("id") for fr in df.get("fighters") or []]
+            mma.FEED.want_stats(df["id"], card["id"], df["id"], aids,
+                                live=(df["state"] == "in"))
+
         # Event over -> start the exit clock.
         if card and card.get("completed"):
             self.done_t += 1
@@ -8902,11 +8914,16 @@ class GameDayEngine(Browsable):
 
         # Rotate the non-result views on the normal cadence, unless the
         # viewer is browsing (universal scroll control pauses auto-advance).
+        # Order is deliberate: UPCOMING first (who's fighting, the thing
+        # you'd want on arrival), then STATS (how it's going, once there's
+        # something to say), then CARD (where the night stands overall,
+        # the "zoom out" view) -- a natural drill-down/pull-back rhythm
+        # rather than an arbitrary index order.
         if self.result_t <= 0 and self.browse.auto_ok and self.sel is None:
             self.hold += 1
             if self.hold >= self.VIEW_TICKS:
                 self.hold = 0
-                self.view = (self.view + 1) % 2
+                self.view = (self.view + 1) % 3
 
     def _maybe_exit(self):
         """Hand the panel back once the event is over.
@@ -9053,6 +9070,71 @@ class GameDayEngine(Browsable):
         wt = f.get("weight")
         if wt:
             draw_text_centered(buf, 54, fit_text(wt, WIDTH - 8), self.INK_DIM, x_min=3)
+        return bytes(buf)
+
+    def _frame_stats(self, f):
+        """Fight statistics, laid out the way the real UFC broadcast
+        graphic shows them: two named columns, one stat per row down the
+        middle -- sig. strikes landed, takedowns landed, control time.
+
+        Source is mma.FEED.want_stats()/get_stats(): a genuinely more
+        expensive call than the rest of the card (two per-fighter
+        requests, no batched form), which is why tick() only ever
+        requests it for the fight actually on screen, and only once it's
+        live or finished -- see the comment there.
+
+        A fight with nothing fetched yet (just switched to it, or the
+        background poll hasn't landed) shows the matchup instead of a row
+        of zeros that would look exactly like a real 0-0 fight -- the
+        same "never invent a number" rule as every other feed here.
+        """
+        buf = blank(); fill(buf, self.BG)
+        self._occasion_frame(buf, 0.5 if f.get("state") == "in" else 0.3)
+        self._kicker(buf, "FIGHT STATS", self.GOLD)
+
+        fighters = f.get("fighters") or []
+        stats = mma.FEED.get_stats(f.get("id")) if f.get("id") else {}
+        left = stats.get(fighters[0]["id"]) if fighters else None
+        right = stats.get(fighters[1]["id"]) if len(fighters) > 1 else None
+        if not fighters or (left is None and right is None):
+            return self._frame_upcoming(f)
+
+        # Last name only -- both corners plus the row labels have to
+        # share 64px, and the font can always fit a single surname.
+        def surname(full):
+            parts = str(full or "").split()
+            return parts[-1] if parts else ""
+        lname = fit_text(surname(fighters[0]["name"]), 28)
+        rname = fit_text(surname(fighters[1]["name"]) if len(fighters) > 1 else "", 28)
+        # y=13, NOT y=8: the kicker occupies rows 6-10, and names at y=8
+        # collided with it -- visible only by rendering the frame and
+        # looking at the pixels, which is why that check is mandatory here.
+        draw_text3x5(buf, 3, 13, lname, self.HERO)
+        draw_text3x5(buf, WIDTH - 3 - text_w(rname), 13, rname, self.HERO)
+
+        def row(y, label, lv, rv):
+            draw_text_centered(buf, y, fit_text(label, 30), self.INK_DIM)
+            lt = "-" if lv is None else str(int(lv))
+            rt = "-" if rv is None else str(int(rv))
+            draw_text3x5(buf, 3, y + 7, lt, self.HERO)
+            draw_text3x5(buf, WIDTH - 3 - text_w(rt), y + 7, rt, self.HERO)
+
+        def val(d, k):
+            return (d or {}).get(k)
+
+        # Three 14px groups (label + values 7px below) stacked from y=20,
+        # so the last value row ends at y=59 clear of the y=62 border.
+        row(20, "SIG STR", val(left, "sig_landed"), val(right, "sig_landed"))
+        row(34, "TAKEDOWNS", val(left, "td_landed"), val(right, "td_landed"))
+
+        # Control time is already a formatted "M:SS" string (see
+        # mma._parse_stats), not a number, so it gets its own row rather
+        # than going through row()'s int() formatting.
+        ctl = val(left, "control_time") or "-"
+        ctr = val(right, "control_time") or "-"
+        draw_text_centered(buf, 48, "CONTROL", self.INK_DIM)
+        draw_text3x5(buf, 3, 55, ctl, self.HERO)
+        draw_text3x5(buf, WIDTH - 3 - text_w(ctr), 55, ctr, self.HERO)
         return bytes(buf)
 
     def _frame_card(self):
@@ -9238,6 +9320,15 @@ class GameDayEngine(Browsable):
         # back through results and forward into what is still to happen.
         if f["state"] == "post" and (self.sel is not None or self.view == 1):
             return self._frame_result(f)
+        # STATS is part of the auto-rotation only (view == 2, not while
+        # browsing): a manually browsed fight keeps the existing
+        # post->result / pre->upcoming contract, since stats for a fight
+        # several positions away from the live one is rarely what a
+        # browsing viewer is after, and tick() only actually fetches
+        # stats for the fight on screen -- browsing straight to view 2
+        # would just show "no data yet" for most of the card.
+        if self.sel is None and self.view == 2 and f["state"] in ("in", "post"):
+            return self._frame_stats(f)
         if self.sel is not None or self.view == 0:
             return self._frame_upcoming(f)
         return self._frame_card()
