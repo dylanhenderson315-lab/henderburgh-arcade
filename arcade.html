@@ -440,6 +440,11 @@ const $ = id => document.getElementById(id);
 const cv = $('c'), ctx = cv.getContext('2d');
 const img = ctx.createImageData(64, 64);
 let curMode = null, cfgTouched = 0;
+// Declared HERE, not next to the legend code that reads it: poll()
+// touches it and runs earlier in the file. `let` has no hoisting, so
+// a declaration further down only worked because setInterval defers
+// the first call -- true by luck rather than by design.
+let browseAxes = {horizontal:false, vertical:false};
 
 /* ---------- live preview ---------- */
 function draw(b64){
@@ -481,7 +486,16 @@ async function poll(){
         + 'Privacy & Security → Screen Recording → enable your terminal, then restart the server.';
     } else e.classList.add('hide');
     $('cast-live').classList.toggle('hide', !j.cast_active);
+    // Re-render the legend when the mode changes OR when the engine's
+    // reported browse axes change -- the axes are what the legend
+    // actually describes, and they can differ between two modes that
+    // share a name prefix.
+    const ax = j.browse || {horizontal:false, vertical:false};
+    const axChanged = ax.horizontal !== browseAxes.horizontal
+                   || ax.vertical !== browseAxes.vertical;
+    browseAxes = ax;
     if (j.mode !== curMode){ curMode = j.mode; syncUI(); }
+    else if (axChanged) renderLegend();
     if (Date.now() - cfgTouched > 2500){ applyMirrorCfg(j.mirror_cfg); applyVideoCfg(j.video_cfg); }
     if (j.video_file !== curVideoFile){ curVideoFile = j.video_file; highlightVideo(); }
   }catch(_){}
@@ -843,7 +857,15 @@ function renderLegend(){
   const base = (curMode || '').split('-')[0];
   const rows = [];
   if (BROWSABLE.has(base)){
-    rows.push(['← →', 'browse — tap steps, <b>hold accelerates</b>']);
+    rows.push(['← →', browseAxes.vertical
+                        ? 'games in this league — tap steps, <b>hold accelerates</b>'
+                        : 'browse — tap steps, <b>hold accelerates</b>']);
+    // Reported by the server from the live engine (state.browse), not a
+    // list kept here in parallel -- which is exactly how this legend went
+    // stale when sports gained its second axis and kept advertising
+    // left/right only.
+    if (browseAxes.vertical)
+      rows.push(['↑ ↓', 'change league — tap steps, <b>hold accelerates</b>']);
     rows.push(['Enter', 'pause / resume auto-advance']);
   } else if (STEPPABLE.has(base)){
     rows.push(['← →', 'next / previous view']);

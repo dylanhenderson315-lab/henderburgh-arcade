@@ -563,6 +563,16 @@ class Arcade:
                 "on": live,
                 "score": self.engine.score if self.engine else 0,
                 "cart_input": getattr(self.engine, "control_scheme", None),
+                # What the CURRENT engine can actually be driven with,
+                # read off the live instance rather than a list the UI
+                # keeps in parallel. A hardcoded list drifted the moment
+                # sports gained a second browse axis: the control panel
+                # kept advertising left/right only, so up/down (leagues)
+                # was undiscoverable. Derived here, it cannot drift again.
+                "browse": {
+                    "horizontal": getattr(self.engine, "browse", None) is not None,
+                    "vertical": getattr(self.engine, "browse_v", None) is not None,
+                },
                 "paused": self.paused,
                 "err": err,
                 "cast_active": bool(cast_age is not None and cast_age < CAST_TIMEOUT),
