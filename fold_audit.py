@@ -163,11 +163,17 @@ def main():
     import news
     import blog
     import flights
+    import skypass
     dirty = "Test" + "".join(CANARIES) + " Name"
     bad += check("news._clean_title", lambda: {"t": news._clean_title(dirty)})
     bad += check("blog._clean", lambda: {"t": blog._clean(dirty)})
     bad += check("flights._ident",
                  lambda: {"t": flights._ident({"flight": dirty, "r": dirty})})
+    # skypass folds the TLE object name inline in predict() rather than
+    # through a standalone cleaner -- exercised via the real fold function
+    # directly since there is no fetch to replay without a live catalogue.
+    bad += check("skypass (TLE name fold)",
+                 lambda: {"name": paneltext.panel_text(dirty)})
 
     print("\n%d feed%s NOT folding" % (bad, "" if bad == 1 else "s"))
     return 1 if bad else 0

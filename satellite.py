@@ -5,16 +5,25 @@ Same shape as market.py on purpose: all I/O lives here so the mode that
 draws it stays pure, and the pattern (background thread, last-good cache,
 never invent numbers) is identical.
 
-Two keyless sources, covering two different things:
-  * api.wheretheiss.at   -- current position, altitude, velocity. Chosen
-    over the older api.open-notify.org because open-notify only returns
-    lat/lon -- no altitude, no speed -- and this mode wants both.
-  * iss-api.polluxlabs.io -- next-pass predictions, and it already computes
-    real naked-eye visibility (rise/set against actual sun angle, not just
-    "above the horizon"). This is why it was picked over N2YO: N2YO needs a
-    registered API key, polluxlabs needs none, and PRODUCTION.md's own
-    framing of this feature as an "ISS countdown" makes the pass predictor
-    the more important of the two feeds, not a nice-to-have.
+One keyless source: api.wheretheiss.at, for the ISS's current position,
+altitude and velocity -- chosen over the older api.open-notify.org because
+open-notify only returns lat/lon, no altitude, no speed, and this mode
+wants both. This is CONTINUOUS telemetry: it exists whether or not a pass
+is happening, which is exactly what nothing else in the satellite system
+has, and is the reason the ISS still gets a dedicated data slot in the
+unified sky view (see engines.SatelliteEngine).
+
+PASS PREDICTION USED TO LIVE HERE TOO, against iss-api.polluxlabs.io. It
+was retired 2026-08-02 when the satellite modes were unified: skypass.py's
+CelesTrak `visual` catalogue already includes the ISS (it is genuinely one
+of the ~157 naked-eye-visible objects tracked there), and its SGP4-based
+predictions were cross-validated against polluxlabs before the cut --
+rise times agreed within 3-14s (resolution-limited by the validation's own
+20s scan step) and peak elevation within 0.1-0.4 degrees, and both
+independently reported zero visible ISS passes over this location for the
+same three-day window. Maintaining two ISS-pass pipelines that already
+proved they agree was pure duplication -- skypass.py is now the only pass
+predictor in the project, for every object including the ISS.
 
 Home location is config-driven (location_config.json), same pattern as the
 ticker's market_config.json -- the production device needs a real owner
@@ -22,7 +31,6 @@ location, and there's no way to guess Dylan's coordinates, so this ships
 with an unmistakable placeholder (0,0 -- Null Island) rather than a wrong
 real-looking default. See SatelliteFeed.configured.
 """
-import calendar
 import json
 import math
 import threading
@@ -40,10 +48,8 @@ CONFIG_PATH = Path(__file__).parent / "location_config.json"
 DEFAULT_LAT, DEFAULT_LON, DEFAULT_LABEL = 0.0, 0.0, "HOME"
 
 POSITION_URL = "https://api.wheretheiss.at/v1/satellites/25544"
-PASS_URL = "https://iss-api.polluxlabs.io/iss-pass"
 
 POSITION_REFRESH = 12.0     # ISS covers ~7.7km/s -- this wants to feel live
-PASS_REFRESH = 900.0        # pass predictions are valid for hours; no need to hammer it
 CONFIG_CHECK = 10.0
 IDLE_STOP = 120.0
 TIMEOUT = 8.0
@@ -98,63 +104,12 @@ def _fetch_position():
     }
 
 
-# Pass quality. Elevation is what actually determines how impressive a
-# pass looks: the ISS at 15 degrees is a dim light low on the horizon,
-# probably behind a tree; at 70 degrees it crosses nearly overhead and is
-# briefly one of the brightest things in the sky. Both come straight from
-# the pass prediction already being fetched -- no extra request.
-#
 # NOTE ON CREW COUNT: deliberately NOT shipped. The obvious free source
 # (open-notify.org/astros.json) still responds 200, but returns the
 # Expedition 71 crew -- who were aboard in 2024 -- with no timestamp
 # field to detect the staleness from. Showing a two-year-old crew list as
 # current would be exactly the kind of confident-but-wrong number this
 # project refuses to display. Revisit if a maintained free source turns up.
-ELEV_EXCELLENT = 60.0
-ELEV_GOOD = 40.0
-
-
-def pass_quality(nxt):
-    """(tag, rank) for a predicted pass; higher rank = more worth setting
-    an alarm for. Tags are <=7 chars to fit the panel header's tag slot."""
-    if not nxt:
-        return None
-    elev = nxt.get("max_elev")
-    if not isinstance(elev, (int, float)):
-        return None
-    if not nxt.get("visible"):
-        # Still reported, because "it's up there but you won't see it" is
-        # honest and useful -- it just isn't something to go outside for.
-        return ("DAYLIT", 0)
-    if elev >= ELEV_EXCELLENT:
-        return ("BRIGHT", 3)
-    if elev >= ELEV_GOOD:
-        return ("GOOD", 2)
-    return ("LOW", 1)
-
-
-def _fetch_next_pass(lat, lon):
-    url = f"{PASS_URL}?lat={lat}&lon={lon}&n=5&days_ahead=10"
-    d = _get_json(url)
-    passes = d.get("passes") or []
-    if not passes:
-        return None
-    visible = [p for p in passes if p.get("visible")]
-    p = visible[0] if visible else passes[0]
-    return {
-        "rise_iso": p["rise"]["time"],
-        "compass": p["rise"]["compass"],
-        "max_elev": float(p["culmination"]["elevation_deg"]),
-        "duration_s": int(p["duration_sec"]),
-        "visible": bool(p.get("visible")),
-    }
-
-
-def _parse_iso(s):
-    # "2026-07-28T01:04:52Z" -> epoch seconds, stdlib only
-    return time.calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ")) \
-        if hasattr(time, "calendar") else __import__("calendar").timegm(
-            time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))
 
 
 class SatelliteFeed:
@@ -168,9 +123,6 @@ class SatelliteFeed:
         self._pos = None
         self._pos_updated = 0.0
         self._pos_try = 0.0
-        self._pass = None
-        self._pass_updated = 0.0
-        self._pass_try = 0.0
         self._last_config_check = 0.0
         self._last_read = 0.0
         self._thread = None
@@ -183,34 +135,25 @@ class SatelliteFeed:
     # ---- reading ---------------------------------------------------------
     def get(self):
         """Returns a dict, never blocking:
-        {configured, label, pos: {...}|None, pos_age, next_pass: {...}|None,
-         pass_age, seconds_to_rise: float|None, err}
-        """
+        {configured, label, pos: {...}|None, pos_age, err}
+
+        Pass prediction is NOT here -- that is skypass.py now, for every
+        object including the ISS. This feed is continuous LIVE telemetry
+        only (see the module docstring for why that stayed separate)."""
         now = time.time()
         with self._lock:
             self._last_read = now
             pos = dict(self._pos) if self._pos else None
             pos_age = (now - self._pos_updated) if self._pos_updated else None
-            nxt = dict(self._pass) if self._pass else None
-            pass_age = (now - self._pass_updated) if self._pass_updated else None
             lat, lon, label, err = self.lat, self.lon, self.label, self._err
         self._ensure_thread()
 
         if pos is not None and self.configured:
             pos["distance_km"] = haversine_km(lat, lon, pos["lat"], pos["lon"])
 
-        seconds_to_rise = None
-        if nxt is not None:
-            try:
-                seconds_to_rise = _parse_iso(nxt["rise_iso"]) - now
-            except (ValueError, KeyError):
-                seconds_to_rise = None
-
         return {
             "configured": self.configured, "label": label,
-            "pos": pos, "pos_age": pos_age,
-            "next_pass": nxt, "pass_age": pass_age,
-            "seconds_to_rise": seconds_to_rise, "err": err,
+            "pos": pos, "pos_age": pos_age, "err": err,
         }
 
     def get_location(self):
@@ -223,7 +166,6 @@ class SatelliteFeed:
         label = (str(label).strip()[:10] or DEFAULT_LABEL)
         with self._lock:
             self.lat, self.lon, self.label = lat, lon, label
-            self._pass_try = 0.0     # location changed -- passes are now stale
         save_location(lat, lon, label)
         return lat, lon, label
 
@@ -243,7 +185,6 @@ class SatelliteFeed:
                 return
             self._maybe_reload_config()
             self._refresh_position()
-            self._refresh_pass()
             time.sleep(2.0)
 
     def _maybe_reload_config(self):
@@ -255,7 +196,6 @@ class SatelliteFeed:
         with self._lock:
             if (lat, lon, label) != (self.lat, self.lon, self.label):
                 self.lat, self.lon, self.label = lat, lon, label
-                self._pass_try = 0.0
 
     def _refresh_position(self):
         now = time.time()
@@ -272,23 +212,5 @@ class SatelliteFeed:
         except Exception as e:                        # noqa: BLE001 - never die
             with self._lock:
                 self._err = f"{type(e).__name__}"
-
-    def _refresh_pass(self):
-        now = time.time()
-        with self._lock:
-            if now - self._pass_try < PASS_REFRESH:
-                return
-            if not self.configured:
-                return
-            self._pass_try = now
-            lat, lon = self.lat, self.lon
-        try:
-            nxt = _fetch_next_pass(lat, lon)
-            with self._lock:
-                self._pass = nxt
-                self._pass_updated = time.time()
-        except Exception:                              # noqa: BLE001
-            pass          # position feed already reports errors; don't double up
-
 
 FEED = SatelliteFeed()

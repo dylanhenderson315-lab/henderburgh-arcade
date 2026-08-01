@@ -1,10 +1,14 @@
 """
 skypass.py -- visible passes of ANY bright satellite, not just the ISS.
 
-Extends what satellite.py does for the station to the whole naked-eye
-catalogue. satellite.py is deliberately left ALONE and keeps owning the
-ISS (live position + its own pass source); this module is additive, so the
-existing ISS behaviour cannot regress.
+This is the ONLY pass predictor in the project as of 2026-08-02 -- it
+covers the ISS too. satellite.py used to run a second, ISS-only pass
+predictor against polluxlabs; that was retired once this module's SGP4
+predictions were cross-validated against it (see below) and found to
+agree, because maintaining two pipelines that already proved they agree
+was pure duplication. satellite.py still owns the ISS's CONTINUOUS live
+position (altitude/speed/sunlit) -- that is telemetry, not a pass
+prediction, and nothing else in this catalogue has an equivalent source.
 
 WHY THIS COMPUTES PASSES LOCALLY INSTEAD OF CALLING AN API
 ----------------------------------------------------------
@@ -89,6 +93,13 @@ ELEV_GOOD = 40.0
 
 EARTH_R = 6378.137           # km, WGS-84 equatorial
 FLATTENING = 1 / 298.257223563
+
+# Same NORAD catalog number satellite.py's POSITION_URL already hardcodes
+# for the ISS (25544 / ZARYA). Used to pick the ISS entry OUT of this
+# module's own unified pass list -- by catalog number, not by matching the
+# display NAME, which is one CelesTrak formatting change away from
+# silently breaking a string match.
+ISS_NORAD_ID = 25544
 
 
 # ---- astronomy ---------------------------------------------------------
@@ -228,6 +239,7 @@ def predict(tles, lat, lon, elev=0.0, hours=SEARCH_HOURS, now=None,
             sat = Satrec.twoline2rv(l1, l2)
         except (ValueError, TypeError):
             continue
+        norad_id = sat.satnum
         t = start
         in_pass = False
         peak_el = 0.0
@@ -255,6 +267,8 @@ def predict(tles, lat, lon, elev=0.0, hours=SEARCH_HOURS, now=None,
                 if vis_any and rise_t is not None:
                     results.append({
                         "name": paneltext.panel_text(name),
+                        "norad_id": norad_id,
+                        "is_iss": norad_id == ISS_NORAD_ID,
                         "rise": rise_t, "set": t,
                         "rise_az": rise_az, "peak_az": peak_az,
                         "peak_el": round(peak_el, 1),
@@ -275,13 +289,26 @@ def _jd_of(when):
 
 
 def quality(p):
-    """Same tiering satellite.py uses for the ISS, so the two agree."""
+    """Tag only, kept for anywhere just the word is wanted."""
+    return quality_rank(p)[0]
+
+
+def quality_rank(p):
+    """(tag, rank) -- higher rank = more worth going outside for. Every
+    pass in this module's list already passed the sunlit/dark-observer
+    test (see predict()), so there is no DAYLIT tier here the way the old
+    per-ISS pass_quality() needed one; everything in this list is, by
+    construction, something you could actually see.
+
+    Rank drives the shared urgency chip used by every object in the
+    unified UPCOMING view (see engines.SatelliteEngine._draw_chip):
+    3 = GO OUTSIDE, 2 = GOOD PASS, 1 = VISIBLE."""
     el = (p or {}).get("peak_el") or 0
     if el >= ELEV_EXCELLENT:
-        return "BRIGHT"
+        return ("BRIGHT", 3)
     if el >= ELEV_GOOD:
-        return "GOOD"
-    return "LOW"
+        return ("GOOD", 2)
+    return ("LOW", 1)
 
 
 class SkyPassFeed:
