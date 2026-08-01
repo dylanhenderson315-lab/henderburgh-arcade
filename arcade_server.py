@@ -37,6 +37,8 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
 import engines
+import gameday
+import mma
 from engines import ENGINES, WIDTH, HEIGHT, TicCartEngine, CARTS_DIR
 from display import get_renderer
 import backgrounds
@@ -79,6 +81,9 @@ TRANSITION_FRAMES = 10
 # panel doubles as a house lamp -- and folding it into "resting state"
 # would have removed it.
 DEFAULT_MODE = "clock"             # resting state; "off" still releases to WLED
+# GAME DAY hands the panel back here when its event ends; assigning it
+# rather than duplicating the string means the two cannot drift.
+engines.RESTING_MODE = DEFAULT_MODE
 RESUME_GAME = "boot"                # "Turn On" always plays the boot curtain, then the menu
 FRAME_BYTES = WIDTH * HEIGHT * 3
 CAST_TIMEOUT = 5.0                 # s without a phone frame -> report cast idle
@@ -969,6 +974,23 @@ class Handler(BaseHTTPRequestHandler):
             leagues, favorite = sports.FEED.get_config()
             self._json({"leagues": leagues, "favorite": favorite,
                         "known_leagues": sorted(sports.LEAGUE_PATHS)})
+        elif path == "/api/gameday/config":
+            cfg = gameday.load_config()
+            cfg["targets"] = list(gameday.TARGETS)
+            # Enough to show what tonight actually is, without the caller
+            # having to know which feed backs which target.
+            if cfg["target"] == "ufc":
+                d = mma.FEED.get()
+                card = d.get("card") or {}
+                cfg["event"] = {"name": card.get("name"), "total": card.get("total"),
+                                "done": card.get("done"), "live": card.get("live"),
+                                "completed": card.get("completed"),
+                                "next": d.get("next_label"), "err": d.get("err")}
+            else:
+                g = (sports.FEED.get() or {}).get("favorite_game")
+                cfg["event"] = {"game": g["short_name"] if g else None,
+                                "state": g["state"] if g else None}
+            self._json(cfg)
         elif path == "/api/weather/current":
             # Read-only: weather has no config of its own -- it reuses the
             # ISS/flights home location via /api/satellite/location.
@@ -1119,6 +1141,16 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         self._json({"ok": True, "favorite": favorite})
             except (ValueError, KeyError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/gameday/config":
+            try:
+                j = json.loads(body or b"{}")
+                if "target" in j and str(j["target"]).lower() not in gameday.TARGETS:
+                    self._json({"ok": False,
+                                "error": "target must be one of " + ", ".join(gameday.TARGETS)}, 400)
+                else:
+                    self._json({"ok": True, "config": gameday.save_config(j)})
+            except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/brightness":
             try:

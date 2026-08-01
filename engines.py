@@ -28,6 +28,8 @@ import sports
 import news
 import weather
 import blog
+import mma
+import gameday
 import tic80_core
 import transitions
 
@@ -205,6 +207,12 @@ _FONT3x5 = {
     "-": ("000", "000", "111", "000", "000"),
     "/": ("001", "001", "010", "100", "100"),
     "%": ("101", "001", "010", "100", "101"),
+    # Ampersand: ESPN's NFL down-and-distance text is literally "3RD & 7",
+    # and a missing glyph is SILENTLY DROPPED by draw_text3x5, so without
+    # this the sports mode renders "3RD  7" -- the seventh time this font's
+    # silent-drop behaviour has produced a real visible bug here. Adding
+    # the glyph is the right fix: the data is correct, the font was short.
+    "&": ("110", "110", "011", "101", "011"),
     "$": ("011", "110", "010", "011", "110"),
     "!": ("010", "010", "010", "000", "010"),
     "?": ("110", "001", "010", "000", "010"),
@@ -457,6 +465,61 @@ class Browsable:
     def _scroll_tick(self):
         for _ in range(self.browse.tick()):
             self._step(self.browse.dir)
+
+
+BASE_ON = (255, 226, 60)
+BASE_OFF = (46, 50, 62)
+OUT_ON = (255, 90, 80)
+OUT_OFF = (46, 50, 62)
+
+# Regulation periods per league. Real structural fact about each sport,
+# not data ESPN provides -- the scoreboard payload carries the CURRENT
+# period but never how many there are. Used to judge how late a game is.
+REGULATION_PERIODS = {"NFL": 4, "NBA": 4, "MLB": 9, "NHL": 3,
+                      "EPL": 2, "NCAAF": 4, "NCAAB": 2}
+
+
+def draw_diamond(buf, x, y, bases, on_col=BASE_ON, off_col=BASE_OFF):
+    """Baseball diamond with occupied bases filled -- the single most
+    information-dense glyph available here. Four pixels say what "runner
+    on first and third" needs a whole sentence to say, and it reads
+    instantly to anyone who has watched a game.
+
+    Base order from ESPN is [onFirst, onSecond, onThird]; drawn in the
+    real diamond orientation (1st right, 2nd top, 3rd left) rather than
+    left-to-right, because a diamond drawn wrong is worse than none."""
+    on = bases or [False, False, False]
+    pts = ((x + 3, y + 3), (x + 3, y), (x, y + 3))     # 1st, 2nd, 3rd
+    for i, (px, py) in enumerate(pts):
+        c = on_col if on[i] else off_col
+        put_px(buf, px, py, c)
+        put_px(buf, px + 1, py, c)
+        put_px(buf, px, py + 1, c)
+        put_px(buf, px + 1, py + 1, c)
+
+
+def draw_outs(buf, x, y, outs, on_col=OUT_ON, off_col=OUT_OFF):
+    """Outs as filled/hollow pips, the way a real scoreboard shows them."""
+    for i in range(3):
+        c = on_col if (outs or 0) > i else off_col
+        put_px(buf, x + i * 3, y, c)
+        put_px(buf, x + i * 3 + 1, y, c)
+
+
+def situation_line(g):
+    """Compact live-state string, or "" -- NOT a fabricated one.
+
+    Prefers ESPN's own down-and-distance text when present (NFL);
+    otherwise falls back to the count, which is verified real for MLB.
+    Bases and outs are drawn as glyphs instead of words because at 64px a
+    diamond costs 16px and the phrase does not fit at all."""
+    sit = g.get("situation") or {}
+    if sit.get("down_distance"):
+        return sit["down_distance"]
+    b, k = sit.get("balls"), sit.get("strikes")
+    if isinstance(b, int) and isinstance(k, int):
+        return f"{b}-{k}"
+    return ""
 
 
 def draw_ident(buf, accent, kicker, hero, sub=None, hero_scale=2,
@@ -5279,47 +5342,17 @@ class SportsEngine(Browsable):
                 draw_text3x5(buf, 4, row_y + bar_h - 5, str(team["rank"]), self.RANK)
 
     # ---- live-state glyphs ----------------------------------------------
+    # Thin delegates to the module-level functions, which is where these
+    # actually live so GAME DAY renders the identical glyphs rather than a
+    # second copy that could drift.
     def _draw_diamond(self, buf, x, y, bases):
-        """Baseball diamond with occupied bases filled -- the single most
-        information-dense glyph available here. Four pixels say what
-        "runner on first and third" needs a whole sentence to say, and it
-        reads instantly to anyone who has watched a game.
-
-        Base order from ESPN is [onFirst, onSecond, onThird]; drawn in the
-        real diamond orientation (1st right, 2nd top, 3rd left) rather
-        than left-to-right, because a diamond drawn wrong is worse than no
-        diamond."""
-        on = bases or [False, False, False]
-        pts = ((x + 3, y + 3), (x + 3, y), (x, y + 3))     # 1st, 2nd, 3rd
-        for i, (px, py) in enumerate(pts):
-            c = self.BASE_ON if on[i] else self.BASE_OFF
-            put_px(buf, px, py, c)
-            put_px(buf, px + 1, py, c)
-            put_px(buf, px, py + 1, c)
-            put_px(buf, px + 1, py + 1, c)
+        return draw_diamond(buf, x, y, bases, self.BASE_ON, self.BASE_OFF)
 
     def _draw_outs(self, buf, x, y, outs):
-        """Outs as filled/hollow pips, the way a real scoreboard shows
-        them."""
-        for i in range(3):
-            c = self.OUT_ON if (outs or 0) > i else self.OUT_OFF
-            put_px(buf, x + i * 3, y, c)
-            put_px(buf, x + i * 3 + 1, y, c)
+        return draw_outs(buf, x, y, outs, self.OUT_ON, self.OUT_OFF)
 
     def _situation_line(self, g):
-        """Compact live-state string, or "" -- NOT a fabricated one.
-
-        Prefers ESPN's own down-and-distance text when present (NFL);
-        otherwise falls back to the count, which is verified real for MLB.
-        Bases and outs are drawn as glyphs instead of words because at
-        64px a diamond costs 16px and the phrase does not fit at all."""
-        sit = g.get("situation") or {}
-        if sit.get("down_distance"):
-            return sit["down_distance"]
-        b, k = sit.get("balls"), sit.get("strikes")
-        if isinstance(b, int) and isinstance(k, int):
-            return f"{b}-{k}"
-        return ""
+        return situation_line(g)
 
     def _frame_pinned(self):
         buf = blank()
@@ -8636,6 +8669,568 @@ class TicCartEngine:
         return bytes(out)
 
 
+
+# =============================================================================
+# GAME DAY -- the EVENT / TAKEOVER mode.
+#
+# A different CATEGORY of mode from everything above, and worth stating
+# plainly because future modes should pick a side deliberately:
+#
+#   DATA MODES (flights, ISS, weather, sports, news, blog) are GLANCE
+#   modes. They assume they are sharing the panel with a rotation, they
+#   get a slice of attention, and ambient's ident layer deliberately
+#   strips them back to one fact each.
+#
+#   GAME DAY assumes the opposite. It is opt-in, it is about ONE event,
+#   and while it is on nothing else competes for the panel. So it is
+#   allowed to be maximally detailed and maximally dramatic -- the things
+#   a glance mode must not be. It does not appear in ambient's SEQUENCE
+#   (ambient is a rotation; a takeover cannot take a turn), and it hands
+#   the panel back on its own when the event is genuinely over.
+#
+# The ONLY thing that may interrupt it is the global severe-weather
+# takeover, and that comes for free: arcade_server composites the alert
+# over whatever the current mode drew, after this engine has run.
+# =============================================================================
+# Where GAME DAY hands the panel back to when its event ends. Assigned
+# from arcade_server.DEFAULT_MODE at import so the two can never drift.
+RESTING_MODE = "clock"
+
+GAMEDAY_ACCENT = (235, 45, 65)      # fight-night crimson
+GAMEDAY_GOLD = (255, 200, 70)       # the "occasion" second colour
+
+
+class GameDayEngine(Browsable):
+    """One event, given the whole panel.
+
+    Two targets, chosen in gameday_config.json:
+      "ufc"  -- the next/current UFC card, from mma.FEED
+      "team" -- the pinned favourite team's game, from sports.FEED
+
+    Pure, like every other engine here: no I/O, reads whatever the feeds
+    have already cached.
+
+    UFC VIEWS. A card is a night with a shape, so the mode tracks where
+    the night stands rather than showing one static thing:
+      * CARD      -- how far through the card we are (N of M), always
+                     available so there is a sense of the night's arc
+      * UPCOMING  -- who is about to fight, with records. The main event
+                     gets its own treatment.
+      * RESULT    -- a fight just ended. This is the payoff and it
+                     preempts everything else.
+
+    RESULT PACING. A finish is the single most time-critical thing this
+    project renders, so the moment a fight completes the view switches to
+    it immediately and HOLDS for RESULT_TICKS (~22s) before returning to
+    the rotation. The reasoning: a result is read in about two seconds but
+    is worth sitting with -- cutting away fast makes it feel like a stat
+    line scrolling past, which is exactly what the brief said not to
+    build. Long enough to be an occasion, short enough that the card
+    progress is not stale by the time it returns.
+
+    Results only fire for fights that finish WHILE WATCHING. Loading a
+    card that is already 9 fights deep must not replay nine finishes --
+    same first-value rule as Pulse.
+    """
+
+    name = "gameday"
+    tick_rate = 0.05
+
+    BG = (0, 0, 0)
+    INK = (150, 160, 185)
+    INK_DIM = (86, 94, 116)
+    HERO = (245, 248, 255)
+    ACCENT = GAMEDAY_ACCENT
+    GOLD = GAMEDAY_GOLD
+    LIVE = (90, 230, 120)
+
+    RESULT_TICKS = 440       # ~22s holding a finish
+    VIEW_TICKS = 260         # ~13s per rotating view otherwise
+    EXPIRE_TICKS = 1200      # ~60s on the final result, then hand the panel back
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.data = {"card": None, "next_label": None, "next_date": None,
+                     "age": None, "err": None}
+        self.sports_data = {}
+        self.ticks = 0
+        self.hold = 0
+        self.view = 0             # index into the rotating views
+        self.sel = None           # browsed fight index, None = follow live
+        self.result_t = 0         # ticks left holding a finish
+        self.result_fight = None
+        self.done_t = 0           # ticks the whole event has been over
+        self.scroll = 0.0         # card-name marquee offset
+        self._seen_done = None    # ids of finished fights, None until first read
+        self.pulse = Pulse(ticks=26)      # louder than the standard 14
+        self.cfg = gameday.load_config()
+        self.launch = None
+        self._init_scroll()
+
+    # ---- contract --------------------------------------------------------
+    def has_content(self):
+        """Never in ambient's rotation (a takeover cannot take a turn), but
+        the contract is honoured so nothing has to special-case it."""
+        return False
+
+    def expired(self):
+        """True once the event is genuinely over and has been shown as
+        over for a while. arcade_server polls this to hand the panel back
+        to the resting mode -- that is what makes this a takeover with an
+        end rather than a mode you must remember to leave."""
+        if not self.cfg.get("auto_exit", True):
+            return False
+        return self.done_t >= self.EXPIRE_TICKS
+
+    # ---- browse ----------------------------------------------------------
+    def _fights(self):
+        card = self.data.get("card") or {}
+        return card.get("fights") or []
+
+    def _displayed_index(self):
+        """Index of the fight actually ON SCREEN right now.
+
+        Not the same as the live index: while a result is being held, the
+        screen is showing the fight that just ENDED, not the one about to
+        start. Browsing has to step from what you can see, or the first
+        tap appears to skip a fight.
+        """
+        if self.result_t > 0 and self.result_fight:
+            return self.result_fight["index"]
+        return self.sel if self.sel is not None else self._live_index()
+
+    def _step(self, direction):
+        """Universal scroll control: step through the card fight by fight.
+        Same tap/hold contract as every other browsable mode."""
+        fights = self._fights()
+        if not fights:
+            return
+        self.sel = (self._displayed_index() + direction) % len(fights)
+        self.hold = 0
+        self.result_t = 0            # browsing takes manual control
+
+    def input(self, cmd):
+        if self._browse_input(cmd):
+            return
+        if cmd in ("rotate", "drop"):
+            # Snap back to following the live fight.
+            self.sel = None
+            self.hold = 0
+
+    def auto(self):
+        pass
+
+    # ---- state -----------------------------------------------------------
+    def _live_index(self):
+        """The fight the night is currently ON: the one in progress, else
+        the first not yet fought, else the last (card over)."""
+        fights = self._fights()
+        if not fights:
+            return 0
+        for f in fights:
+            if f["state"] == "in":
+                return f["index"]
+        for f in fights:
+            if f["state"] == "pre":
+                return f["index"]
+        return fights[-1]["index"]
+
+    def _current(self):
+        fights = self._fights()
+        if not fights:
+            return None
+        i = self.sel if self.sel is not None else self._live_index()
+        return fights[max(0, min(len(fights) - 1, i))]
+
+    def tick(self):
+        self.ticks += 1
+        self.scroll += 0.35
+        self._scroll_tick()
+        self.cfg = gameday.load_config()
+
+        if self.cfg.get("target") == "team":
+            self.sports_data = sports.FEED.get()
+            self._tick_team()
+            return
+
+        self.data = mma.FEED.get()
+        card = self.data.get("card")
+        fights = self._fights()
+        self.score = (card or {}).get("done", 0)
+
+        # New finishes -> the result view, but never on first read.
+        done_ids = {f["id"] for f in fights if f["state"] == "post"}
+        if self._seen_done is None:
+            self._seen_done = done_ids          # first read: adopt, don't replay
+        elif done_ids - self._seen_done:
+            newest = max(done_ids - self._seen_done,
+                         key=lambda i: next(f["index"] for f in fights if f["id"] == i))
+            self.result_fight = next(f for f in fights if f["id"] == newest)
+            self.result_t = self.RESULT_TICKS
+            self.sel = None
+            self._seen_done = done_ids
+        else:
+            self._seen_done = done_ids
+
+        if self.result_t > 0:
+            self.result_t -= 1
+            self.pulse.note(("result", self.result_fight["id"]))
+        else:
+            self.pulse.note(("card", (card or {}).get("done")))
+
+        # Event over -> start the exit clock.
+        if card and card.get("completed"):
+            self.done_t += 1
+        else:
+            self.done_t = 0
+        self._maybe_exit()
+
+        # Rotate the non-result views on the normal cadence, unless the
+        # viewer is browsing (universal scroll control pauses auto-advance).
+        if self.result_t <= 0 and self.browse.auto_ok and self.sel is None:
+            self.hold += 1
+            if self.hold >= self.VIEW_TICKS:
+                self.hold = 0
+                self.view = (self.view + 1) % 2
+
+    def _maybe_exit(self):
+        """Hand the panel back once the event is over.
+
+        Reuses the SAME `.launch` hand-off that BootEngine and MenuEngine
+        already use -- the render loop picks it up and calls set_mode --
+        so a takeover that ends needs no special case anywhere in the
+        server. This is what makes GAME DAY a takeover with an end rather
+        than a mode you have to remember to leave.
+        """
+        if self.expired():
+            self.launch = RESTING_MODE
+
+    def _tick_team(self):
+        g = (self.sports_data or {}).get("favorite_game")
+        self.score = 0
+        if g:
+            self.score = (g["home"].get("score") or 0) + (g["away"].get("score") or 0)
+            self.pulse.note((g["home"].get("score"), g["away"].get("score")))
+            self.done_t = self.done_t + 1 if g["state"] == "post" else 0
+        else:
+            self.done_t = 0
+        self._maybe_exit()
+
+    # ---- shared chrome ---------------------------------------------------
+    def _occasion_frame(self, buf, intensity=0.0):
+        """The GAME DAY identity: the panel is FRAMED on all four edges
+        rather than given a single top rule like the data modes.
+
+        This is the whole visual signature and it is deliberate -- every
+        other mode in this project puts a band across the top and leaves
+        the other three edges black. A full border is instantly a
+        different kind of screen before a single word is read, which is
+        what "unmistakably its own occasion" has to mean at 64px.
+
+        `intensity` 0..1 brightens and thickens the frame. Cheap: a
+        handful of edge writes, no per-pixel pass over the buffer.
+        """
+        k = 0.55 + 0.45 * max(0.0, min(1.0, intensity))
+        c = rim(self.ACCENT, k)
+        edge = rim(self.GOLD, k)
+        for x in range(WIDTH):
+            put_px(buf, x, 0, edge)
+            put_px(buf, x, 1, c)
+            put_px(buf, x, HEIGHT - 1, edge)
+            put_px(buf, x, HEIGHT - 2, c)
+        for y in range(HEIGHT):
+            put_px(buf, 0, y, edge)
+            put_px(buf, WIDTH - 1, y, edge)
+        # A second inner rule only at high intensity, so escalation is
+        # visible as the frame literally closing in.
+        if intensity > 0.6:
+            for x in range(2, WIDTH - 2):
+                put_px(buf, x, 2, rim(c, 0.5))
+                put_px(buf, x, HEIGHT - 3, rim(c, 0.5))
+        return buf
+
+    def _kicker(self, buf, text, color=None):
+        draw_text_centered(buf, 6, fit_text(text, WIDTH - 8),
+                           color or color_on_dark(self.ACCENT), x_min=3)
+
+    def _name(self, buf, y, name, color, big_ok=True):
+        """Fighter/team name at the largest scale that actually fits.
+        Never truncates a name to keep a size -- losing characters loses
+        WHO, losing size only loses emphasis."""
+        name = str(name or "")
+        scale = 2 if (big_ok and text_w(name, 2) <= WIDTH - 8) else 1
+        draw_text_centered(buf, y, fit_text(name, WIDTH - 8, scale), color,
+                           scale=scale, x_min=3)
+        return scale
+
+    # ---- UFC views -------------------------------------------------------
+    def _frame_result(self, f):
+        """A finish, as a highlight rather than a stat line.
+
+        Hierarchy is the point: the winner and the METHOD dominate, and
+        the round/time is supporting detail. "KO/TKO" reads from across a
+        room; the timestamp is for when you walk over.
+
+        The method is often the physically largest element rather than the
+        name, and that is a deliberate consequence of never truncating a
+        name: "M. ANKALAEV" does not fit at scale 2, so it drops to scale
+        1 instead of losing letters. Losing size costs emphasis; losing
+        letters costs WHO WON, which is the entire point of the view.
+        """
+        buf = blank(); fill(buf, self.BG)
+        flashing = self.pulse.on
+        self._occasion_frame(buf, 1.0 if flashing else 0.75)
+
+        method = f.get("method")
+        short = mma.METHOD_SHORT.get(method, method) if method else None
+        self._kicker(buf, "WINNER", self.GOLD if flashing else color_on_dark(self.ACCENT))
+        self._name(buf, 14, f.get("winner") or "-",
+                   (255, 255, 255) if flashing else self.HERO)
+
+        if short:
+            # The method is the headline of a finish -- "KO/TKO" is six
+            # glyphs and fits at scale 2, which is exactly why the short
+            # forms exist in mma.METHOD_SHORT.
+            draw_text_centered(buf, 30, fit_text(short, WIDTH - 8, 2),
+                               self.GOLD, scale=2, x_min=3)
+        else:
+            # No method in the payload -- say nothing rather than guess.
+            draw_text_centered(buf, 32, "WINS", self.GOLD)
+
+        rnd, t = f.get("final_round"), f.get("final_time")
+        if rnd and t:
+            # Time is ELAPSED in the final round (see mma.py), so this
+            # reads the way a finish is actually announced.
+            draw_text_centered(buf, 46, f"R{rnd}  {t}", self.INK)
+        loser = f.get("loser")
+        if loser:
+            draw_text_centered(buf, 54, fit_text(f"DEF {loser}", WIDTH - 8),
+                               self.INK_DIM, x_min=3)
+        return bytes(buf)
+
+    def _frame_upcoming(self, f):
+        """Who is about to fight. Given real weight: two names stacked
+        with the records that give them stakes, and a main event announced
+        as one."""
+        buf = blank(); fill(buf, self.BG)
+        card = self.data.get("card") or {}
+        main = f.get("main_event")
+        self._occasion_frame(buf, 0.7 if main else 0.3)
+
+        if main:
+            self._kicker(buf, "MAIN EVENT", self.GOLD)
+        elif f.get("co_main"):
+            self._kicker(buf, "CO-MAIN EVENT")
+        else:
+            self._kicker(buf, f"FIGHT {f['number']} OF {card.get('total', '?')}")
+
+        fighters = f.get("fighters") or []
+        y = 14
+        for i, fr in enumerate(fighters[:2]):
+            self._name(buf, y, fr.get("name"), self.HERO, big_ok=False)
+            if fr.get("record"):
+                draw_text_centered(buf, y + 7, fr["record"], self.INK_DIM)
+            y += 16
+            if i == 0:
+                draw_text_centered(buf, y - 4, "VS", color_on_dark(self.ACCENT))
+                y += 4
+
+        wt = f.get("weight")
+        if wt:
+            draw_text_centered(buf, 54, fit_text(wt, WIDTH - 8), self.INK_DIM, x_min=3)
+        return bytes(buf)
+
+    def _frame_card(self):
+        """Where the night stands. Always available, so there is never a
+        moment where you cannot tell how far through the card you are."""
+        buf = blank(); fill(buf, self.BG)
+        card = self.data.get("card") or {}
+        live = card.get("live")
+        self._occasion_frame(buf, 0.6 if live else 0.25)
+
+        total = card.get("total") or 0
+        done = card.get("done") or 0
+        self._kicker(buf, "LIVE NOW" if live else "CARD", self.LIVE if live else None)
+        draw_text_centered(buf, 16, f"{done}/{total}", self.HERO, scale=2, x_min=3)
+        draw_text_centered(buf, 32, "FIGHTS DONE", self.INK_DIM)
+
+        # Progress bar -- the arc of the night in one glyph.
+        bar_w, bx, by = WIDTH - 14, 7, 40
+        filled = int(bar_w * (done / total)) if total else 0
+        for x in range(bar_w):
+            c = self.ACCENT if x < filled else (40, 44, 56)
+            put_px(buf, bx + x, by, c)
+            put_px(buf, bx + x, by + 1, rim(c, 0.5))
+
+        # The night's identity is the BILLING ("MEDIC VS. RODRIGUEZ"),
+        # not the series label. ESPN's own shortName is "UFC FIGHT NIGHT"
+        # for every Fight Night, which identifies nothing, and the full
+        # name truncates to a meaningless "UFC FIGHT" at 64px -- so take
+        # the part after the colon, which is the actual matchup.
+        name = card.get("name") or ""
+        billing = name.split(":", 1)[1].strip() if ":" in name else name
+        billing = billing or card.get("short") or ""
+        if text_w(billing) <= WIDTH - 8:
+            draw_text_centered(buf, 48, billing, self.INK, x_min=3)
+        else:
+            # Scroll rather than truncate: dropping words here loses who
+            # is fighting, which is the one thing this line is for.
+            draw_marquee(buf, 48, billing, self.INK, self.scroll, gap="   -   ")
+        where = card.get("city")
+        if where:
+            draw_text_centered(buf, 55, fit_text(where, WIDTH - 8), self.INK_DIM, x_min=3)
+        return bytes(buf)
+
+    def _frame_waiting(self):
+        """No card loaded, or the next one is days out."""
+        buf = blank(); fill(buf, self.BG)
+        self._occasion_frame(buf, 0.2)
+        label = self.data.get("next_label")
+        if self.data.get("err") and not label:
+            self._kicker(buf, "GAME DAY")
+            draw_text_centered(buf, 28, "NO DATA", self.INK_DIM)
+            return bytes(buf)
+        self._kicker(buf, "NEXT CARD", self.GOLD)
+        if label:
+            words = label.split()
+            lines, cur = [], ""
+            for w in words:
+                trial = f"{cur} {w}".strip()
+                if text_w(trial) <= WIDTH - 10:
+                    cur = trial
+                else:
+                    if cur:
+                        lines.append(cur)
+                    cur = w
+            if cur:
+                lines.append(cur)
+            y = 18
+            for ln in lines[:4]:
+                draw_text_centered(buf, y, ln, self.HERO, x_min=3)
+                y += 8
+        else:
+            draw_text_centered(buf, 28, "LOADING", self.INK_DIM)
+        when = self.data.get("next_date")
+        if when:
+            draw_text_centered(buf, 54, fit_text(str(when)[:10].replace("-", "/"), WIDTH - 8),
+                               self.INK_DIM, x_min=3)
+        return bytes(buf)
+
+    # ---- team view -------------------------------------------------------
+    def _intensity(self, g):
+        """0..1 "how much this game matters RIGHT NOW", driving the frame.
+
+        Two things make a game feel alive and both are real data already
+        in the payload, not invented: how CLOSE it is, and how LATE it is.
+        A 1-point game in the 4th is the maximum; a blowout in the 1st is
+        the minimum. They are multiplied rather than averaged, because a
+        blowout does not get tense just by being late, and an early game
+        is not tense just for being tied -- it needs both.
+
+        Deliberately NOT applied to a finished or unstarted game: the
+        escalation has to mean "right now", or it is decoration.
+        """
+        if not g or g.get("state") != "in":
+            return 0.0
+        hs, as_ = g["home"].get("score"), g["away"].get("score")
+        if not isinstance(hs, int) or not isinstance(as_, int):
+            return 0.3
+        margin = abs(hs - as_)
+        close = max(0.0, 1.0 - margin / 12.0)      # 12+ points apart = not close
+        period = g.get("period") or 0
+        # ESPN gives the CURRENT period but never the total, so the total
+        # comes from the sport's real structure (REGULATION_PERIODS), not
+        # from a guessed constant -- 4 would be wrong for MLB's 9 innings,
+        # NHL's 3 periods and college basketball's 2 halves alike.
+        total = REGULATION_PERIODS.get(g.get("league"), 4)
+        late = max(0.0, min(1.0, period / float(max(1, total))))
+        return max(0.15, close * late)
+
+    def _frame_team(self):
+        buf = blank(); fill(buf, self.BG)
+        data = self.sports_data or {}
+        g = data.get("favorite_game")
+        fav = data.get("favorite") or {}
+
+        if not g:
+            self._occasion_frame(buf, 0.15)
+            self._kicker(buf, "GAME DAY")
+            draw_text_centered(buf, 26, fit_text(fav.get("team_abbr") or "NO TEAM", WIDTH - 8),
+                               self.HERO, x_min=3)
+            draw_text_centered(buf, 38, "NO GAME TODAY", self.INK_DIM)
+            return bytes(buf)
+
+        live = g["state"] == "in"
+        self._occasion_frame(buf, self._intensity(g))
+        self._kicker(buf, "LIVE" if live else ("FINAL" if g["state"] == "post" else "TONIGHT"),
+                     self.LIVE if live else None)
+
+        # Full panel, maximum detail -- this is the one night it does not
+        # have to share space. Both teams big, with their real colours.
+        flash = (255, 255, 255) if self.pulse.on else None
+        y = 14
+        for team in (g["away"], g["home"]):
+            col = flash or (self.HERO if team.get("winner") or live else self.INK)
+            bar = team.get("color") or self.INK_DIM
+            for by in range(10):
+                for bx in (2, 3):
+                    put_px(buf, bx, y + by, bar)
+            txt = f"{team['abbr']} {team.get('score') if team.get('score') is not None else ''}".strip()
+            draw_text_centered(buf, y, fit_text(txt, WIDTH - 12, 2), col, scale=2, x_min=6)
+            y += 14
+
+        detail = g.get("detail") or ""
+        if detail:
+            draw_text_centered(buf, 44, fit_text(detail, WIDTH - 8),
+                               self.LIVE if live else self.INK_DIM, x_min=3)
+        # Sport-specific live state, reusing the work from the context pass.
+        sit = g.get("situation") if live else None
+        if sit and (sit.get("bases") is not None or sit.get("outs") is not None):
+            draw_diamond(buf, WIDTH - 20, 52, sit.get("bases"))
+            draw_outs(buf, WIDTH - 11, 56, sit.get("outs"))
+            line = situation_line(g)
+            if line:
+                draw_text3x5(buf, 4, 53, fit_text(line, WIDTH - 28), self.INK)
+        else:
+            line = situation_line(g) if live else ""
+            if not line:
+                ar, hr = g["away"].get("record"), g["home"].get("record")
+                line = f"{ar} / {hr}" if ar and hr else ""
+            if line:
+                draw_text_centered(buf, 53, fit_text(line, WIDTH - 8), self.INK_DIM, x_min=3)
+        return bytes(buf)
+
+    # ---- render ----------------------------------------------------------
+    def frame(self):
+        if self.cfg.get("target") == "team":
+            return self._frame_team()
+
+        card = self.data.get("card")
+        if not card or not card.get("fights"):
+            return self._frame_waiting()
+
+        # A finish preempts everything, including a browse-selected fight
+        # is NOT true -- browsing cancels the hold (see _step), because a
+        # viewer who has taken manual control should keep it.
+        if self.result_t > 0 and self.result_fight:
+            return self._frame_result(self.result_fight)
+
+        f = self._current()
+        if f is None:
+            return self._frame_waiting()
+        # A fight already fought shows its result; one still to come shows
+        # the matchup. That makes browsing the card coherent: you scroll
+        # back through results and forward into what is still to happen.
+        if f["state"] == "post" and (self.sel is not None or self.view == 1):
+            return self._frame_result(f)
+        if self.sel is not None or self.view == 0:
+            return self._frame_upcoming(f)
+        return self._frame_card()
+
+
 ENGINES = {
     "snake": SnakeEngine,
     "tetris": TetrisEngine,
@@ -8660,6 +9255,7 @@ ENGINES = {
     "clock": ClockEngine,
     "blog": BlogEngine,
     "ambient": AmbientEngine,
+    "gameday": GameDayEngine,
     "menu": MenuEngine,
     "boot": BootEngine,
 }
