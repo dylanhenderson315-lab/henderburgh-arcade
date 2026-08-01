@@ -271,6 +271,49 @@ tick when NWS drops the alert. **Deliberate cost:** this reads
 out (a takeover that only worked while already viewing weather would be
 pointless).
 
+**Motion system** (`transitions.py`, 2026-07-31) — one shared transition
+for the whole product, applied centrally in the render loop so all nine
+modes get the same motion rather than each inventing its own.
+
+- **Default is `push_up`** (eased slide). Picked after rendering all
+  styles side by side: `fade` has a dead black frame mid-transition;
+  `push_up` is continuous motion *and* the cheapest.
+- **Cost is the hard constraint.** Everything is byte slicing/concat or
+  the cached translate table from `brightness.py` — all C-level passes,
+  **no per-pixel Python anywhere**. Measured against a 41.7ms frame
+  budget: `push_up` 0.001ms, `fade` 0.005ms, `wipe_right` 0.018ms.
+- **There is deliberately no true A-over-B cross-fade.** It needs
+  per-pixel arithmetic on two 12KB sources every frame — the one thing
+  this module exists to avoid. `fade` goes through black instead. Don't
+  "improve" it into a real cross-fade.
+- Applied at three levels: `set_mode` (all modes), `AmbientEngine`
+  between sub-modes (it advances internally, bypassing `set_mode`), and
+  `SportsEngine` between PINNED/TICKER.
+- **Two deliberate exemptions:** a severe-alert takeover is *not*
+  transitioned (it's an interrupt; easing it in softens the moment meant
+  to feel abrupt), and coming from `off` plays the first-light ramp
+  instead of a slide (nothing meaningful to slide away from).
+- **First light** (`transitions.wake`): the panel blooms up out of black
+  over ~0.75s on takeover/startup rather than snapping on fully lit.
+  Measured ramp: 0 → 11 → 27 → 68 → 106 → 148 → 164.
+
+**`Pulse`** (`engines.py`) — the shared "something just changed" flash.
+Sports' scoring flash set the bar; this generalises it so news (new
+headline), blog (new post), flights (nearest aircraft changed) and
+weather (temperature changed, rounded first so float jitter can't fire
+it) all mark new content identically. Never flashes on the **first**
+value seen — otherwise every mode flashes on arrival and you learn to
+ignore it. Blinks rather than holding solid: a static highlight reads as
+a colour choice, a blinking one reads as an event.
+
+**Team colour disambiguation** (`sports._disambiguate_colors`) — measured
+across all seven leagues, **5 of 19 real games** had primary team colours
+close enough to render as one colour (NFL SEA vs NE were byte-identical,
+both navies lifted to the same value by the brightness floor). Falls back
+to ESPN's own `alternateColor`, never an invented colour; if nothing
+separates, primaries are left alone since the abbreviations still
+disambiguate. Re-measured after: 0 of 19.
+
 **Time-based night dimming** (`brightness.py`, 2026-07-31) — applied in
 the render loop to whatever is about to be sent, so it covers **every**
 mode uniformly (a game at 3am dims exactly like the clock). Necessary
