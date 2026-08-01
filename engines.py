@@ -4827,6 +4827,12 @@ class SportsEngine:
     STALE = (255, 170, 40)
     FLASH = (255, 255, 255)
 
+    RANK = (255, 226, 60)
+    BASE_ON = (255, 226, 60)
+    BASE_OFF = (46, 50, 62)
+    OUT_ON = (255, 90, 80)
+    OUT_OFF = (46, 50, 62)
+
     LEAGUE_COLOR = {
         "NFL": (255, 90, 120), "NBA": (255, 140, 40),
         "MLB": (120, 200, 255), "NHL": (150, 200, 255),
@@ -4989,6 +4995,55 @@ class SportsEngine:
                 put_px(buf, 1, row_y + by, bar_col)
                 put_px(buf, 2, row_y + by, bar_col)
             draw_text3x5(buf, max(6, (WIDTH - w) // 2), row_y, txt, col, scale=scale)
+            # Rank on the accent bar itself (NCAAF/NCAAB only -- ESPN's 99
+            # "unranked" sentinel is filtered out in sports.py). Sits in
+            # the 3px gutter beside the bar, so it costs no width from the
+            # score line.
+            if team.get("rank") and big:
+                draw_text3x5(buf, 4, row_y + bar_h - 5, str(team["rank"]), self.RANK)
+
+    # ---- live-state glyphs ----------------------------------------------
+    def _draw_diamond(self, buf, x, y, bases):
+        """Baseball diamond with occupied bases filled -- the single most
+        information-dense glyph available here. Four pixels say what
+        "runner on first and third" needs a whole sentence to say, and it
+        reads instantly to anyone who has watched a game.
+
+        Base order from ESPN is [onFirst, onSecond, onThird]; drawn in the
+        real diamond orientation (1st right, 2nd top, 3rd left) rather
+        than left-to-right, because a diamond drawn wrong is worse than no
+        diamond."""
+        on = bases or [False, False, False]
+        pts = ((x + 3, y + 3), (x + 3, y), (x, y + 3))     # 1st, 2nd, 3rd
+        for i, (px, py) in enumerate(pts):
+            c = self.BASE_ON if on[i] else self.BASE_OFF
+            put_px(buf, px, py, c)
+            put_px(buf, px + 1, py, c)
+            put_px(buf, px, py + 1, c)
+            put_px(buf, px + 1, py + 1, c)
+
+    def _draw_outs(self, buf, x, y, outs):
+        """Outs as filled/hollow pips, the way a real scoreboard shows
+        them."""
+        for i in range(3):
+            c = self.OUT_ON if (outs or 0) > i else self.OUT_OFF
+            put_px(buf, x + i * 3, y, c)
+            put_px(buf, x + i * 3 + 1, y, c)
+
+    def _situation_line(self, g):
+        """Compact live-state string, or "" -- NOT a fabricated one.
+
+        Prefers ESPN's own down-and-distance text when present (NFL);
+        otherwise falls back to the count, which is verified real for MLB.
+        Bases and outs are drawn as glyphs instead of words because at
+        64px a diamond costs 16px and the phrase does not fit at all."""
+        sit = g.get("situation") or {}
+        if sit.get("down_distance"):
+            return sit["down_distance"]
+        b, k = sit.get("balls"), sit.get("strikes")
+        if isinstance(b, int) and isinstance(k, int):
+            return f"{b}-{k}"
+        return ""
 
     def _frame_pinned(self):
         buf = blank()
@@ -5012,9 +5067,41 @@ class SportsEngine:
         flash_col = self.FLASH if (self.score_flash > 0 and self.score_flash % 2 == 0) else None
         self._draw_game_block(buf, fg, 12, big=True, flash_col=flash_col)
 
-        detail = fit_text(fg["detail"] or "", WIDTH - 4)
-        draw_text_centered(buf, 36, detail, self.LIVE if live else (86, 94, 116))
-        draw_divider(buf, 44)
+        # Status line, plus live-state glyphs when the game is actually in
+        # progress. Layout gives the glyphs the right edge and lets the
+        # detail text keep the rest, rather than centring the detail and
+        # letting the two collide -- "BOT 9TH" plus a diamond plus outs is
+        # the whole point of this view, so it has to fit as a unit.
+        sit = fg.get("situation") if live else None
+        detail = fg["detail"] or ""
+        if sit and (sit.get("bases") is not None or sit.get("outs") is not None):
+            detail = fit_text(detail, WIDTH - 26)
+            draw_text3x5(buf, 3, 36, detail, self.LIVE)
+            self._draw_diamond(buf, WIDTH - 20, 34, sit.get("bases"))
+            self._draw_outs(buf, WIDTH - 11, 38, sit.get("outs"))
+        else:
+            draw_text_centered(buf, 36, fit_text(detail, WIDTH - 4),
+                               self.LIVE if live else (86, 94, 116))
+
+        # One secondary line under the status, then the divider BELOW it.
+        # (Drawing both at y=44 previously overlapped the text with the
+        # rule -- caught by rendering a real non-live game and looking.)
+        #
+        # Which line: while a game is live the count / down-and-distance is
+        # what has stakes; before first pitch or after the final, the
+        # season records are. Editorial call rather than showing both,
+        # because both at 64px cost legibility for no gain.
+        second = self._situation_line(fg) if live else ""
+        if not second and not live:
+            ar, hr = fg["away"].get("record"), fg["home"].get("record")
+            if ar and hr:
+                second = f"{ar} / {hr}"
+        if second:
+            draw_text_centered(buf, 44, fit_text(second, WIDTH - 4),
+                               (150, 160, 185) if live else (110, 118, 140))
+            draw_divider(buf, 51)
+        else:
+            draw_divider(buf, 44)
 
         win_prob = self.data.get("win_prob")
         if win_prob is not None:

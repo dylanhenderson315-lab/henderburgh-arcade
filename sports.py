@@ -156,7 +156,39 @@ def _team_row(competitor):
         # Kept so _disambiguate_colors() has somewhere to go when the two
         # teams in a game would otherwise render the same accent bar.
         "alt_color": _hex_to_rgb(team.get("alternateColor")),
+        "record": _team_record(competitor),
+        "rank": _team_rank(competitor),
     }
+
+
+def _team_record(competitor):
+    """Overall W-L from ESPN's records[type=total].summary.
+
+    Verified present in ALL SEVEN leagues. Format differs by sport and is
+    passed through VERBATIM rather than reformatted, because each is the
+    correct convention for its sport: MLB/NFL/NBA "55-54" (W-L), NHL
+    "39-26-17" (W-L-OTL), EPL "19-11-7" (W-D-L). Reformatting these into
+    one shape would make three of them wrong.
+    """
+    for rec in competitor.get("records") or []:
+        if rec.get("type") == "total" and rec.get("summary"):
+            return str(rec["summary"]).strip()
+    return None
+
+
+def _team_rank(competitor):
+    """AP/coaches poll rank, or None.
+
+    ESPN uses 99 as its UNRANKED sentinel, not a real 99th place -- NHL
+    returns 99 for every team. Verified: real ranks come back for NCAAF
+    (1, 9) and NCAAB (1, 2); NFL/NBA/EPL return None. Anything outside a
+    plausible poll range is treated as "no rank" rather than displayed.
+    """
+    try:
+        rank = int((competitor.get("curatedRank") or {}).get("current"))
+    except (TypeError, ValueError):
+        return None
+    return rank if 1 <= rank <= 25 else None
 
 
 MIN_TEAM_COLOR_DISTANCE = 60.0     # RGB euclidean; below this the two bars read as one colour
@@ -200,6 +232,46 @@ def _disambiguate_colors(away, home):
         away["color"], home["color"] = best[1], best[2]
 
 
+def _situation(comp, state):
+    """Live in-game state, or None.
+
+    ESPN only includes `situation` while a game is ACTUALLY IN PROGRESS --
+    verified absent on completed games in all seven leagues -- so this is
+    None for anything pre/post and the engine simply shows less.
+
+    VERIFICATION STATUS, because it differs per sport and matters:
+      * MLB  -- VERIFIED live: balls, strikes, outs, and onFirst/onSecond/
+        onThird as booleans. This is the whole "bottom 9th, 2 outs, runner
+        on third" payload and it is real.
+      * NFL  -- `downDistanceText` is read defensively but is NOT verified:
+        it is July, the NFL is out of season, and `situation` does not
+        persist on completed games, so there was no live game anywhere to
+        check against. If ESPN provides it, it renders; if the key never
+        appears, nothing is shown. Deliberately NOT given an invented
+        layout or fabricated fallback.
+      * NHL power-play state -- NOT built. No field name for it could be
+        confirmed against real data, and guessing one would be inventing
+        the feature.
+    """
+    if state != "in":
+        return None
+    sit = comp.get("situation")
+    if not isinstance(sit, dict):
+        return None
+    bases = [bool(sit.get("onFirst")), bool(sit.get("onSecond")), bool(sit.get("onThird"))]
+    out = {
+        "outs": sit.get("outs") if isinstance(sit.get("outs"), int) else None,
+        "balls": sit.get("balls") if isinstance(sit.get("balls"), int) else None,
+        "strikes": sit.get("strikes") if isinstance(sit.get("strikes"), int) else None,
+        "bases": bases if any(bases) else None,
+        # Display-ready string when ESPN supplies one (NFL). Uppercased at
+        # the I/O boundary like every other externally-sourced string.
+        "down_distance": (str(sit.get("downDistanceText")).upper().strip()
+                          if sit.get("downDistanceText") else None),
+    }
+    return out if any(v is not None for v in out.values()) else None
+
+
 def _parse_event(event, league):
     comp = event["competitions"][0]
     status = comp["status"]
@@ -225,6 +297,7 @@ def _parse_event(event, league):
         # at the source for that reason; this is that same fix applied here.
         "detail": (stype.get("shortDetail") or stype.get("detail") or "").upper(),
         "period": status.get("period"),
+        "situation": _situation(comp, stype.get("state")),
         "display_clock": status.get("displayClock"),
         "home": home_row,
         "away": away_row,
