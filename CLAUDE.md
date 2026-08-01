@@ -768,10 +768,10 @@ additive and cannot regress another sport.
 | baseball | **done** — diamond/outs/count/half-inning on the main row |
 | mma | **done** — weight class primary, records per fighter, card position |
 | football | not started — **NFL/NCAAF are off-season, no live data to verify against** |
-| basketball | not started — NBA off-season; verify against **WNBA** |
-| soccer | not started — `form` + `addedClock` already plumbed |
-| tennis | not started — needs `linescores` plumbed for a set grid |
-| golf | not started — `movement` + purse already plumbed |
+| basketball | not started — NBA off-season; verify against **WNBA**. No live WNBA game as of 2026-08-01 evening (both today's games already finished) |
+| soccer | **done** — form strings, ESPN-formatted clock, penalty shootouts (verified live) |
+| tennis | not started — no live match as of 2026-08-01 evening. **Confirmed real**: header events carry `linescores`, one entry per SET with `value`/`displayValue`/`period`/`winner` (checked against a real finished match, J. Pegula d. D. Shnaider 7-5 6-4) — this is the field the set-by-set grid needs, but it has not been rendered against a LIVE match, only a finished one glimpsed while checking the shape |
+| golf | **done** — 6-row leaderboard, movement arrows (sign verified: negative = climbed the leaderboard) |
 
 **Baseball payload facts** (verified, do not re-derive):
 - `onFirst`/`onSecond`/`onThird` are **athlete IDs, not booleans** (0 =
