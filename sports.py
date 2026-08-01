@@ -848,6 +848,9 @@ def _header_competitor(c, sport):
         "record": (paneltext.panel_text(c["record"])
                    if isinstance(c.get("record"), str) and c.get("record") else None),
         "seed": _num_or_none(c.get("tournamentSeed")),
+        "rank": _num_or_none(c.get("rank")),          # tennis world ranking
+        "form": paneltext.panel_text(c.get("form")) or None,   # soccer WDLDL
+        "movement": _num_or_none(c.get("movement")),  # golf position change
         # Leaderboard fields -- golf. `thru` is holes completed; when a
         # player has not teed off it is 0 and teeTime is what matters.
         "place": _num_or_none(c.get("place")),
@@ -889,6 +892,16 @@ def _header_event(e, sport, league_slug, league_name):
         "period": _num_or_none(e.get("period")),
         "clock": (paneltext.panel_text(e.get("clock"))
                   if e.get("clock") not in (None, "") else None),
+        # Fields we already pay for and were dropping. Deliberately NOT
+        # including `odds` (betting stays off by default per PRODUCTION.md)
+        # or logos (IP).
+        "broadcast": paneltext.panel_text(
+            (e.get("broadcast") or "")
+            or ((e.get("broadcasts") or [{}])[0].get("shortName") if e.get("broadcasts") else "")
+        ) or None,
+        "week": paneltext.panel_text(e.get("weekText")) or None,
+        "playoff": bool(e.get("playoff")),
+        "neutral": bool(e.get("neutralSite")),
         "venue": paneltext.panel_text(e.get("location")) or None,
         "series": paneltext.panel_text(e.get("seriesSummary")) or None,
         "note": paneltext.panel_text(e.get("note")) or None,

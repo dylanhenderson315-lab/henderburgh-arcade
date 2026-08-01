@@ -5535,6 +5535,20 @@ class SportsEngine(Browsable):
         else:
             self.panel_i = 0
         games = self.data.get("games") or []
+        # ENRICH the universal events with per-league detail the header
+        # does not carry. The header has bases and outs but NOT the count
+        # -- there are no balls/strikes fields anywhere in it, verified
+        # across a full MLB slate -- while the per-league scoreboard has
+        # them in `situation`. Event ids match exactly across the two feeds
+        # (15/15 on today's slate), so this is a straight id join, not a
+        # name guess. This is precisely why the per-league poll is NOT
+        # redundant for configured leagues.
+        if games and self.universal:
+            by_id = {g.get("event_id"): g for g in games}
+            for ev in self.universal:
+                g = by_id.get(ev.get("id"))
+                if g and g.get("situation"):
+                    ev["situation"] = g["situation"]
         # Stay on the ticker when PINNED has nothing real to draw: either
         # no favorite is configured at all, or one is but that team has no
         # game today. The second case was previously missed, so with a
@@ -6036,10 +6050,108 @@ class SportsEngine(Browsable):
         n = sum(1 for x in (ev.get("competitors") or []) if x.get("place") == place)
         return n > 1
 
+    # ---- per-sport renderers ---------------------------------------------
+    def _draw_inning_arrow(self, buf, x, y, top, color):
+        """Half-inning as a triangle: up = top, down = bottom.
+
+        The font has no arrow glyph, and "TOP"/"BOT" costs 15px of a 64px
+        row. Three pixels of triangle say the same thing and are the
+        universal scoreboard convention."""
+        if top:
+            rows = ((2, 1), (1, 3), (0, 5))
+        else:
+            rows = ((0, 5), (1, 3), (2, 1))
+        for dy, (dx, w) in enumerate(rows):
+            for i in range(w):
+                put_px(buf, x + dx + i, y + dy, color)
+
+    def _draw_scoreline(self, buf, ev, y, accent):
+        """Two team rows with real colours, abbreviation and score. Shared
+        by the team-sport renderers so they stay visually consistent with
+        each other even while their live-state areas differ."""
+        for i, c in enumerate(ev["competitors"][:2]):
+            row = y + i * 12
+            bar = c.get("color") or self.INK_DIM
+            for by in range(10):
+                for bx in (1, 2):
+                    put_px(buf, bx, row + by, bar)
+            sc = c.get("score")
+            sc_txt = "" if sc is None else str(sc)
+            col = self.WIN if c.get("winner") else self.HERO_INK
+            avail = WIDTH - 12 - (text_w(sc_txt, 2) if sc_txt else 0)
+            draw_text3x5(buf, 5, row, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
+            if sc_txt:
+                draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), row, sc_txt, col, scale=2)
+
+    def _render_baseball(self, buf, ev):
+        """MLB. The live state IS the story -- "bottom 9th, 2 outs, runner
+        on third" is a moment, "3-2" is a number -- so the diamond, outs,
+        count and half-inning live on the MAIN row rather than behind a
+        rotate press.
+
+        Data provenance, because it is split across two feeds:
+          * bases  -- header `onFirst/onSecond/onThird`. These are ATHLETE
+            IDs, not booleans (0 = base empty, an id = that player is on
+            it), which is why truthiness is the right test.
+          * outs   -- header `outsText` ("2 Outs"), parsed to an int.
+          * count  -- NOT in the header at all. Comes from the per-league
+            scoreboard's `situation`, joined by event id in tick().
+        Anything missing is simply not drawn.
+        """
+        accent = self._sport_accent(ev)
+        pos, total = self._league_position(ev)
+        draw_header(buf, ev["league_name"] or "MLB", accent,
+                    right_tag=f"{pos}/{total}",
+                    stale=bool(self.data.get("age") and self.data["age"] > 300))
+        self._draw_league_rail(buf, ev)
+        self._draw_scoreline(buf, ev, 11, accent)
+
+        draw_divider(buf, 36)
+        live = ev["live"]
+        if live:
+            # Half-inning + number, then the diamond, then outs, then count.
+            detail = ev.get("detail") or ""
+            top = detail.startswith("TOP")
+            inning = ev.get("period")
+            x = 4
+            if inning:
+                self._draw_inning_arrow(buf, x, 40, top, self.LIVE)
+                x += 5
+                draw_text3x5(buf, x, 40, str(inning), self.LIVE)
+                x += text_w(str(inning)) + 4
+
+            draw_diamond(buf, x, 39, ev.get("bases"))
+            x += 9
+            outs = ev.get("outs")
+            if outs is not None:
+                draw_outs(buf, x, 43, outs)
+                x += 10
+
+            sit = ev.get("situation") or {}
+            b, k = sit.get("balls"), sit.get("strikes")
+            if isinstance(b, int) and isinstance(k, int):
+                draw_text3x5(buf, WIDTH - 4 - text_w(f"{b}-{k}"), 40, f"{b}-{k}", self.INK)
+        else:
+            draw_text_centered(buf, 40, fit_text(ev.get("detail") or "", WIDTH - 6),
+                               self.INK_DIM)
+
+        # Bottom line: series context while live/final, records before.
+        foot = ev.get("series") or ""
+        if not foot:
+            recs = [c.get("record") for c in ev["competitors"][:2] if c.get("record")]
+            foot = " / ".join(recs) if len(recs) == 2 else ""
+        if foot:
+            draw_text_centered(buf, 50, fit_text(foot, WIDTH - 6), self.INK_DIM)
+        bc = ev.get("broadcast")
+        if bc:
+            draw_text_centered(buf, 57, fit_text(bc, WIDTH - 6), self.INK_DIM)
+
     # Populated as each sport gets its own renderer. Empty here means
     # every sport still takes the generic path, so this step changes
     # nothing on screen -- it only creates the seam.
-    SPORT_RENDERERS = {}
+    SPORT_RENDERERS = {
+        "baseball": _render_baseball,
+    }
 
     def _frame_event_detail(self, ev):
         """EXPANDED single event -- the same visual language as GAME DAY
