@@ -322,6 +322,32 @@ so ticking only the visible one would make every mode come up cold, get
 skipped by `has_content()`, and collapse the rotation. It also leaves a
 mode immediately if it goes empty mid-dwell.
 
+**`sky` — visible passes of ANY bright satellite** (`skypass.py`, third
+view of the satellite mode, 2026-08-01). The two ISS views are unchanged;
+this is additive.
+
+- **Computed locally from CelesTrak TLEs**, not fetched from a pass API.
+  N2YO needs a registered key (one key cannot serve a shipped product —
+  PRODUCTION.md), and **polluxlabs is ISS-only**: it accepts
+  `satid`/`norad`/`sat` and *ignores all three*, returning ISS (ZARYA)
+  every time. Verified, don't retry it.
+- Catalogue is CelesTrak's **`visual` GROUP** (157 objects) — naked-eye
+  observable, curated upstream, so no invented magnitude cutoff.
+- **"Visible" = satellite sunlit AND observer in darkness.** Both are
+  computed. Overhead at noon is invisible; in Earth's shadow at midnight
+  equally so.
+- **Validated against polluxlabs on both axes**: ISS rise times within
+  3–14s (scan step is 20s, so resolution-limited) and peak elevation
+  within 0.1–0.4°, *and* both independently report zero visible ISS passes
+  over this location for three days. The second check matters — it shows
+  the visibility filter isn't over-reporting.
+- **Requires `sgp4`** — the first non-stdlib dependency outside
+  mirror/video (`requirements.txt` added). The launchd service already runs
+  `.venv/bin/python`, so this is fine, but it **degrades honestly**:
+  `HAVE_SGP4 == False` shows "PREDICTOR UNAVAILABLE" rather than guessing.
+  A hand-rolled propagator was rejected — a subtly wrong SGP4 produces
+  confidently wrong times.
+
 **Global severe-weather takeover** — an Extreme/Severe NWS alert
 preempts **any** mode (game, video, mirror, anything), not just weather.
 Implemented in `arcade_server._severe_alert_frame()` applied *after* all
@@ -567,6 +593,45 @@ than a known problem — but if sports starts erroring during long ambient
 sessions, this is the first place to look, and the cheap fix is a longer
 `SCOREBOARD_REFRESH` or skipping leagues with no games today (their
 scoreboards are already known-empty from the `dates=` result).
+
+## Data sources that were CHECKED AND REJECTED (2026-08-01)
+
+Verified against the real endpoints, not assumed. Recorded so nobody
+re-litigates them from memory or builds against a source that will bill.
+
+### Airport arrivals/departures board — NOT VIABLE FREE
+
+A per-flight board (airline, flight number, city pair, scheduled/estimated
+time, gate status) has **no free source**. Probed live:
+
+| source | result |
+|---|---|
+| OpenSky `/flights/arrival` | **403** — anonymous access to the flights endpoints was withdrawn; needs OAuth2 now |
+| adsb.lol `/v2/airport/KMYR` | **404** — it has no airport endpoint (it is position-only, which is what `flights.py` already uses) |
+| AviationStack | **401** — key required; free tier is 100 req/month and a paid ladder |
+| AirLabs | **401** — key required |
+| AeroDataBox | **401** — key required |
+| FAA ASWS | host no longer resolves (service retired) |
+
+**What IS free and real:** `nasstatus.faa.gov/api/airport-status-information`
+— no key, XML, live. But it is national **delay/closure** info only, and
+it lists **only airports currently affected** (MYR was absent, correctly,
+because it had no delays). That is a genuine "is my airport delayed" feed,
+**not** a flight board. Scheduled airline data comes from Cirium/OAG/
+FlightAware, all paid.
+
+### Commute / traffic — NOT VIABLE FREE
+
+The green/yellow/red indicator requires *live traffic*, and every source
+with it is paid. Probed live: TomTom **401**, HERE **401**, 511SC **404**
+(both paths), Waze partner feed **404**. OSRM's demo server works with no
+key and returns a route and duration — but it is **free-flow routing with
+no live traffic**, so the indicator would be permanently green and the
+number would never reflect an actual jam. Building on it would look like
+the feature while being decorative, which is worse than not having it.
+
+Per PRODUCTION.md's no-recurring-per-unit-cost rule, both are **skipped
+rather than approximated**.
 
 ## Deliberately deferred (decided against, NOT missed)
 
