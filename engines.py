@@ -213,6 +213,12 @@ _FONT3x5 = {
     # silent-drop behaviour has produced a real visible bug here. Adding
     # the glyph is the right fix: the data is correct, the font was short.
     "&": ("110", "110", "011", "101", "011"),
+    # Parentheses: tennis set scores carry tiebreaks as "7-6(7-5)". Without
+    # these the brackets are silently dropped and it renders "7-67-5" -- a
+    # DIFFERENT, wrong-looking score. Eighth instance of this font's
+    # silent-drop behaviour causing a real bug.
+    "(": ("010", "100", "100", "100", "010"),
+    ")": ("010", "001", "001", "001", "010"),
     "$": ("011", "110", "010", "011", "110"),
     "!": ("010", "010", "010", "000", "010"),
     "?": ("110", "001", "010", "000", "010"),
@@ -5084,6 +5090,7 @@ class SportsEngine(Browsable):
     FLASH = (255, 255, 255)
 
     RANK = (255, 226, 60)
+    HERO_INK = (235, 242, 255)     # primary value text in the universal/detail views
     BASE_ON = (255, 226, 60)
     BASE_OFF = (46, 50, 62)
     OUT_ON = (255, 90, 80)
@@ -5113,6 +5120,12 @@ class SportsEngine(Browsable):
         self._trans_i = 0
         self.hold = 0
         self.cur = 0                     # index into games, for TICKER view
+        # UNIVERSAL ticker: every sport ESPN is currently featuring, from
+        # sports.FEED.get_universal(). A league with nothing on is simply
+        # not in here -- never rendered as an empty or "no games" row.
+        self.universal = []
+        self.ucur = 0
+        self.detail = None            # event id being shown expanded, or None
         self._init_scroll()
         self.cycling = True
         self.ticks = 0
@@ -5124,28 +5137,59 @@ class SportsEngine(Browsable):
 
     # ---- input -----------------------------------------------------------
     def has_content(self):
-        """Any game today in the configured leagues. Off-season leagues
-        legitimately return nothing (see sports.py's dates= fix), which is
-        exactly when this should be skipped."""
-        return bool(self.data.get("games"))
+        """Anything on anywhere -- the universal feed covers every sport
+        ESPN is featuring, so this is only empty when genuinely nothing is
+        happening, not merely when the configured leagues are off-season."""
+        return bool(self.universal or self.data.get("games"))
 
     def _step(self, direction):
-        """In TICKER, step through games. In PINNED (which shows exactly
-        one game) there is no list to browse, so the same gesture flips
-        between the two views -- the nearest thing to "next" that view
-        has."""
-        games = self.data.get("games") or []
-        if self.view == 1 and games:
-            self.cur = (self.cur + direction) % len(games)
-        elif self.data.get("favorite"):
+        """In TICKER, step through every event across every sport. In
+        PINNED (which shows exactly one game) there is no list to browse,
+        so the same gesture flips between the two views.
+
+        While EXPANDED, stepping moves to the next event and stays
+        expanded -- browsing a detail view should keep showing detail
+        rather than kicking you back to the list."""
+        if self.universal:
+            self.ucur = (self.ucur + direction) % len(self.universal)
+            if self.detail is not None:
+                self.detail = self.universal[self.ucur]["id"]
+            self.hold = 0
+            return
+        if self.data.get("favorite"):
             self.view = (self.view + direction) % 2
         self.hold = 0
+
+    def _current_event(self):
+        """The universal event currently on screen, or None."""
+        if not self.universal:
+            return None
+        return self.universal[self.ucur % len(self.universal)]
 
     def input(self, cmd):
         if self._browse_input(cmd):
             return
-        if cmd in ("rotate", "drop"):
-            self.cycling = not self.cycling
+        # SELECT-TO-EXPAND. `rotate` is the select button on this hardware
+        # (the phone remote's centre action), so it expands the event under
+        # the cursor into the full-detail view and collapses back out of
+        # it. `drop` is a second way back, and still toggles auto-advance
+        # from the list, which is what it has always done there.
+        if cmd == "rotate":
+            if self.detail is not None:
+                self.detail = None
+            else:
+                ev = self._current_event()
+                if ev:
+                    self.detail = ev["id"]
+                    self.view = 1
+            self.hold = 0
+            return
+        if cmd == "drop":
+            if self.detail is not None:
+                self.detail = None       # back to the ticker, same position
+            else:
+                self.cycling = not self.cycling
+            self.hold = 0
 
     def auto(self):
         pass          # already self-cycling; ambient and manual look the same
@@ -5155,6 +5199,13 @@ class SportsEngine(Browsable):
         self.ticks += 1
         self._scroll_tick()
         self.data = sports.FEED.get()
+        u = sports.FEED.get_universal()
+        self.universal = u.get("events") or []
+        if self.universal:
+            self.ucur %= len(self.universal)
+        else:
+            self.ucur = 0
+            self.detail = None       # nothing to expand
         games = self.data.get("games") or []
         # Stay on the ticker when PINNED has nothing real to draw: either
         # no favorite is configured at all, or one is but that team has no
@@ -5189,16 +5240,23 @@ class SportsEngine(Browsable):
         if self.score_flash > 0:
             self.score_flash -= 1
 
-        if self.cycling and self.browse.auto_ok:
+        # Auto-advance is suspended while EXPANDED: having deliberately
+        # opened one event, having it slide away on a timer is the exact
+        # push-only behaviour the browse control exists to escape.
+        if self.cycling and self.browse.auto_ok and self.detail is None:
             self.hold += 1
             limit = self.VIEW_TICKS if self.view == 0 else self.SPOTLIGHT_TICKS
             if self.hold >= limit:
                 self.hold = 0
-                if self.data.get("favorite"):
+                if self.data.get("favorite") and not self.universal:
                     self.view = (self.view + 1) % 2
-                elif games:
-                    self.cur = (self.cur + 1) % len(games)
-        self.score = len(games)
+                elif self.universal:
+                    self.ucur = (self.ucur + 1) % len(self.universal)
+                    # Cycle back through the pinned view periodically rather
+                    # than never showing it once universal events exist.
+                    if self.ucur == 0 and self.data.get("favorite_game"):
+                        self.view = 0 if self.view == 1 else 1
+        self.score = len(self.universal) or len(games)
 
     # ---- render --------------------------------------------------------
     @staticmethod
@@ -5395,9 +5453,196 @@ class SportsEngine(Browsable):
         return 1.0 if games else 0.5
 
 
+    # ---- universal ticker + expanded detail -----------------------------
+    SPORT_ACCENT = {
+        "baseball": (120, 200, 255), "basketball": (255, 140, 40),
+        "football": (255, 90, 120), "hockey": (150, 200, 255),
+        "soccer": (90, 220, 140), "golf": (140, 230, 120),
+        "tennis": (230, 220, 90), "mma": (235, 45, 65),
+        "lacrosse": (200, 150, 255), "racing": (255, 170, 40),
+        "volleyball": (255, 190, 120), "cricket": (170, 220, 170),
+    }
+
+    def _sport_accent(self, ev):
+        return self.SPORT_ACCENT.get(ev.get("sport"), self.INK)
+
+    def _state_tag(self, ev):
+        if ev["live"]:
+            return "LIVE"
+        return "FINAL" if ev["state"] == "post" else ""
+
+    def _frame_universal(self):
+        """One event from ANY sport, in the shared data-mode chrome.
+
+        Deliberately renders whatever the sport actually provides rather
+        than forcing every sport into a two-team score: golf gets its
+        leader and score to par, tennis gets set scores, MMA gets the two
+        fighters. Nothing is invented for a sport that doesn't have it.
+        """
+        buf = blank(); fill(buf, self.BG)
+        ev = self._current_event()
+        if not ev:
+            return self._frame_empty("SPORTS", "NOTHING ON RIGHT NOW")
+        accent = self._sport_accent(ev)
+        draw_header(buf, ev["league_name"] or ev["league"], accent,
+                    right_tag=f"{self.ucur + 1}/{len(self.universal)}",
+                    stale=bool(self.data.get("age") and self.data["age"] > 300))
+
+        comps = ev["competitors"]
+        if ev["leaderboard"]:
+            # Golf: the top of the leaderboard IS the story.
+            for i, c in enumerate(comps[:4]):
+                y = 14 + i * 10
+                pos = str(c["place"] or i + 1)
+                draw_text3x5(buf, 3, y, fit_text(pos, 8), self.INK_DIM)
+                draw_text3x5(buf, 13, y, fit_text(c["abbr"], 34), self.HERO_INK)
+                sc = c["score"] or "-"
+                draw_text3x5(buf, WIDTH - 3 - text_w(sc), y, sc,
+                             self.WIN if str(sc).startswith("-") else self.INK)
+            thru = comps[0].get("thru") if comps else None
+            foot = ev["detail"]
+            if thru:
+                foot = f"THRU {thru}"
+            draw_divider(buf, 54)
+            draw_text_centered(buf, 57, fit_text(foot, WIDTH - 6), self.INK_DIM)
+            return bytes(buf)
+
+        # Head-to-head: two rows, real team colours where the sport has them.
+        for i, c in enumerate(comps[:2]):
+            y = 16 + i * 13
+            bar = c.get("color") or self.INK_DIM
+            for by in range(10):
+                for bx in (1, 2):
+                    put_px(buf, bx, y + by, bar)
+            sc = c["score"]
+            sc_txt = str(sc) if sc is not None else ""
+            col = self.WIN if c["winner"] else self.HERO_INK
+            # A numeric score is short and belongs beside the name at
+            # scale 2. Tennis scores are STRINGS like "6-7(5-7) 4-6" --
+            # 126px at scale 2 on a 64px panel -- so those drop to scale 1
+            # on their own line rather than overflowing.
+            wide = bool(sc_txt) and text_w(sc_txt, 2) > 22
+            if wide:
+                draw_text3x5(buf, 6, y, fit_text(c["abbr"], WIDTH - 12), col)
+                draw_text3x5(buf, 6, y + 6, fit_text(sc_txt, WIDTH - 10), self.INK)
+            else:
+                name = fit_text(c["abbr"], WIDTH - 12 - (text_w(sc_txt, 2) if sc_txt else 0) - 8, 2)
+                draw_text3x5(buf, 6, y, name, col, scale=2)
+                if sc_txt:
+                    draw_text3x5(buf, WIDTH - 3 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
+
+        line = ev["detail"] or ""
+        if ev["live"] and ev.get("clock"):
+            line = f"{line} {ev['clock']}".strip()
+        draw_divider(buf, 44)
+        draw_text_centered(buf, 47, fit_text(line, WIDTH - 6),
+                           self.LIVE if ev["live"] else self.INK_DIM)
+        if ev.get("class_label"):
+            draw_text_centered(buf, 56, fit_text(ev["class_label"], WIDTH - 6), self.INK_DIM)
+        elif ev.get("series"):
+            draw_text_centered(buf, 56, fit_text(ev["series"], WIDTH - 6), self.INK_DIM)
+        return bytes(buf)
+
+    def _frame_event_detail(self, ev):
+        """EXPANDED single event -- the same visual language as GAME DAY
+        (draw_event_frame), because it is the same idea: one event given
+        the whole panel, rather than a row in a list.
+
+        Shows everything the sport genuinely provides and silently omits
+        what it doesn't -- these payloads are NOT uniform (see sports.py).
+        """
+        buf = blank(); fill(buf, self.BG)
+        accent = self._sport_accent(ev)
+        intensity = 1.0 if ev["live"] else 0.35
+        draw_event_frame(buf, intensity, accent, accent)
+
+        tag = self._state_tag(ev)
+        head = f"{ev['league_name'] or ev['league']}"
+        if tag:
+            head = f"{head}  {tag}"
+        draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
+                           self.LIVE if ev["live"] else color_on_dark(accent), x_min=3)
+
+        comps = ev["competitors"]
+        if ev["leaderboard"]:
+            for i, c in enumerate(comps[:5]):
+                y = 15 + i * 8
+                draw_text3x5(buf, 4, y, str(c["place"] or i + 1), self.INK_DIM)
+                draw_text3x5(buf, 13, y, fit_text(c["abbr"], 30), self.HERO_INK)
+                sc = c["score"] or "-"
+                draw_text3x5(buf, WIDTH - 4 - text_w(sc), y, sc,
+                             self.WIN if str(sc).startswith("-") else self.INK)
+            lead = comps[0] if comps else {}
+            foot = f"THRU {lead['thru']}" if lead.get("thru") else (ev["detail"] or "")
+            draw_text_centered(buf, 56, fit_text(foot, WIDTH - 8), self.INK_DIM, x_min=3)
+            return bytes(buf)
+
+        # Laid out with a CURSOR rather than fixed offsets: what each sport
+        # provides varies (tennis has long string scores, MMA has records,
+        # some have neither), and fixed rows collided the moment content
+        # changed -- the second competitor's record landed on the venue
+        # line. Advancing a cursor makes overlap impossible by construction.
+        y = 13
+        for c in comps[:2]:
+            bar = c.get("color") or self.INK_DIM
+            sc = c["score"]
+            sc_txt = str(sc) if sc is not None else ""
+            col = self.WIN if c["winner"] else self.HERO_INK
+            wide = bool(sc_txt) and text_w(sc_txt, 2) > 22
+            block_top = y
+            if wide:
+                # Tennis: name, then the full set score beneath at scale 1.
+                # Never truncated -- a clipped set score is wrong, not small.
+                draw_text3x5(buf, 7, y, fit_text(c["abbr"], WIDTH - 14), col)
+                y += 6
+                draw_text3x5(buf, 7, y, fit_text(sc_txt, WIDTH - 11), self.INK)
+                y += 6
+            else:
+                avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
+                draw_text3x5(buf, 7, y, fit_text(c["abbr"], avail, 2), col, scale=2)
+                if sc_txt:
+                    draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
+                y += 11
+            sub = c.get("record") or (f"SEED {c['seed']}" if c.get("seed") else "")
+            if sub:
+                draw_text3x5(buf, 7, y, fit_text(sub, WIDTH - 14), self.INK_DIM)
+                y += 6
+            # Colour bar spans exactly the rows this competitor occupies.
+            for by in range(block_top, min(y, HEIGHT - 3)):
+                for bx in (3, 4):
+                    put_px(buf, bx, by, bar)
+            y += 3
+
+        # Whatever is left goes below, in priority order, only while rows
+        # remain. MLB baserunners come from the EVENT level on this endpoint.
+        show_bases = bool(ev.get("bases")) or ev.get("outs") is not None
+        if show_bases and y <= 44:
+            draw_diamond(buf, WIDTH - 22, y, ev.get("bases"))
+            draw_outs(buf, WIDTH - 13, y + 4, ev.get("outs"))
+        extra = ev.get("class_label") or ev.get("series") or ev.get("venue") or ""
+        if extra and y <= 46:
+            draw_text3x5(buf, 4, y, fit_text(extra, (WIDTH - 28) if show_bases else (WIDTH - 8)),
+                         self.INK_DIM)
+            y += 7
+
+        line = ev["detail"] or ""
+        if ev.get("clock"):
+            line = f"{line} {ev['clock']}".strip()
+        if line:
+            draw_text_centered(buf, min(max(y, 46), 56), fit_text(line, WIDTH - 8),
+                               self.LIVE if ev["live"] else self.INK_DIM, x_min=3)
+        return bytes(buf)
+
     def _frame_for_view(self):
-        if self.view == 0 and self.data.get("favorite"):
+        if self.detail is not None:
+            ev = self._current_event()
+            if ev:
+                return self._frame_event_detail(ev)
+            self.detail = None
+        if self.view == 0 and self.data.get("favorite_game"):
             return self._frame_pinned()
+        if self.universal:
+            return self._frame_universal()
         return self._frame_ticker()
 
     def frame(self):
@@ -8549,6 +8794,37 @@ class TicCartEngine:
 # takeover, and that comes for free: arcade_server composites the alert
 # over whatever the current mode drew, after this engine has run.
 # =============================================================================
+def draw_event_frame(buf, intensity=0.0, accent=GAMEDAY_ACCENT, edge_col=GAMEDAY_GOLD):
+    """The EVENT visual language: the panel is FRAMED on all four edges
+    rather than given a single top rule like the data modes.
+
+    This is the signature shared by GAME DAY and by the sports mode's
+    expanded single-event view -- one language for "this is a whole event,
+    not a row in a list", rather than a third style invented per surface.
+
+    `intensity` 0..1 brightens and thickens the frame. Cheap: a handful of
+    edge writes, no per-pixel pass over the buffer.
+    """
+    k = 0.55 + 0.45 * max(0.0, min(1.0, intensity))
+    c = rim(accent, k)
+    edge = rim(edge_col, k)
+    for x in range(WIDTH):
+        put_px(buf, x, 0, edge)
+        put_px(buf, x, 1, c)
+        put_px(buf, x, HEIGHT - 1, edge)
+        put_px(buf, x, HEIGHT - 2, c)
+    for y in range(HEIGHT):
+        put_px(buf, 0, y, edge)
+        put_px(buf, WIDTH - 1, y, edge)
+    # A second inner rule only at high intensity, so escalation is visible
+    # as the frame literally closing in.
+    if intensity > 0.6:
+        for x in range(2, WIDTH - 2):
+            put_px(buf, x, 2, rim(c, 0.5))
+            put_px(buf, x, HEIGHT - 3, rim(c, 0.5))
+    return buf
+
+
 class GameDayEngine(Browsable):
     """One event, given the whole panel.
 
@@ -8787,36 +9063,7 @@ class GameDayEngine(Browsable):
 
     # ---- shared chrome ---------------------------------------------------
     def _occasion_frame(self, buf, intensity=0.0):
-        """The GAME DAY identity: the panel is FRAMED on all four edges
-        rather than given a single top rule like the data modes.
-
-        This is the whole visual signature and it is deliberate -- every
-        other mode in this project puts a band across the top and leaves
-        the other three edges black. A full border is instantly a
-        different kind of screen before a single word is read, which is
-        what "unmistakably its own occasion" has to mean at 64px.
-
-        `intensity` 0..1 brightens and thickens the frame. Cheap: a
-        handful of edge writes, no per-pixel pass over the buffer.
-        """
-        k = 0.55 + 0.45 * max(0.0, min(1.0, intensity))
-        c = rim(self.ACCENT, k)
-        edge = rim(self.GOLD, k)
-        for x in range(WIDTH):
-            put_px(buf, x, 0, edge)
-            put_px(buf, x, 1, c)
-            put_px(buf, x, HEIGHT - 1, edge)
-            put_px(buf, x, HEIGHT - 2, c)
-        for y in range(HEIGHT):
-            put_px(buf, 0, y, edge)
-            put_px(buf, WIDTH - 1, y, edge)
-        # A second inner rule only at high intensity, so escalation is
-        # visible as the frame literally closing in.
-        if intensity > 0.6:
-            for x in range(2, WIDTH - 2):
-                put_px(buf, x, 2, rim(c, 0.5))
-                put_px(buf, x, HEIGHT - 3, rim(c, 0.5))
-        return buf
+        return draw_event_frame(buf, intensity, self.ACCENT, self.GOLD)
 
     def _kicker(self, buf, text, color=None):
         draw_text_centered(buf, 6, fit_text(text, WIDTH - 8),
