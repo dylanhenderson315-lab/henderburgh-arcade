@@ -4834,6 +4834,7 @@ class SportsEngine:
     }
 
     VIEW_TICKS = 200          # ~10s per view at this tick rate
+    TRANSITION_TICKS = 8      # ~0.4s slide between PINNED and TICKER
     SPOTLIGHT_TICKS = 90      # ~4.5s per game in the ticker view
     FLASH_TICKS = 14
 
@@ -4845,6 +4846,9 @@ class SportsEngine:
         self.data = {"games": [], "favorite": None, "favorite_game": None,
                     "win_prob": None, "age": None, "err": None}
         self.view = 0             # 0 = PINNED, 1 = TICKER
+        self._last_view = 0
+        self._trans_from = None
+        self._trans_i = 0
         self.hold = 0
         self.cur = 0              # index into games, for TICKER view
         self.cycling = True
@@ -5068,10 +5072,34 @@ class SportsEngine:
         draw_marquee(buf, 53, "   ".join(parts), self.INK_DIM, self.scroll)
         return bytes(buf)
 
-    def frame(self):
+    def _frame_for_view(self):
         if self.view == 0 and self.data.get("favorite"):
             return self._frame_pinned()
         return self._frame_ticker()
+
+    def frame(self):
+        # PINNED <-> TICKER is a real content change, so it gets the same
+        # shared slide the rest of the product uses rather than a hard cut.
+        # Captured lazily here (not in tick()) because the view can also be
+        # changed by input() between ticks.
+        if self.view != self._last_view:
+            prev_view, self.view = self.view, self._last_view
+            try:
+                self._trans_from = self._frame_for_view()
+            except Exception:                  # noqa: BLE001 - never break the mode
+                self._trans_from = None
+            self.view = prev_view
+            self._last_view = self.view
+            self._trans_i = 0
+
+        frame = self._frame_for_view()
+        if self._trans_from and self._trans_i < self.TRANSITION_TICKS:
+            self._trans_i += 1
+            frame = transitions.blend(
+                self._trans_from, frame, self._trans_i / float(self.TRANSITION_TICKS))
+            if self._trans_i >= self.TRANSITION_TICKS:
+                self._trans_from = None
+        return frame
 
 
 class NewsEngine:
