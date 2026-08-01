@@ -5272,8 +5272,20 @@ class SportsEngine(Browsable):
     def reset(self):
         self.data = {"games": [], "favorite": None, "favorite_game": None,
                     "win_prob": None, "age": None, "err": None}
-        self.view = 0             # 0 = PINNED, 1 = TICKER
-        self._last_view = 0
+        # PANELS, not a fixed view index. `view` used to be 0=PINNED /
+        # 1=TICKER, where slot 0 was CONTESTED: the favourite team and the
+        # pinned golfer both wanted it, and whichever lost silently became
+        # unreachable. tick() then force-set view=1 on top of that, which
+        # is what hid the golfer view entirely.
+        #
+        # Now every panel that HAS data is an entry in an explicit list and
+        # gets its own turn. Nothing can be crowded out, because nothing
+        # shares a slot -- adding a future pinned thing cannot hide an
+        # existing one.
+        self.panels = []
+        self.panel_i = 0
+        self._last_view = None       # None = first frame, so nothing slides in
+        self._prev_frame = None      # last rendered frame, for the outgoing slide
         self._trans_from = None
         self._trans_i = 0
         self.hold = 0
@@ -5323,6 +5335,48 @@ class SportsEngine(Browsable):
         if self.data.get("favorite"):
             self.view = (self.view + direction) % 2
         self.hold = 0
+
+    PANEL_TEAM = "team"
+    PANEL_GOLF = "golf"
+    PANEL_EVENTS = "events"
+
+    def _build_panels(self):
+        """Every panel with real data behind it, in a stable order.
+
+        Order is deliberate: the things you explicitly PINNED come before
+        the general rotation, because you asked for them by name."""
+        p = []
+        if self.data.get("favorite_game"):
+            p.append(self.PANEL_TEAM)
+        if self.golf_pinned:
+            p.append(self.PANEL_GOLF)
+        if self.universal:
+            p.append(self.PANEL_EVENTS)
+        return p
+
+    def _panel(self):
+        if not self.panels:
+            return None
+        return self.panels[self.panel_i % len(self.panels)]
+
+    @staticmethod
+    def _started(ev):
+        """Has this event actually begun? Live or finished, not scheduled."""
+        return (ev or {}).get("state") in ("in", "post")
+
+    def _cycle_indices(self):
+        """Indices the AUTO-cycle is allowed to visit.
+
+        Scheduled games are deliberately excluded: a board that spends its
+        time showing things that have not happened yet is a schedule, not a
+        scoreboard. Manual browsing still reaches them (see _step), which
+        is the case where looking up a start time is genuinely useful.
+
+        Falls back to everything if nothing has started, so the panel shows
+        the day's fixtures rather than going blank.
+        """
+        started = [i for i, e in enumerate(self.universal) if self._started(e)]
+        return started or list(range(len(self.universal)))
 
     def _current_event(self):
         """The universal event currently on screen, or None."""
@@ -5376,6 +5430,17 @@ class SportsEngine(Browsable):
         else:
             self.ucur = 0
             self.detail = None       # nothing to expand
+        # Rebuild the panel list, keeping the CURRENT panel selected across
+        # the rebuild where possible -- otherwise a panel appearing or
+        # disappearing would jump the view for no reason the viewer can see.
+        was = self._panel()
+        self.panels = self._build_panels()
+        if was in self.panels:
+            self.panel_i = self.panels.index(was)
+        elif self.panels:
+            self.panel_i %= len(self.panels)
+        else:
+            self.panel_i = 0
         games = self.data.get("games") or []
         # Stay on the ticker when PINNED has nothing real to draw: either
         # no favorite is configured at all, or one is but that team has no
@@ -5385,12 +5450,9 @@ class SportsEngine(Browsable):
         # placeholder while real games sat one view away. Only forced when
         # the ticker actually has games -- otherwise the pinned view's
         # message is the more informative of two empty screens.
-        # Force the ticker only when view 0 has nothing real to show. A
-        # PINNED GOLFER counts as real content here -- without this the
-        # golfer view was unreachable whenever the configured leagues had
-        # any game at all, which is most of the time.
-        if games and not self.data.get("favorite_game") and not self.golf_pinned:
-            self.view = 1
+        # (The old `view = 1` force lived here. It is gone: _build_panels
+        # only ever lists panels that HAVE data, so there is nothing to
+        # force away from and nothing to strand.)
         if games:
             self.cur %= len(games)
         self.scroll += 0.5
@@ -5417,23 +5479,28 @@ class SportsEngine(Browsable):
         # Auto-advance is suspended while EXPANDED: having deliberately
         # opened one event, having it slide away on a timer is the exact
         # push-only behaviour the browse control exists to escape.
-        if self.cycling and self.browse.auto_ok and self.detail is None:
+        # Auto-advance is suspended while EXPANDED (see above).
+        if self.cycling and self.browse.auto_ok and self.detail is None and self.panels:
             self.hold += 1
-            limit = self.VIEW_TICKS if self.view == 0 else self.SPOTLIGHT_TICKS
+            on_events = self._panel() == self.PANEL_EVENTS
+            limit = self.SPOTLIGHT_TICKS if on_events else self.VIEW_TICKS
             if self.hold >= limit:
                 self.hold = 0
-                pinned_exists = bool(self.data.get("favorite_game") or self.golf_pinned)
-                if pinned_exists and not self.universal:
-                    self.view = (self.view + 1) % 2
-                elif self.universal:
-                    if self.view == 0 and pinned_exists:
-                        self.view = 1          # pinned had its turn
-                    else:
-                        self.ucur = (self.ucur + 1) % len(self.universal)
-                        # Give the pinned view a turn each time the ticker
-                        # completes a lap, rather than never showing it.
-                        if self.ucur == 0 and pinned_exists:
-                            self.view = 0
+                if not on_events:
+                    # A pinned panel shows once, then hands on.
+                    self.panel_i = (self.panel_i + 1) % len(self.panels)
+                else:
+                    order = self._cycle_indices()
+                    if order:
+                        # Step to the next STARTED event; when the lap
+                        # completes, hand the turn to the next panel.
+                        nxt = [i for i in order if i > self.ucur]
+                        if nxt:
+                            self.ucur = nxt[0]
+                        else:
+                            self.ucur = order[0]
+                            if len(self.panels) > 1:
+                                self.panel_i = (self.panel_i + 1) % len(self.panels)
         self.score = len(self.universal) or len(games)
 
     # ---- render --------------------------------------------------------
@@ -5927,34 +5994,47 @@ class SportsEngine(Browsable):
             if ev:
                 return self._frame_event_detail(ev)
             self.detail = None
-        # A notable move preempts whatever else was showing -- same
-        # reasoning as the scoring flash: the moment is the content.
+        # A notable golf move preempts whatever else was showing -- same
+        # reasoning as the scoring flash: the moment is the content. This
+        # is the ONE precedence override, and it is time-limited by the
+        # feed's move TTL rather than being a standing priority.
         if self.golf_pinned and self.golf_move:
             return self._frame_golf_pinned()
-        if self.view == 0 and self.golf_pinned and not self.data.get("favorite_game"):
-            return self._frame_golf_pinned()
-        if self.view == 0 and self.data.get("favorite_game"):
+        panel = self._panel()
+        if panel == self.PANEL_TEAM:
             return self._frame_pinned()
-        if self.universal:
+        if panel == self.PANEL_GOLF:
+            return self._frame_golf_pinned()
+        if panel == self.PANEL_EVENTS:
             return self._frame_universal()
+        # No panel has data: fall back to whichever empty state is most
+        # informative rather than a blank screen.
+        if self.data.get("favorite"):
+            return self._frame_pinned()
         return self._frame_ticker()
 
     def frame(self):
-        # PINNED <-> TICKER is a real content change, so it gets the same
-        # shared slide the rest of the product uses rather than a hard cut.
-        # Captured lazily here (not in tick()) because the view can also be
-        # changed by input() between ticks.
-        if self.view != self._last_view:
-            prev_view, self.view = self.view, self._last_view
-            try:
-                self._trans_from = self._frame_for_view()
-            except Exception:                  # noqa: BLE001 - never break the mode
-                self._trans_from = None
-            self.view = prev_view
-            self._last_view = self.view
+        """Render the current panel, sliding when the PANEL changes.
+
+        The slide fires on a panel change (pinned team -> golfer ->
+        events), not on stepping between games inside the events panel --
+        browsing should feel immediate, while switching what KIND of thing
+        you are looking at deserves the shared transition.
+
+        The outgoing frame is captured here rather than in tick() because
+        input() can change the panel between ticks.
+        """
+        cur = (self._panel(), self.panel_i)
+        if self._last_view is not None and cur != self._last_view:
+            # Slide FROM the frame actually last shown, which is exactly
+            # what was on the panel. Re-rendering the old panel here would
+            # need its state restored and could re-trigger side effects.
+            self._trans_from = self._prev_frame
             self._trans_i = 0
+        self._last_view = cur
 
         frame = self._frame_for_view()
+        self._prev_frame = frame
         if self._trans_from and self._trans_i < self.TRANSITION_TICKS:
             self._trans_i += 1
             frame = transitions.blend(
