@@ -86,8 +86,90 @@ HIGH_ALT_FT = 40000       # above typical airliner cruise; observed 5 of 213
 LOW_ALT_FT = 3000         # approach/departure -- low enough to actually see
 LOW_NEAR_NM = 12
 
+# ---- flight phase -------------------------------------------------------
+# What's it actually DOING, not just where it is. Verified against real
+# live traffic near ORD on 2026-08-02 (MYR itself had zero traffic in
+# range at the time -- ORD was used purely to confirm the payload shape
+# and real-world value ranges; the classification logic applies wherever
+# aircraft are tracked):
+#
+#   SKW5648   alt 7450ft  geom_rate -1280  8nm out   -- clear descent
+#   AAL529    alt 5975ft  baro_rate +2240  10nm out  -- clear climb-out
+#   ENY3471   alt 7175ft  baro_rate +3712  12nm out  -- clear climb-out
+#   AAL2269   alt 7125ft  baro_rate 0      2nm out   -- level, ambiguous
+#   RPA3659   alt 8125ft  baro_rate -64    8nm out   -- level, ambiguous
+#   UAL210    alt 36000ft baro_rate 0      18nm out  -- cruise (altitude
+#                                                        alone settles it)
+#
+# TWO FINDINGS THAT SHAPED THIS:
+#
+# 1. baro_rate and geom_rate are NEVER BOTH POPULATED on the same real
+#    aircraft in this sample -- when one carries a value the other is
+#    null. Both are read; baro_rate is preferred when present (it is the
+#    more commonly reported of the two in practice) and geom_rate is the
+#    fallback, matching the existing alt_baro-preferred pattern this
+#    module already uses. If NEITHER is present, phase is None -- no
+#    guessing from altitude and distance alone.
+#
+# 2. A LEVEL aircraft rarely reports EXACTLY zero (RPA3659 above was -64
+#    fpm while unambiguously not descending), so the climb/descend
+#    threshold is deliberately not "any nonzero value" -- it is set well
+#    above realistic sensor/reporting noise and well below a real
+#    sustained climb or descent (which reads 1500-3700fpm in this same
+#    sample), so the ambiguous near-zero cases correctly fall through to
+#    "no phase" rather than being called a weak climb or descent.
+CRUISE_FLOOR_FT = 18000   # FAA Class A airspace floor (US) -- a REAL
+                          # published threshold, not invented. At or above
+                          # it, an aircraft is on an enroute IFR flight
+                          # level; it cannot be local approach/departure
+                          # traffic regardless of its instantaneous rate.
+RATE_THRESHOLD_FPM = 300  # above realistic level-flight noise (RPA3659's
+                          # -64fpm), well below a real climb/descent
+                          # (1500-3700fpm observed)
 
-def _notable(ac):
+PHASE_CLIMB = "CLIMB"
+PHASE_DESCEND = "DESCEND"
+PHASE_CRUISE = "CRUISE"
+
+
+def _vertical_rate(ac):
+    """baro_rate preferred, geom_rate as fallback -- see the module note
+    above for why exactly one is usually present, never both."""
+    for key in ("baro_rate", "geom_rate"):
+        v = ac.get(key)
+        if isinstance(v, (int, float)):
+            return v
+    return None
+
+
+def _phase(ac, alt=None, rate=None):
+    """(phase, rate) or (None, rate) -- None when it cannot be determined
+    CONFIDENTLY, same rule as everywhere else in this project: no phase
+    label beats a guessed one.
+
+    alt/rate are accepted as optional pre-computed values so callers that
+    already extracted them (_notable, for the rank escalation below) do
+    not redo the work."""
+    if alt is None:
+        alt = ac.get("alt_baro")
+    if rate is None:
+        rate = _vertical_rate(ac)
+    if not isinstance(alt, (int, float)):
+        return None, rate
+    if alt >= CRUISE_FLOOR_FT:
+        return PHASE_CRUISE, rate       # altitude alone settles it
+    if not isinstance(rate, (int, float)):
+        return None, rate               # no rate data -- do not guess
+    if rate >= RATE_THRESHOLD_FPM:
+        return PHASE_CLIMB, rate
+    if rate <= -RATE_THRESHOLD_FPM:
+        return PHASE_DESCEND, rate
+    return None, rate                    # level below cruise -- genuinely
+                                          # ambiguous (pattern? holding?
+                                          # transition?), not guessed at
+
+
+def _notable(ac, phase=None):
     """What, if anything, makes this aircraft worth looking up for.
 
     Returns (tag, rank) with a HIGHER rank meaning more notable, or None
@@ -102,6 +184,18 @@ def _notable(ac):
     coordinates for every origin/destination to judge distance -- that is
     a second dataset and a per-flight lookup, so it is not cheap and is
     not done rather than approximated badly.
+
+    `phase` (from _phase(), computed once by the caller) narrowly
+    escalates the existing LOW criterion rather than adding a parallel
+    ranking system: LOW already means "low altitude, genuinely near";
+    CONFIRMING it is actively climbing or descending -- not just
+    coincidentally low -- is real information that a low-and-level
+    aircraft doesn't have, and is worth the same attention as a heavy or
+    a helicopter, not less. This was a deliberate design choice, not an
+    oversight: phase does NOT get its own independent rank tier, and does
+    NOT reorder the whole list on its own -- a plane transitioning is
+    common enough near any 40nm radius that using it as a primary sort
+    key would make the ordering noisy rather than more useful.
     """
     squawk = str(ac.get("squawk") or "")
     if squawk in EMERGENCY_SQUAWKS:
@@ -124,6 +218,8 @@ def _notable(ac):
             return ("HIGH", 2)
         dst = ac.get("dst")
         if alt <= LOW_ALT_FT and isinstance(dst, (int, float)) and dst <= LOW_NEAR_NM:
+            if phase in (PHASE_CLIMB, PHASE_DESCEND):
+                return ("LOW", 3)   # confirmed transitioning, not just low
             return ("LOW", 2)
     return None
 
@@ -140,16 +236,20 @@ def _fetch_positions(lat, lon):
         gs = gs if isinstance(gs, (int, float)) else 0
         if ac.get("alt_baro") in (None, "ground") and gs < 30:
             continue          # parked/taxiing clutter, not "in the sky" traffic
+        alt = ac.get("alt_baro") if isinstance(ac.get("alt_baro"), (int, float)) else None
+        phase, rate = _phase(ac, alt=alt)
         out.append({
             "ident": _ident(ac),
             "callsign": (ac.get("flight") or "").strip(),
             "type": (ac.get("t") or "").strip(),
-            "alt_ft": ac.get("alt_baro") if isinstance(ac.get("alt_baro"), (int, float)) else None,
+            "alt_ft": alt,
             "gs_kt": ac.get("gs"),
             "track_deg": ac.get("track"),
             "dist_nm": ac.get("dst"),
             "dir_deg": ac.get("dir"),
-            "notable": _notable(ac),
+            "phase": phase,
+            "vrate_fpm": rate,
+            "notable": _notable(ac, phase=phase),
         })
     # Most notable first, then nearest. Sorting purely by distance means
     # the mode almost always leads with a routine regional jet, because

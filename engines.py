@@ -576,6 +576,21 @@ def draw_outs(buf, x, y, outs, on_col=OUT_ON, off_col=OUT_OFF):
         put_px(buf, x + i * 3 + 1, y, c)
 
 
+def draw_trend_arrow(buf, x, y, up, color):
+    """A tiny triangle: up or down. The font has no arrow glyph, and
+    spelling out a word costs far more than 3px of a 64px row buys back.
+    First built for baseball's half-inning indicator; flights reuses it
+    for climb/descend so the two look like one system's convention rather
+    than two modes inventing their own arrows."""
+    if up:
+        rows = ((2, 1), (1, 3), (0, 5))
+    else:
+        rows = ((0, 5), (1, 3), (2, 1))
+    for dy, (dx, w) in enumerate(rows):
+        for i in range(w):
+            put_px(buf, x + dx + i, y + dy, color)
+
+
 def situation_line(g):
     """Compact live-state string, or "" -- NOT a fabricated one.
 
@@ -5120,6 +5135,18 @@ class FlightEngine(Browsable):
         # traffic" better than raw distance would at this size.
         self._draw_plane_icon(buf, WIDTH // 2, 22, ac.get("track_deg"), col)
 
+        # Phase arrow: climbing/descending only, nothing drawn for cruise
+        # or an undetermined phase -- same "no badge for the mundane
+        # case" rule as the notable tag. Placed in the LEFT MARGIN at the
+        # icon's vertical band (x=3): the icon rotates with heading and
+        # its bounding circle (~11px radius around cx=32,cy=22) can reach
+        # anywhere from x=21 to x=43 depending on orientation, so x<21 is
+        # the one horizontal band that is always clear regardless of
+        # which way the aircraft is pointed.
+        phase = ac.get("phase")
+        if phase in (flights.PHASE_CLIMB, flights.PHASE_DESCEND):
+            draw_trend_arrow(buf, 3, 16, phase == flights.PHASE_CLIMB, col)
+
         # .upper() defensively: aircraft type codes are conventionally
         # uppercase in ADS-B data, but "conventionally" is exactly the
         # word that just burned the airline-name field above.
@@ -5989,18 +6016,9 @@ class SportsEngine(Browsable):
 
     # ---- per-sport renderers ---------------------------------------------
     def _draw_inning_arrow(self, buf, x, y, top, color):
-        """Half-inning as a triangle: up = top, down = bottom.
-
-        The font has no arrow glyph, and "TOP"/"BOT" costs 15px of a 64px
-        row. Three pixels of triangle say the same thing and are the
-        universal scoreboard convention."""
-        if top:
-            rows = ((2, 1), (1, 3), (0, 5))
-        else:
-            rows = ((0, 5), (1, 3), (2, 1))
-        for dy, (dx, w) in enumerate(rows):
-            for i in range(w):
-                put_px(buf, x + dx + i, y + dy, color)
+        """Half-inning as a triangle: up = top, down = bottom. Thin
+        wrapper over the shared draw_trend_arrow -- see that docstring."""
+        draw_trend_arrow(buf, x, y, top, color)
 
     def _draw_scoreline(self, buf, ev, y, accent):
         """Two team rows with real colours, abbreviation and score. Shared
