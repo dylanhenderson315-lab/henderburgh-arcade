@@ -125,19 +125,23 @@ is a fix waiting to be missed by the next module.** Unsupported characters
 become a space rather than vanishing, so a loss is visible.
 
 **The 3×5 font (`_FONT3x5`/`draw_text3x5` in `engines.py`) is
-uppercase-only** (52 glyphs: `A-Z`, `0-9`, space and ``!$%&'+,-./:<>?@``)
-and silently drops any character it doesn't have —
-no error, no crash, just a quietly wrong string on the panel. This has
-caused the *same bug three times* on three different modes (ticker,
-flights, sports), always from a live external API returning mixed-case
-text. `blog.py` is the fourth and highest-risk site — free-form
-user-written posts are the most mixed-case source in the project — and is
-uppercased at its I/O boundary for exactly that reason. **Any new mode
-that draws API-sourced text must `.upper()` it at
-the I/O module boundary** (in the feed module, not the engine) — this is
-already the convention for every existing feed. Verify by actually
-rendering a frame with real data and reading the pixels; this class of
-bug is invisible to a code read.
+uppercase-only** (54 glyphs: `A-Z`, `0-9`, space and ``!$%&'()+,-./:<>?@``)
+and **silently drops any character it doesn't have** — no error, no crash,
+just a quietly wrong string that still looks plausible.
+
+**`.upper()` IS NOT ENOUGH AND NEVER WAS.** That was the guidance here for
+a long time and it is wrong: `.upper()` happily preserves curly quotes,
+en-dashes, and accented letters, all of which the font then drops. Use
+**`paneltext.panel_text()`** at the feed module's I/O boundary — it folds
+diacritics, maps the letters that don't decompose (Ł/Ø/Đ), uppercases, and
+turns anything still unsupported into a **space** so a loss is visible
+rather than silent.
+
+As of 2026-08-01 every feed that renders external text uses it: `sports`,
+`mma`, `news`, `blog`, `flights`, `weather`. (`market.py` deliberately does
+not — its `.upper()` calls are on user-typed ticker symbols, not API text.)
+
+**Run `render_audit.py` instead of trusting a code read** — see below.
 
 ## What's built
 
@@ -769,7 +773,7 @@ additive and cannot regress another sport.
 | mma | **done** — weight class primary, records per fighter, card position |
 | football | not started — **NFL/NCAAF are off-season, no live data to verify against** |
 | basketball | not started — NBA off-season; verify against **WNBA**. No live WNBA game as of 2026-08-01 evening (both today's games already finished) |
-| soccer | **done** — form strings, ESPN-formatted clock, penalty shootouts (verified live) |
+| soccer | **done** — form strings, ESPN-formatted clock, penalty shootouts (verified live). Layout uses a y-cursor after the audit caught the divider/clock overlapping the second team |
 | tennis | not started — no live match as of 2026-08-01 evening. **Confirmed real**: header events carry `linescores`, one entry per SET with `value`/`displayValue`/`period`/`winner` (checked against a real finished match, J. Pegula d. D. Shnaider 7-5 6-4) — this is the field the set-by-set grid needs, but it has not been rendered against a LIVE match, only a finished one glimpsed while checking the shape |
 | golf | **done** — 6-row leaderboard, movement arrows (sign verified: negative = climbed the leaderboard) |
 
@@ -912,6 +916,32 @@ production device this multiplies by unit count; see `PRODUCTION.md`.
    kicker occupies rows 6-10 and the fighter names were drawn at y=8.
    Invisible to a code read; caught by rendering the frame and looking.
 
+### `render_audit.py` — run this before calling any layout done
+
+    .venv/bin/python render_audit.py            # every text mode, real data
+    .venv/bin/python render_audit.py sports     # one mode
+    .venv/bin/python render_audit.py --strict   # fail on truncation too
+
+Makes permanent the instrumentation that caught every one of the ten glyph
+bugs. Checks four things: **DROPPED** (no glyph), **OVERFLOW** (leaves the
+panel), **TRUNCATED** (reported, not failed — abbreviating a headline is
+legitimate), **COLLISION** (two text draws sharing pixels).
+
+**It found three real bugs on its first run**, all in code shipped hours
+earlier: a soccer layout drawing the divider and clock through the second
+team's score row, a golf name budget cutting "E. HENSELEIT" to "HENSEL",
+and the tenth glyph instance (news dropping a curly quote, which is what
+exposed that four feeds had never been migrated to `paneltext`).
+
+Marquee modes legitimately draw off-edge to loop seamlessly and are
+exempted via `MARQUEE_OK` — `ambient` is in that set because it composes
+real instances of the marquee modes.
+
+**COLLISION is the check worth caring about most.** Fixed row offsets are
+correct until content varies — a longer record, a form line, a team with a
+longer name — and then two elements silently overlap. Prefer a **y-cursor**
+over fixed offsets in any renderer whose content varies.
+
 ### Methods worth reusing (each found something review didn't)
 - **Instrument `draw_text3x5` itself** to log any character absent from
   `_FONT3x5`, then drive every mode against live data and every internal
@@ -964,11 +994,8 @@ production device this multiplies by unit count; see `PRODUCTION.md`.
   sampling too soon after `set_mode` makes a healthy render look frozen —
   this produced false failures twice. Any future test needs a generous
   settle or a poll-until-changed loop.
-- **`fit_text` truncation is silent by design.** It degrades gracefully,
-  but nothing warns when a string is being shortened, so an
-  over-long label can quietly lose meaning (the empty-ambient message
-  `"WAITING FOR DATA"` → `"WAITING FOR"` was caught only by looking at
-  the pixels). A debug mode that logs every truncation might be worth it.
+- **`fit_text` truncation is silent by design** — this is now covered by
+  `render_audit.py`, which reports every truncation (see below). Resolved.
 - **Scrolling marquees intentionally draw characters partially
   off-panel** at both edges. The bounds checker flags these; they are
   correct. Don't "fix" them.
