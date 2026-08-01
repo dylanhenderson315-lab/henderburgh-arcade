@@ -98,6 +98,41 @@ def _fetch_position():
     }
 
 
+# Pass quality. Elevation is what actually determines how impressive a
+# pass looks: the ISS at 15 degrees is a dim light low on the horizon,
+# probably behind a tree; at 70 degrees it crosses nearly overhead and is
+# briefly one of the brightest things in the sky. Both come straight from
+# the pass prediction already being fetched -- no extra request.
+#
+# NOTE ON CREW COUNT: deliberately NOT shipped. The obvious free source
+# (open-notify.org/astros.json) still responds 200, but returns the
+# Expedition 71 crew -- who were aboard in 2024 -- with no timestamp
+# field to detect the staleness from. Showing a two-year-old crew list as
+# current would be exactly the kind of confident-but-wrong number this
+# project refuses to display. Revisit if a maintained free source turns up.
+ELEV_EXCELLENT = 60.0
+ELEV_GOOD = 40.0
+
+
+def pass_quality(nxt):
+    """(tag, rank) for a predicted pass; higher rank = more worth setting
+    an alarm for. Tags are <=7 chars to fit the panel header's tag slot."""
+    if not nxt:
+        return None
+    elev = nxt.get("max_elev")
+    if not isinstance(elev, (int, float)):
+        return None
+    if not nxt.get("visible"):
+        # Still reported, because "it's up there but you won't see it" is
+        # honest and useful -- it just isn't something to go outside for.
+        return ("DAYLIT", 0)
+    if elev >= ELEV_EXCELLENT:
+        return ("BRIGHT", 3)
+    if elev >= ELEV_GOOD:
+        return ("GOOD", 2)
+    return ("LOW", 1)
+
+
 def _fetch_next_pass(lat, lon):
     url = f"{PASS_URL}?lat={lat}&lon={lon}&n=5&days_ahead=10"
     d = _get_json(url)

@@ -4561,8 +4561,13 @@ class SatelliteEngine:
         visible = nxt.get("visible")
         col = self.VISIBLE if visible else self.NOT_VISIBLE
 
+        # Pass QUALITY in the header tag rather than the location: how good
+        # this pass is (nearly overhead vs a low skim) is the thing worth
+        # knowing at a glance, and the location is fixed anyway.
+        q = satellite.pass_quality(nxt)
         draw_header(buf, "ISS PASS", self.ACCENT,
-                    right_tag=self.data.get("label", "HOME")[:6], stale=stale)
+                    right_tag=(q[0] if q else self.data.get("label", "HOME")[:6]),
+                    stale=stale)
 
         draw_text_centered(buf, 11, "NEXT IN", (86, 94, 116))
         draw_text_centered(buf, 19, self._fmt_countdown(secs), col, scale=2)
@@ -4573,7 +4578,18 @@ class SatelliteEngine:
         # that fits. Drawn as a filled chip so the single most important
         # bit of this whole view (can I actually go outside and see it?)
         # reads instantly, before any text resolves.
-        tag = "VISIBLE" if visible else "NOT VISIBLE"
+        # Say WHY it is or isn't worth going outside, not just whether it
+        # is technically visible. A 70-degree overhead pass and a 15-degree
+        # skim behind the treeline are both "visible" and are not remotely
+        # the same event.
+        if q and q[1] >= 3:
+            tag = "GO OUTSIDE"
+        elif q and q[1] == 2:
+            tag = "GOOD PASS"
+        elif visible:
+            tag = "VISIBLE"
+        else:
+            tag = "NOT VISIBLE"
         tw = text_w(tag)
         x0 = (WIDTH - tw - 6) // 2
         for x in range(x0, x0 + tw + 6):
