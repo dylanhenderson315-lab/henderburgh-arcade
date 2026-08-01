@@ -38,6 +38,7 @@ market_config.json's watchlist and location_config.json's home
 coordinates -- set from the control panel/phone, not hand-edited.
 """
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -363,6 +364,15 @@ class SportsFeed:
         self._win_prob_try = 0.0
         self._last_config_check = 0.0
         self._last_read = 0.0
+        # Universal multi-sport scoreboard (the header endpoint). Separate
+        # from the per-league cache above: one request covers every sport
+        # ESPN is currently featuring, and a league is present ONLY when it
+        # has something on -- so "nothing happening" needs no filtering.
+        self._universal = []
+        self._universal_updated = 0.0
+        self._universal_try = 0.0
+        self._universal_interval = 0.0
+        self._universal_fails = 0
         self._thread = None
         self._err = None
 
@@ -455,9 +465,60 @@ class SportsFeed:
             if idle > IDLE_STOP:
                 return
             self._maybe_reload_config()
+            self._refresh_universal()
             self._refresh_scoreboards()
             self._refresh_win_prob()
             time.sleep(2.0)
+
+    def _refresh_universal(self):
+        """Poll the one endpoint that covers every sport.
+
+        Cheap by construction: ONE request regardless of how many leagues
+        are live, versus one per configured league for the per-league
+        path. Backs off the same way everything else here does."""
+        now = time.time()
+        with self._lock:
+            if now - self._universal_try < self._universal_interval:
+                return
+            self._universal_try = now
+        try:
+            events = _parse_header(_get_json(HEADER_URL))
+        except Exception as e:                       # noqa: BLE001 - never die
+            with self._lock:
+                self._universal_fails += 1
+                self._universal_interval = min(
+                    ERROR_BACKOFF_MAX,
+                    ERROR_BACKOFF_BASE * (2 ** (self._universal_fails - 1)))
+            return
+        with self._lock:
+            self._universal = events
+            self._universal_updated = time.time()
+            self._universal_fails = 0
+            if any(e["live"] for e in events):
+                self._universal_interval = HEADER_REFRESH_LIVE
+            elif events:
+                self._universal_interval = HEADER_REFRESH_IDLE
+            else:
+                self._universal_interval = HEADER_REFRESH_EMPTY
+
+    def get_universal(self):
+        """Every currently-relevant event across every sport, live first.
+
+        Never blocks. A league with nothing on is simply not in here -- it
+        is not represented as an empty entry, because ESPN omits it
+        upstream and we deliberately do not add it back."""
+        now = time.time()
+        with self._lock:
+            self._last_read = now
+            events = [dict(e) for e in self._universal]
+            age = (now - self._universal_updated) if self._universal_updated else None
+        self._ensure_thread()
+        # Live first, then upcoming, then finished -- within that, keep
+        # ESPN's own ordering, which already groups by sport sensibly.
+        rank = {"in": 0, "pre": 1, "post": 2}
+        events.sort(key=lambda e: rank.get(e["state"], 3))
+        return {"events": events, "age": age,
+                "leagues": sorted({(e["sport"], e["league"]) for e in events})}
 
     def _maybe_reload_config(self):
         now = time.time()
@@ -542,3 +603,161 @@ class SportsFeed:
 
 
 FEED = SportsFeed()
+
+
+# =============================================================================
+# UNIVERSAL SCOREBOARD -- every sport ESPN is currently featuring, in ONE call.
+#
+# WHY THIS ENDPOINT. The per-league scoreboard above needs one request per
+# league, and ESPN publishes 338 sport/league slugs (enumerated from
+# sports.core.api.espn.com/v2/sports on 2026-08-01). Polling even a fraction
+# of that against an undocumented API with no published rate limit is exactly
+# the risk CLAUDE.md flags as the project's top standing concern.
+#
+# This is the endpoint that drives espn.com's own top scoreboard bar:
+#     site.api.espn.com/apis/v2/scoreboard/header
+# One request returned 43 live/relevant events across 11 leagues in 7 sports
+# when this was written -- golf (PGA + LPGA), MLB, WNBA, three soccer
+# competitions, PFL, PLL lacrosse, ATP and WTA tennis.
+#
+# ABSENCE IS FREE, AND THAT IS THE POINT. ESPN only includes a league here
+# when it has something on. There is no "no games today" state to filter out
+# because a quiet league simply is not in the response. That is the required
+# behaviour ("leagues with nothing happening are simply ABSENT") implemented
+# by the source rather than by us guessing what counts as relevant.
+#
+# SHAPES DIFFER BY SPORT AND THE DIFFERENCES ARE REAL. Verified against a
+# live payload, not assumed -- MMA already proved these are not uniform:
+#   * MLB puts baserunners at the EVENT top level (onFirst/onSecond/onThird,
+#     outsText, baseRunnersText) -- NOT nested in `situation` the way the
+#     per-league scoreboard does it.
+#   * `status` here is a plain STRING ("pre"/"in"/"post") and `summary` is
+#     the display text ("Final", "FT", "Round 3 - In Progress"). The
+#     per-league API instead nests these under status.type.*.
+#   * Golf/tennis competitors are ATHLETES with `place`/`score`("-10")/
+#     `status.thru`, not teams with numeric scores.
+#   * Tennis carries `linescores`, `tournamentSeed` and a `notes[]` list of
+#     completed-match text; soccer carries `form` and `addedClock`; MMA
+#     carries `cardSegment`, `matchNumber` and a weight class in
+#     `competitionType`.
+# Everything below normalises those into one shape WITHOUT inventing fields:
+# anything a given sport does not provide stays None.
+# =============================================================================
+HEADER_URL = "https://site.api.espn.com/apis/v2/scoreboard/header"
+
+HEADER_REFRESH_LIVE = 25.0     # something is actually in progress
+HEADER_REFRESH_IDLE = 180.0    # events exist but none live
+HEADER_REFRESH_EMPTY = 900.0   # nothing at all anywhere (rare on this endpoint)
+
+# Sports whose "event" is a multi-competitor standing rather than a head-to-
+# head fixture. Determined by the competitor `type` being athlete AND there
+# being more than two of them, not by a hardcoded sport list -- but these are
+# the ones observed doing it, kept for readable labelling.
+LEADERBOARD_SPORTS = {"golf"}
+
+
+def _num_or_none(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _header_competitor(c, sport):
+    """One competitor, team or athlete, normalised."""
+    is_team = c.get("type") == "team"
+    name = (c.get("abbreviation") or c.get("shortName")
+            or c.get("name") or c.get("displayName") or "")
+    st = c.get("status") if isinstance(c.get("status"), dict) else {}
+    score = c.get("score")
+    return {
+        "id": c.get("id"),
+        "is_team": is_team,
+        # Teams get their abbreviation; athletes get "C. Young".
+        "abbr": str(name).upper().strip(),
+        "full": str(c.get("displayName") or name).upper().strip(),
+        "score": _num_or_none(score) if is_team else (
+            str(score).upper().strip() if score is not None else None),
+        "home_away": c.get("homeAway"),
+        "winner": bool(c.get("winner")),
+        "color": _hex_to_rgb(c.get("color")) if c.get("color") else None,
+        "alt_color": _hex_to_rgb(c.get("alternateColor")) if c.get("alternateColor") else None,
+        # `record` is a plain string on this endpoint ("7-2-0"), unlike the
+        # per-league API's records[] list.
+        "record": (str(c["record"]).upper().strip()
+                   if isinstance(c.get("record"), str) and c.get("record") else None),
+        "seed": _num_or_none(c.get("tournamentSeed")),
+        # Leaderboard fields -- golf. `thru` is holes completed; when a
+        # player has not teed off it is 0 and teeTime is what matters.
+        "place": _num_or_none(c.get("place")),
+        "thru": _num_or_none(st.get("thru")),
+        "hole": _num_or_none(st.get("hole")),
+        "tee_time": st.get("teeTime"),
+        "player_state": st.get("state"),
+    }
+
+
+def _header_event(e, sport, league_slug, league_name):
+    """One event from the header endpoint, normalised across sports."""
+    comps = [_header_competitor(c, sport) for c in (e.get("competitors") or [])]
+    athletes = [c for c in comps if not c["is_team"]]
+    leaderboard = len(athletes) > 2
+
+    # MLB puts live baserunner state at the EVENT level here.
+    bases = [bool(e.get("onFirst")), bool(e.get("onSecond")), bool(e.get("onThird"))]
+    outs = None
+    if isinstance(e.get("outsText"), str):
+        m = re.match(r"\s*(\d+)", e["outsText"])
+        if m:
+            outs = int(m.group(1))
+
+    state = str(e.get("status") or "").lower() or "pre"
+    return {
+        "id": str(e.get("id") or ""),
+        "competition_id": str(e.get("competitionId") or e.get("id") or ""),
+        "sport": sport,
+        "league": (league_slug or "").upper(),
+        "league_name": (league_name or league_slug or "").upper(),
+        "name": str(e.get("name") or "").upper(),
+        "short_name": str(e.get("shortName") or "").upper(),
+        "state": state,                       # pre | in | post
+        "live": state == "in",
+        # Display text ESPN already formatted for this sport: "Final", "FT",
+        # "Round 3 - In Progress", "Bot 9th". Uppercased at the boundary.
+        "detail": str(e.get("summary") or "").upper().strip(),
+        "period": _num_or_none(e.get("period")),
+        "clock": (str(e.get("clock")).upper().strip()
+                  if e.get("clock") not in (None, "") else None),
+        "venue": str(e.get("location") or "").upper().strip() or None,
+        "series": str(e.get("seriesSummary") or "").upper().strip() or None,
+        "note": str(e.get("note") or "").upper().strip() or None,
+        # MMA weight class / tennis draw both live in competitionType.
+        "class_label": str((e.get("competitionType") or {}).get("text") or "").upper().strip() or None,
+        "match_number": _num_or_none(e.get("matchNumber")),
+        "card_segment": str(e.get("cardSegment") or "").upper().strip() or None,
+        "round": str(e.get("round") or "").upper().strip() or None,
+        "leaderboard": leaderboard,
+        "competitors": comps,
+        # Tennis ships completed-match summaries as free text.
+        "notes": [str(n.get("text") or "").upper().strip()
+                  for n in (e.get("notes") or []) if n.get("text")][:4],
+        "bases": bases if any(bases) else None,
+        "outs": outs,
+        "runners_text": str(e.get("baseRunnersText") or "").upper().strip() or None,
+    }
+
+
+def _parse_header(payload):
+    """Whole header payload -> flat list of normalised events."""
+    out = []
+    for s in (payload.get("sports") or []):
+        sport = s.get("slug") or ""
+        for lg in (s.get("leagues") or []):
+            slug = lg.get("slug") or lg.get("abbreviation") or ""
+            name = lg.get("shortName") or lg.get("abbreviation") or lg.get("name") or slug
+            for e in (lg.get("events") or []):
+                try:
+                    out.append(_header_event(e, sport, slug, name))
+                except (AttributeError, TypeError, ValueError):
+                    continue          # one malformed event must not lose the rest
+    return out
