@@ -359,16 +359,26 @@ Applied to ticker, flights, sports, news, blog **and ambient itself**,
 where left/right browses the rotation one level up. Verified live: news
 counter went `1/15` → tap → `2/15` → 2.5s hold → `9/15`.
 
-**Ambient is a presentation layer, not a rerun** (2026-07-31). Six
-"channel idents" sharing one geometry via `draw_ident()`: kicker / hero /
-sub. Everything that only matters while *operating* a mode is stripped —
-no dots, counters, cursors or nav hints. Each mode supplies
-`ambient_frame()` (headline-first), `AMBIENT_STYLE` (its characteristic
-entrance, reusing `transitions`), `AMBIENT_ACCENT` (its band colour) and
-`ambient_weight()` (drives dwell). Ident accents are **checked pairwise
-for distinctness** — two modes sharing a colour defeats the whole
-"know it before you read it" idea. Dwell is weighted (live game ~45s,
-guestbook ~16s) and clamped to 10–45s.
+**Ambient shows the REAL mode screens** (revised 2026-08-01). An earlier
+pass gave each mode a separate "channel ident" layout (`draw_ident`,
+per-mode `ambient_frame()`); **that was removed deliberately and should not
+come back.** The manual screens are the designed ones, and maintaining two
+layouts per mode meant every change had to be made twice or they drifted —
+with the ambient copy being the one nobody sees while working on a mode.
+
+`AmbientEngine._render_current()` is now literally `self.current.frame()`.
+Ambient is a rotation **controller**: it owns WHICH mode shows, for HOW
+LONG, the entrance between modes, and browsing — **not what any mode looks
+like.** Kept from that pass: weighted dwell (`ambient_weight()`, live game
+~45s vs guestbook ~16s, clamped 10–45s), the per-mode entrance transition
+(`AMBIENT_STYLE`), and the shared scroll control.
+
+Verified pixel-identical: 25 rendered frames per mode against an
+independently-ticked instance of the same mode, all six modes, 150/150
+identical. **Freeze `cycling` when testing this** — ambient legitimately
+skips a mode whose `has_content()` is false (flights with zero aircraft),
+which looks like a rendering mismatch if the rotation is allowed to move
+under the comparison.
 
 **Motion system** (`transitions.py`, 2026-07-31) — one shared transition
 for the whole product, applied centrally in the render loop so all nine
