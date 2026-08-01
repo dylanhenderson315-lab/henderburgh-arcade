@@ -748,6 +748,89 @@ question is "where is MY player", not "what is the score".
   on the panel — only an end-to-end pixel match against the real panel
   caught it.
 
+### Per-sport renderers (IN PROGRESS — started 2026-08-01)
+
+**Why**: one generic renderer had to satisfy every sport at once, so every
+layout decision was made for the WORST CASE across seven of them. The tell
+that it was under-serving: the one-renderer rule was **already broken
+twice** (golf is a leaderboard, tennis has string scores too wide for the
+slot). Those two broke loudly enough to force an exception; the rest were
+quietly flattened into two rows of `ABBREV + score`.
+
+**Contract**: `SportsEngine.SPORT_RENDERERS` maps `sport` → a method taking
+`(self, buf, ev)` that draws the WHOLE frame including its own header and
+returns None. The caller owns blank/fill. **Anything unclaimed falls back
+to `_frame_universal_generic()`, unchanged** — adding a renderer is purely
+additive and cannot regress another sport.
+
+| sport | status |
+|---|---|
+| baseball | **done** — diamond/outs/count/half-inning on the main row |
+| mma | **done** — weight class primary, records per fighter, card position |
+| football | not started — **NFL/NCAAF are off-season, no live data to verify against** |
+| basketball | not started — NBA off-season; verify against **WNBA** |
+| soccer | not started — `form` + `addedClock` already plumbed |
+| tennis | not started — needs `linescores` plumbed for a set grid |
+| golf | not started — `movement` + purse already plumbed |
+
+**Baseball payload facts** (verified, do not re-derive):
+- `onFirst`/`onSecond`/`onThird` are **athlete IDs, not booleans** (0 =
+  empty). Truthiness is the right test, for a non-obvious reason.
+- **The count is NOT in the header.** No balls/strikes fields exist in it
+  at all, checked across a full 15-game slate. It comes from the
+  per-league scoreboard's `situation`, joined by event id in `tick()`.
+  Event ids match **exactly** across the two feeds (15/15).
+- **Therefore the per-league poll is NOT redundant** for configured
+  leagues — it is the only source of the count and win probability. Any
+  "cut the redundant polling" work must be narrower than deleting it.
+- **Baseball's live layout has not yet been seen on a genuinely live
+  game** (built and swept against synthesized state from the verified
+  field shapes; the day's first game started after the work). Worth one
+  look at a live game.
+
+### Two-axis navigation (2026-08-01)
+
+LEFT/RIGHT walks **games within a league**; UP/DOWN walks **leagues**.
+Both axes are driven by the SAME `Scroller`, so tap/hold/accelerate feels
+identical — `Browsable.VERTICAL_BROWSE = True` opts a mode in and it
+implements `_step_v()`. Auto-advance pauses while **either** axis is active.
+
+**Grouped by league, not sport**, deliberately: ESPN nests
+`sports → leagues → events` so sport is the native outer key, but people
+name leagues ("is the NWSL game on?"), and grouping by sport would merge
+ATP with WTA and PGA with LPGA and lump three soccer competitions
+together. **League order follows the feed's own order** — stable on
+purpose; sorting by "has a live game" would move leagues under the
+viewer's fingers.
+
+Discoverability is one affordance per axis: a **league rail** down the
+right edge (pip per league, current lit and widened) for vertical, and the
+header's **league-relative** N/M counter for horizontal.
+
+### Panels replaced the contested view slot (2026-08-01)
+
+`view` used to be `0=PINNED / 1=TICKER` where **slot 0 was contested** —
+favourite team and pinned golfer both wanted it and whichever lost became
+*unreachable*, and `tick()` force-set `view=1` on top of that. That is what
+hid the golfer view. **Every panel with data is now its own entry in
+`self.panels` and gets its own turn**, so nothing shares a slot and a
+future pinned thing cannot hide an existing one.
+
+### Auto-cycle shows only STARTED games
+
+A board that spends its time on things that have not happened yet is a
+schedule, not a scoreboard. Today that was **40 of 54 events scheduled**;
+the auto-cycle visits only live and finished ones, cutting a lap from ~4
+minutes to ~1. **Manual browsing still reaches scheduled games.** Falls
+back to everything if nothing has started.
+
+### fit_person() vs fit_text()
+
+`fit_text` drops whole trailing words — right for a headline, **wrong for a
+name**: "T. POSTARNAKOVA" became "T.", keeping the least informative part.
+`fit_person()` tries the **surname** before cutting anything. Use it for
+any human name.
+
 **Select-to-expand**: `rotate` expands the event under the cursor into a
 full-detail view, `drop` (or `rotate` again) returns to the ticker at the
 same position. Browsing while expanded stays expanded, and auto-advance is
