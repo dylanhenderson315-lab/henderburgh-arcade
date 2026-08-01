@@ -4872,8 +4872,12 @@ class FlightEngine(Browsable):
         # generic "FLIGHTS" label, and the accent rule takes the altitude
         # band colour so the band reads before any text does.
         ident = (ac.get("ident") or "UNKNOWN")[:8]
+        # A notable tag replaces the position counter in the header: what
+        # makes this aircraft worth noticing is more useful than which
+        # index it is, and the dots at the bottom already show position.
+        note = ac.get("notable")
         draw_header(buf, ident, self.pulse.mix(col),
-                    right_tag=f"{self.cur + 1}/{len(aircraft)}",
+                    right_tag=(note[0] if note else f"{self.cur + 1}/{len(aircraft)}"),
                     stale=bool(self.data.get("age") and self.data["age"] > 60))
 
         # Heading-oriented icon, the visual centerpiece -- colour-coded by
