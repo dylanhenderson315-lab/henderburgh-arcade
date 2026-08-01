@@ -614,6 +614,54 @@ Related and already fixed: the render loop used to freeze for seconds
 whenever the panel went away (no DDP socket timeout) — see the self-audit
 section below.
 
+### Sports coverage — UNIVERSAL as of 2026-08-01
+
+Sports is no longer 7 configured leagues. `sports.FEED.get_universal()`
+reads **one** endpoint — `site.api.espn.com/apis/v2/scoreboard/header`,
+the one behind espn.com's own scoreboard bar — which returned **43 events
+across 11 leagues in 7 sports in a single request**: golf (PGA + LPGA),
+MLB, WNBA, three soccer competitions, PFL, PLL lacrosse, ATP and WTA.
+
+**Do NOT replace this with per-league polling.** ESPN publishes **338
+sport/league slugs** (enumerated from `sports.core.api.espn.com/v2/sports`);
+covering them individually is exactly the volume risk below. This is one
+request no matter how many leagues are live — it *reduced* the sports
+request rate while multiplying coverage.
+
+**Absence is free and that is the design.** ESPN omits a league with
+nothing on, so there is no "no games today" state to filter. Never add an
+empty-league placeholder back.
+
+**Payload shapes are NOT uniform across sports** — verified against a real
+payload, and this is the trap:
+- MLB puts baserunners at the **event top level** (`onFirst`/`outsText`),
+  *not* nested in `situation` the way the per-league endpoint does.
+- `status` here is a plain **string** and `summary` is display text
+  ("Final", "FT", "Round 3 - In Progress"); the per-league API nests both
+  under `status.type`.
+- Golf/tennis competitors are **athletes** with `place` / `score` ("-10") /
+  `status.thru`, not teams with numeric scores. Golf arrives as a real
+  25-deep leaderboard; the dedicated golf endpoint has the **full 147-player
+  field** if more depth is ever needed.
+- Tennis carries `linescores`, `tournamentSeed` and completed-match
+  `notes[]`; soccer carries `form`; MMA carries `cardSegment`,
+  `matchNumber` and a weight class in `competitionType`.
+
+**Select-to-expand**: `rotate` expands the event under the cursor into a
+full-detail view, `drop` (or `rotate` again) returns to the ticker at the
+same position. Browsing while expanded stays expanded, and auto-advance is
+suspended there. The detail view shares GAME DAY's `draw_event_frame()` —
+one "this is a whole event" language, not a third style.
+
+**Two layout rules this exposed, worth keeping:**
+- **String scores must not be drawn at scale 2.** Tennis set scores are
+  126px at scale 2 on a 64px panel; they drop to scale 1 on their own line
+  and are never truncated (a clipped set score is *wrong*, not smaller).
+- **The detail view lays out with a Y-CURSOR, not fixed rows.** What each
+  sport provides varies, and fixed offsets collided the moment content
+  changed — the second competitor's record landed on the venue line in
+  both tennis and MMA.
+
 ### ESPN request volume — MITIGATED 2026-07-31 (was the top open risk)
 
 `ambient` is designed to run for hours, which made a flat 20s poll per
@@ -667,6 +715,9 @@ production device this multiplies by unit count; see `PRODUCTION.md`.
 5. **`@` was silently dropped from the sports tape** — fifth instance of
    the uppercase-only-font bug class. `"AWAY 3 @ HOME 5"` rendered as
    `"AWAY 3  HOME 5"`, losing the home/away distinction.
+6b. **Tennis tiebreak brackets were silently dropped** — the EIGHTH
+   instance. `"7-6(7-5)"` rendered as `"7-67-5"`, a different and
+   plausible-looking score. `(` and `)` added to `_FONT3x5`.
 6. **`&` was silently dropped from NFL down-and-distance** — the SEVENTH
    instance, and it had already shipped. ESPN's `downDistanceText` is
    literally `"3RD & 7"`, so the sports mode rendered `"3RD  7"`. The glyph
