@@ -311,6 +311,44 @@ def draw_divider(buf, y, color=(26, 30, 40), inset=2):
         put_px(buf, x, y, color)
 
 
+class Pulse:
+    """Shared "something just changed" flash.
+
+    Sports had a bespoke scoring flash first and it set the quality bar;
+    this generalises exactly that behaviour so every mode marks new
+    content the same way instead of silently swapping a value. One
+    definition means the flash rate and feel cannot drift between modes.
+
+    Usage: call note() every tick with a value that identifies the current
+    content (a score, a headline, a post id, a rounded temperature). The
+    FIRST value seen never flashes -- otherwise every mode would flash on
+    arrival, which trains you to ignore it.
+    """
+
+    __slots__ = ("ticks", "t", "_key")
+
+    def __init__(self, ticks=14):
+        self.ticks = ticks
+        self.t = 0
+        self._key = None
+
+    def note(self, key):
+        if self._key is not None and key != self._key and key is not None:
+            self.t = self.ticks
+        self._key = key
+        if self.t > 0:
+            self.t -= 1
+
+    @property
+    def on(self):
+        """Blink rather than a solid hold -- a static highlight reads as a
+        colour choice, a blinking one reads as an event."""
+        return self.t > 0 and (self.t // 2) % 2 == 0
+
+    def mix(self, color, flash=(255, 255, 255)):
+        return flash if self.on else color
+
+
 def draw_dots(buf, y, n, cur, on=(150, 160, 185), off=(38, 42, 54), cap=10):
     """Position indicator shared by every rotating mode."""
     n = min(n, cap)
@@ -4543,6 +4581,7 @@ class FlightEngine:
         self.hold = 0
         self.cycling = True
         self.ticks = 0
+        self.pulse = Pulse()
 
     # ---- input -----------------------------------------------------------
     def has_content(self):
@@ -4571,7 +4610,11 @@ class FlightEngine:
     def tick(self):
         self.ticks += 1
         self.data = flights.FEED.get()
-        n = len(self.data.get("aircraft") or [])
+        ac_list = self.data.get("aircraft") or []
+        # Flash on the NEAREST aircraft changing -- that is the "something
+        # new is overhead" moment, not merely the list reordering.
+        self.pulse.note(ac_list[0]["ident"] if ac_list else None)
+        n = len(ac_list)
         if n:
             self.cur %= n
         if self.cycling and n > 1:
@@ -4679,7 +4722,7 @@ class FlightEngine:
         # generic "FLIGHTS" label, and the accent rule takes the altitude
         # band colour so the band reads before any text does.
         ident = (ac.get("ident") or "UNKNOWN")[:8]
-        draw_header(buf, ident, col,
+        draw_header(buf, ident, self.pulse.mix(col),
                     right_tag=f"{self.cur + 1}/{len(aircraft)}",
                     stale=bool(self.data.get("age") and self.data["age"] > 60))
 
@@ -5071,6 +5114,7 @@ class NewsEngine:
         self.ticks = 0
         self.scroll = 0.0
         self._last_headline_key = None
+        self.pulse = Pulse()
 
     # ---- input -----------------------------------------------------------
     def has_content(self):
@@ -5107,6 +5151,9 @@ class NewsEngine:
                 self.cur = (self.cur + 1) % n
         self.score = n
 
+        heads = self.data.get("headlines") or []
+        self.pulse.note(heads[0] if heads else None)   # newest headline arriving
+
         key = (self.cur, n)
         if key != self._last_headline_key:
             self._last_headline_key = key
@@ -5138,7 +5185,7 @@ class NewsEngine:
         # below runs the full set at a different rate so the two are
         # independent reads rather than a race.
         draw_marquee(buf, 18, headlines[self.cur % len(headlines)],
-                     self.HEADLINE, self.scroll, scale=2, gap="     ")
+                     self.pulse.mix(self.HEADLINE), self.scroll, scale=2, gap="     ")
 
         draw_dots(buf, 34, len(headlines), self.cur, on=accent)
         draw_divider(buf, 38)
@@ -5197,6 +5244,7 @@ class WeatherEngine:
                     "configured": False, "age": None, "err": None}
         self.cur_alert = 0
         self.hold = 0
+        self.pulse = Pulse()
         self.cycling = True
         self.ticks = 0
         self.scroll = 0.0
@@ -5226,6 +5274,11 @@ class WeatherEngine:
     def tick(self):
         self.ticks += 1
         self.data = weather.FEED.get()
+        # Flash on the temperature actually changing. Rounded to whole
+        # degrees first: flashing on raw float jitter would fire constantly
+        # and mean nothing.
+        c = (self.data.get("conditions") or {}).get("temp_c")
+        self.pulse.note(round(c_to_f(c)) if isinstance(c, (int, float)) else None)
         self.scroll += 0.5
         alerts = self.data.get("alerts") or []
         if alerts:
@@ -5289,7 +5342,8 @@ class WeatherEngine:
         # Actual temperature is the hero -- scale=2 and the only bright
         # colour on the screen.
         if temp_c is not None:
-            draw_text_centered(buf, 12, f"{c_to_f(temp_c):.0f}F", (255, 235, 180), scale=2)
+            draw_text_centered(buf, 12, f"{c_to_f(temp_c):.0f}F",
+                               self.pulse.mix((255, 235, 180)), scale=2)
         else:
             draw_text_centered(buf, 14, "--F", self.INK_DIM, scale=2)
 
@@ -5514,6 +5568,7 @@ class BlogEngine:
         self.hold = 0
         self.cycling = True
         self.ticks = 0
+        self.pulse = Pulse()
 
     def has_content(self):
         return bool(self.data.get("posts"))
@@ -5539,7 +5594,9 @@ class BlogEngine:
     def tick(self):
         self.ticks += 1
         self.data = blog.FEED.get()
-        n = len(self.data.get("posts") or [])
+        posts = self.data.get("posts") or []
+        self.pulse.note(posts[0]["id"] if posts else None)   # newest post arriving
+        n = len(posts)
         if n:
             self.cur %= n
         if self.cycling and n > 1:
@@ -5600,7 +5657,7 @@ class BlogEngine:
         name_lines = self._wrap(p["name"], WIDTH - 6, 2)
         y = 8
         for ln in name_lines:
-            draw_text_centered(buf, y, ln, self.NAME)
+            draw_text_centered(buf, y, ln, self.pulse.mix(self.NAME))
             y += 7
 
         y += 2
