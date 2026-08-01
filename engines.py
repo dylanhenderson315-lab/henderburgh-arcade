@@ -311,6 +311,154 @@ def draw_divider(buf, y, color=(26, 30, 40), inset=2):
         put_px(buf, x, y, color)
 
 
+class Scroller:
+    """Shared browse control for ANY mode with a sequence of items.
+
+    Every competitor in this category is push-only: you watch what it
+    decides to show, on its timing. This is the piece that lets someone
+    actually browse, and it is deliberately ONE control scheme shared by
+    every mode rather than a different gesture per mode.
+
+    The interaction is the standard key-repeat model everybody already
+    knows from holding an arrow key in a text field, so it needs no
+    instructions:
+
+        tap left/right   -> step exactly one item, immediately
+        hold left/right  -> step once, brief delay, then repeat with
+                            ACCELERATION so a long hold skims fast
+        release          -> stop, then auto-advance stays paused for a
+                            few seconds so the timer doesn't immediately
+                            yank the screen away from where you browsed to
+
+    Wiring: the phone remote and control page already send
+    press/release (see bindHold in remote.html), so this needs no new
+    hardware and no new gesture -- it maps onto the controls that exist.
+
+    IMPORTANT interaction with the existing client: bindHold ALSO fires a
+    repeating input() every ~110ms while held. If that were honoured on
+    top of this class's own repeat, a hold would double-step. So input()
+    is ignored while a press is active (see `tap`), and the server-side
+    tick clock is the single source of repeat timing -- which also makes
+    the acceleration curve independent of client repeat rate.
+    """
+
+    __slots__ = ("dir", "held", "hold_t", "since_repeat", "pause_t",
+                 "delay", "fast_after", "slow_every", "fast_every", "pause")
+
+    def __init__(self, tick_rate=0.05):
+        per_s = max(1, int(round(1.0 / max(0.001, tick_rate))))
+        self.delay = max(2, int(per_s * 0.35))        # ~0.35s before repeat starts
+        self.fast_after = max(1, int(per_s * 1.2))    # ~1.2s held -> full speed
+        self.slow_every = max(1, int(per_s * 0.28))   # initial repeat ~3.5/s
+        self.fast_every = 1                            # accelerated: one per tick
+        self.pause = max(1, int(per_s * 4.0))         # ~4s of manual control after input
+        self.dir = 1
+        self.held = False
+        self.hold_t = 0
+        self.since_repeat = 0
+        self.pause_t = 0
+
+    # ---- input ---------------------------------------------------------
+    def press(self, direction):
+        """Held down. Returns steps to apply right now (always 1: the
+        first step must feel instant, not wait for the repeat delay)."""
+        self.dir = direction
+        self.held = True
+        self.hold_t = 0
+        self.since_repeat = 0
+        self.pause_t = self.pause
+        return 1
+
+    def release(self):
+        self.held = False
+        self.hold_t = 0
+        self.pause_t = self.pause      # restart the pause from the moment of release
+
+    def tap(self, direction):
+        """A plain input() with no press/release around it. Ignored while
+        a press is active so the client's own repeat can't double-step."""
+        if self.held:
+            return 0
+        self.dir = direction
+        self.pause_t = self.pause
+        return 1
+
+    # ---- per-tick ------------------------------------------------------
+    def tick(self):
+        """Steps to apply this tick from an ongoing hold. Call once per
+        engine tick, before the auto-advance check."""
+        if self.pause_t > 0:
+            self.pause_t -= 1
+        if not self.held:
+            return 0
+        self.hold_t += 1
+        if self.hold_t < self.delay:
+            return 0
+        # Accelerate: ease the repeat interval from slow to fast over the
+        # hold, so a short hold nudges and a long hold genuinely skims.
+        k = min(1.0, (self.hold_t - self.delay) / float(max(1, self.fast_after)))
+        every = max(self.fast_every,
+                    int(round(self.slow_every + (self.fast_every - self.slow_every) * k)))
+        self.since_repeat += 1
+        if self.since_repeat >= every:
+            self.since_repeat = 0
+            return 1
+        return 0
+
+    @property
+    def auto_ok(self):
+        """Whether the mode's own auto-advance timer may run. False while
+        held and for `pause` ticks after the last manual input."""
+        return not self.held and self.pause_t <= 0
+
+
+class Browsable:
+    """Mixin that gives an engine the shared browse control.
+
+    An engine opts in by calling _init_scroll() in reset(), implementing
+    _step(direction), calling _scroll_tick() at the top of tick(), and
+    gating its own auto-advance on `self.browse.auto_ok`. That is the
+    whole contract -- any future sequence mode should follow it so the
+    control scheme stays identical system-wide.
+    """
+
+    def _init_scroll(self):
+        # NOT named `scroll`: NewsEngine/TickerEngine already use
+        # self.scroll as a marquee pixel offset (a float). Colliding
+        # with that made press() call .press on a float.
+        self.browse = Scroller(getattr(self, "tick_rate", 0.05))
+
+    def _step(self, direction):                      # pragma: no cover - overridden
+        raise NotImplementedError
+
+    # Held-button entry points. arcade_server routes press/release here
+    # when an engine defines them (see send_press/send_release).
+    def press(self, cmd):
+        d = {"left": -1, "right": 1}.get(cmd)
+        if d is None:
+            return self.input(cmd)
+        for _ in range(self.browse.press(d)):
+            self._step(d)
+
+    def release(self, cmd):
+        if cmd in ("left", "right"):
+            self.browse.release()
+
+    def _browse_input(self, cmd):
+        """Handle left/right from a plain input(). Returns True if it was
+        a browse command and has been dealt with."""
+        d = {"left": -1, "right": 1}.get(cmd)
+        if d is None:
+            return False
+        for _ in range(self.browse.tap(d)):
+            self._step(d)
+        return True
+
+    def _scroll_tick(self):
+        for _ in range(self.browse.tick()):
+            self._step(self.browse.dir)
+
+
 class Pulse:
     """Shared "something just changed" flash.
 
@@ -4068,7 +4216,7 @@ class Game2048Engine:
 # a bright flourish before it cuts to the menu. Any input skips straight
 # there, so it never gets in the way of someone who's already seen it.
 # =============================================================================
-class TickerEngine:
+class TickerEngine(Browsable):
     """Stock + crypto ticker.
 
     The first non-game mode, and deliberately built to prove the shared
@@ -4111,6 +4259,7 @@ class TickerEngine:
         self.scroll = 0.0
         self.cycling = True
         self.ticks = 0
+        self._init_scroll()
 
     def has_content(self):
         """Ticker is not in AmbientEngine.SEQUENCE today, but every other
@@ -4125,16 +4274,15 @@ class TickerEngine:
         return bool(self.rows)
 
     # ---- input ---------------------------------------------------------
+    def _step(self, direction):
+        if self.rows:
+            self.cur = (self.cur + direction) % len(self.rows)
+            self.hold = 0
+
     def input(self, cmd):
-        if not self.rows:
+        if self._browse_input(cmd):
             return
-        if cmd == "left":
-            self.cur = (self.cur - 1) % len(self.rows)
-            self.hold = 0
-        elif cmd == "right":
-            self.cur = (self.cur + 1) % len(self.rows)
-            self.hold = 0
-        elif cmd in ("rotate", "drop"):
+        if cmd in ("rotate", "drop"):
             self.cycling = not self.cycling      # park on one symbol
 
     def auto(self):
@@ -4143,11 +4291,12 @@ class TickerEngine:
     # ---- simulation ----------------------------------------------------
     def tick(self):
         self.ticks += 1
+        self._scroll_tick()
         self.rows, self.age, self.err = market.FEED.get()
         if self.rows:
             self.cur %= len(self.rows)
         self.scroll += 0.5
-        if self.cycling and self.rows:
+        if self.cycling and self.rows and self.browse.auto_ok:
             self.hold += 1
             if self.hold >= self.SPOTLIGHT_TICKS:
                 self.hold = 0
@@ -4515,7 +4664,7 @@ class SatelliteEngine:
         return self._frame_pass() if self.view == 0 else self._frame_live()
 
 
-class FlightEngine:
+class FlightEngine(Browsable):
     """Live ADS-B flight tracker.
 
     Same discipline as Ticker/Satellite: no I/O in this class. Reads
@@ -4582,6 +4731,7 @@ class FlightEngine:
         self.cycling = True
         self.ticks = 0
         self.pulse = Pulse()
+        self._init_scroll()
 
     # ---- input -----------------------------------------------------------
     def has_content(self):
@@ -4590,17 +4740,16 @@ class FlightEngine:
         dwell on for 20 seconds in a rotation."""
         return bool(self.data.get("configured")) and bool(self.data.get("aircraft"))
 
-    def input(self, cmd):
+    def _step(self, direction):
         n = len(self.data.get("aircraft") or [])
-        if not n:
+        if n:
+            self.cur = (self.cur + direction) % n
+            self.hold = 0
+
+    def input(self, cmd):
+        if self._browse_input(cmd):
             return
-        if cmd == "left":
-            self.cur = (self.cur - 1) % n
-            self.hold = 0
-        elif cmd == "right":
-            self.cur = (self.cur + 1) % n
-            self.hold = 0
-        elif cmd in ("rotate", "drop"):
+        if cmd in ("rotate", "drop"):
             self.cycling = not self.cycling
 
     def auto(self):
@@ -4609,6 +4758,7 @@ class FlightEngine:
     # ---- simulation --------------------------------------------------------
     def tick(self):
         self.ticks += 1
+        self._scroll_tick()
         self.data = flights.FEED.get()
         ac_list = self.data.get("aircraft") or []
         # Flash on the NEAREST aircraft changing -- that is the "something
@@ -4617,7 +4767,7 @@ class FlightEngine:
         n = len(ac_list)
         if n:
             self.cur %= n
-        if self.cycling and n > 1:
+        if self.cycling and n > 1 and self.browse.auto_ok:
             self.hold += 1
             if self.hold >= self.VIEW_TICKS:
                 self.hold = 0
@@ -4790,7 +4940,7 @@ class FlightEngine:
         return bytes(buf)
 
 
-class SportsEngine:
+class SportsEngine(Browsable):
     """Live sports scoreboard (NFL/NBA/MLB/NHL via ESPN).
 
     Same discipline as Ticker/Satellite/Flights: no I/O in this class at
@@ -4856,7 +5006,8 @@ class SportsEngine:
         self._trans_from = None
         self._trans_i = 0
         self.hold = 0
-        self.cur = 0              # index into games, for TICKER view
+        self.cur = 0                     # index into games, for TICKER view
+        self._init_scroll()
         self.cycling = True
         self.ticks = 0
         self.scroll = 0.0
@@ -4872,23 +5023,22 @@ class SportsEngine:
         exactly when this should be skipped."""
         return bool(self.data.get("games"))
 
-    def input(self, cmd):
+    def _step(self, direction):
+        """In TICKER, step through games. In PINNED (which shows exactly
+        one game) there is no list to browse, so the same gesture flips
+        between the two views -- the nearest thing to "next" that view
+        has."""
         games = self.data.get("games") or []
-        if cmd == "left":
-            if self.view == 1 and games:
-                self.cur = (self.cur - 1) % len(games)
-                self.hold = 0
-            elif self.data.get("favorite"):
-                self.view = (self.view - 1) % 2
-                self.hold = 0
-        elif cmd == "right":
-            if self.view == 1 and games:
-                self.cur = (self.cur + 1) % len(games)
-                self.hold = 0
-            elif self.data.get("favorite"):
-                self.view = (self.view + 1) % 2
-                self.hold = 0
-        elif cmd in ("rotate", "drop"):
+        if self.view == 1 and games:
+            self.cur = (self.cur + direction) % len(games)
+        elif self.data.get("favorite"):
+            self.view = (self.view + direction) % 2
+        self.hold = 0
+
+    def input(self, cmd):
+        if self._browse_input(cmd):
+            return
+        if cmd in ("rotate", "drop"):
             self.cycling = not self.cycling
 
     def auto(self):
@@ -4897,6 +5047,7 @@ class SportsEngine:
     # ---- simulation --------------------------------------------------------
     def tick(self):
         self.ticks += 1
+        self._scroll_tick()
         self.data = sports.FEED.get()
         games = self.data.get("games") or []
         # Stay on the ticker when PINNED has nothing real to draw: either
@@ -4932,7 +5083,7 @@ class SportsEngine:
         if self.score_flash > 0:
             self.score_flash -= 1
 
-        if self.cycling:
+        if self.cycling and self.browse.auto_ok:
             self.hold += 1
             limit = self.VIEW_TICKS if self.view == 0 else self.SPOTLIGHT_TICKS
             if self.hold >= limit:
@@ -5189,7 +5340,7 @@ class SportsEngine:
         return frame
 
 
-class NewsEngine:
+class NewsEngine(Browsable):
     """RSS headline ticker.
 
     Same discipline as every other data mode: no I/O in this class, reads
@@ -5230,22 +5381,22 @@ class NewsEngine:
         self.scroll = 0.0
         self._last_headline_key = None
         self.pulse = Pulse()
+        self._init_scroll()
 
     # ---- input -----------------------------------------------------------
     def has_content(self):
         return bool(self.data.get("headlines"))
 
-    def input(self, cmd):
+    def _step(self, direction):
         n = len(self.data.get("headlines") or [])
-        if not n:
+        if n:
+            self.cur = (self.cur + direction) % n
+            self.hold = 0
+
+    def input(self, cmd):
+        if self._browse_input(cmd):
             return
-        if cmd == "left":
-            self.cur = (self.cur - 1) % n
-            self.hold = 0
-        elif cmd == "right":
-            self.cur = (self.cur + 1) % n
-            self.hold = 0
-        elif cmd in ("rotate", "drop"):
+        if cmd in ("rotate", "drop"):
             self.cycling = not self.cycling
 
     def auto(self):
@@ -5254,12 +5405,13 @@ class NewsEngine:
     # ---- simulation --------------------------------------------------------
     def tick(self):
         self.ticks += 1
+        self._scroll_tick()
         self.data = news.FEED.get()
         n = len(self.data.get("headlines") or [])
         if n:
             self.cur %= n
         self.scroll += 0.5
-        if self.cycling and n > 1:
+        if self.cycling and n > 1 and self.browse.auto_ok:
             self.hold += 1
             if self.hold >= self.SPOTLIGHT_TICKS:
                 self.hold = 0
@@ -5713,7 +5865,7 @@ class ClockEngine:
         return f"{label} {hh}:{time.strftime('%M', t)}{time.strftime('%p', t)[0]}"
 
 
-class BlogEngine:
+class BlogEngine(Browsable):
     """Calm idle mode showing the latest posts from the HENDERBURGH site.
 
     Deliberately the quietest mode in the project: no scrolling, no
@@ -5751,22 +5903,22 @@ class BlogEngine:
         self.cycling = True
         self.ticks = 0
         self.pulse = Pulse()
+        self._init_scroll()
 
     def has_content(self):
         return bool(self.data.get("posts"))
 
     # ---- input -----------------------------------------------------------
-    def input(self, cmd):
+    def _step(self, direction):
         n = len(self.data.get("posts") or [])
-        if not n:
+        if n:
+            self.cur = (self.cur + direction) % n
+            self.hold = 0
+
+    def input(self, cmd):
+        if self._browse_input(cmd):
             return
-        if cmd == "left":
-            self.cur = (self.cur - 1) % n
-            self.hold = 0
-        elif cmd == "right":
-            self.cur = (self.cur + 1) % n
-            self.hold = 0
-        elif cmd in ("rotate", "drop"):
+        if cmd in ("rotate", "drop"):
             self.cycling = not self.cycling
 
     def auto(self):
@@ -5775,13 +5927,14 @@ class BlogEngine:
     # ---- simulation --------------------------------------------------------
     def tick(self):
         self.ticks += 1
+        self._scroll_tick()
         self.data = blog.FEED.get()
         posts = self.data.get("posts") or []
         self.pulse.note(posts[0]["id"] if posts else None)   # newest post arriving
         n = len(posts)
         if n:
             self.cur %= n
-        if self.cycling and n > 1:
+        if self.cycling and n > 1 and self.browse.auto_ok:
             self.hold += 1
             if self.hold >= self.DWELL_TICKS:
                 self.hold = 0
@@ -5857,7 +6010,7 @@ class BlogEngine:
         return bytes(buf)
 
 
-class AmbientEngine:
+class AmbientEngine(Browsable):
     """Master rotation: flights -> ISS -> weather -> sports -> news, on a
     loop, skipping anything that has nothing to show right now.
 
@@ -5918,6 +6071,7 @@ class AmbientEngine:
         self.cycling = True
         self._trans_from = None
         self._trans_i = 0
+        self._init_scroll()
 
     @property
     def current(self):
@@ -5951,14 +6105,18 @@ class AmbientEngine:
                 return
 
     # ---- input -----------------------------------------------------------
+    def _step(self, direction):
+        self._advance(direction)
+        self.hold = 0
+
     def input(self, cmd):
-        if cmd == "left":
-            self._advance(-1)
-            self.hold = 0
-        elif cmd == "right":
-            self._advance(1)
-            self.hold = 0
-        elif cmd in ("rotate", "drop"):
+        # left/right browse the ROTATION itself (flights -> weather -> ...),
+        # one level up from the sub-mode's own list. Same gesture, same
+        # accelerating hold -- the level it acts on is just whichever is
+        # showing.
+        if self._browse_input(cmd):
+            return
+        if cmd in ("rotate", "drop"):
             self.cycling = not self.cycling
         else:
             self.current.input(cmd)     # anything else belongs to the sub-mode
@@ -5969,6 +6127,7 @@ class AmbientEngine:
     # ---- simulation --------------------------------------------------------
     def tick(self):
         self.ticks += 1
+        self._scroll_tick()
         for e in self.engines.values():
             e.tick()                   # keeps every feed warm; see class docstring
 
@@ -5983,7 +6142,7 @@ class AmbientEngine:
             self._advance(1)
             self.hold = 0
 
-        if self.cycling and len(avail) > 1:
+        if self.cycling and len(avail) > 1 and self.browse.auto_ok:
             self.hold += 1
             if self.hold >= self.DWELL_TICKS:
                 self.hold = 0
