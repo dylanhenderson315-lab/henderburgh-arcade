@@ -176,6 +176,42 @@ appends them to the menu automatically.
   (chosen over distance-band coloring: distance is already shown as text,
   altitude wasn't color-coded anywhere, and altitude is the more standard
   "what kind of traffic is this" signal on real ATC displays).
+
+  **Flight phase — CLIMB / DESCEND / CRUISE** (`flights._phase()`,
+  2026-08-02). Verified against real ORD traffic (MYR had zero aircraft
+  in range at build time; ORD confirmed the payload shape and value
+  ranges, the classification applies wherever aircraft are tracked).
+  - `baro_rate`/`geom_rate`: **never both populated on the same real
+    aircraft** — one carries a value, the other is null. `baro_rate`
+    preferred, `geom_rate` the fallback; neither present → phase is
+    `None`, not guessed.
+  - **Threshold is ±300fpm, not "any nonzero value"** — a real level
+    aircraft rarely reports exactly 0 (one showed -64fpm while
+    unambiguously not descending). Real sustained climb/descent observed
+    at 1500–3700fpm. Level-below-cruise stays `None`: genuinely
+    ambiguous (pattern? holding? transition?).
+  - **Cruise floor is 18,000ft — the real FAA Class A airspace floor**,
+    not invented. At or above it, altitude alone settles CRUISE
+    regardless of rate.
+  - **Feeds notability narrowly, not as a new tier**: LOW (already
+    alt≤3000ft + dist≤12nm) escalates from rank 2 to rank 3 — same as a
+    heavy or helicopter — only when phase confirms active climb/descend,
+    not merely coincidental lowness. Phase does **not** get its own
+    ranking or reorder the list on its own; near any 40nm radius enough
+    aircraft are always transitioning that using phase as a primary sort
+    key would make ordering noisy rather than useful.
+  - Visual: `draw_trend_arrow` (promoted to module level, shared with
+    baseball's half-inning indicator — one arrow convention, not two) at
+    x=3 in the icon's vertical band, the one horizontal margin that stays
+    clear of the plane icon's rotation footprint at every heading.
+    Nothing drawn for CRUISE or `None` — same "no badge for the mundane
+    case" rule the notable tag already follows.
+  - **Honest gap**: verified pixel-perfect against real captured ORD
+    data (17 aircraft, real CLIMB and DESCEND cases dumped and checked);
+    not yet observed on the real panel against genuine local MYR traffic,
+    because none existed at build time. The LOW+phase escalation
+    specifically wasn't observed live either — its two component signals
+    were each verified independently.
 - **sports** (`sports.py`/`SportsEngine`, 2026-07-30, expanded same day) —
   NFL/NBA/MLB/NHL/EPL/NCAAF/NCAAB scores via ESPN's free undocumented site
   API. Pinned favorite team (full-screen score, scoring-flash animation,
