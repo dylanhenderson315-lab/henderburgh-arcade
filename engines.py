@@ -6298,6 +6298,61 @@ class SportsEngine(Browsable):
         elif ev.get("note"):
             draw_text_centered(buf, 57, fit_text(ev["note"], WIDTH - 6), self.INK_DIM)
 
+    def _draw_movement(self, buf, x, y, move, color_up, color_dn):
+        """Small arrow for leaderboard movement: negative = moved UP
+        toward the lead (ESPN's sign convention, verified against a real
+        final-round leaderboard -- a player who jumped from ~63rd to 3rd
+        showed movement=-60). Zero draws nothing; a flat position is not
+        worth a glyph."""
+        if not move:
+            return
+        up = move < 0
+        c = color_up if up else color_dn
+        if up:
+            pts = ((1, 0), (0, 2), (1, 1), (2, 2))
+        else:
+            pts = ((1, 2), (0, 0), (1, 1), (2, 0))
+        for dx, dy in pts:
+            put_px(buf, x + dx, y + dy, c)
+
+    def _render_golf(self, buf, ev):
+        """Golf. Deeper leaderboard than the generic fallback (6 rows
+        instead of 4) with a movement arrow per player -- ESPN tracks
+        exactly this (`movement`, verified negative = climbed the
+        leaderboard) and it was being computed nowhere and shown nowhere.
+
+        `thru` is holes completed in the CURRENT round, not the whole
+        tournament -- a player showing "F" has finished today's round,
+        which is what the leader's thru drives the footer from.
+        """
+        accent = self._sport_accent(ev)
+        pos, total = self._league_position(ev)
+        draw_header(buf, ev["league_name"] or ev["league"], accent,
+                    right_tag=f"{pos}/{total}",
+                    stale=bool(self.data.get("age") and self.data["age"] > 300))
+        self._draw_league_rail(buf, ev)
+
+        comps = ev["competitors"]
+        rows = 6
+        for i, c in enumerate(comps[:rows]):
+            y = 10 + i * 8
+            pos_txt = str(c.get("place") or i + 1)
+            draw_text3x5(buf, 2, y, fit_text(pos_txt, 12), self.INK_DIM)
+            self._draw_movement(buf, 14, y, c.get("movement"), self.WIN, self.LOSE)
+            name_w = WIDTH - 2 - 12 - 5 - 20
+            draw_text3x5(buf, 19, y, fit_person(c.get("abbr"), name_w), self.HERO_INK)
+            sc = c.get("score") or "-"
+            draw_text3x5(buf, WIDTH - 2 - text_w(sc), y,
+                         sc, self.WIN if str(sc).startswith("-") else self.INK)
+
+        leader_thru = comps[0].get("thru") if comps else None
+        foot = f"THRU {leader_thru}" if leader_thru else (ev.get("detail") or "")
+        # y=59 is the LAST row that fits a scale=1 glyph (5px tall on a
+        # 64px panel) -- one row lower clipped the bottom pixel of every
+        # descender, caught by the bounds sweep, not by eye.
+        draw_divider(buf, 58)
+        draw_text_centered(buf, 59, fit_text(foot, WIDTH - 6), self.INK_DIM)
+
     # Populated as each sport gets its own renderer. Empty here means
     # every sport still takes the generic path, so this step changes
     # nothing on screen -- it only creates the seam.
@@ -6305,6 +6360,7 @@ class SportsEngine(Browsable):
         "baseball": _render_baseball,
         "mma": _render_mma,
         "soccer": _render_soccer,
+        "golf": _render_golf,
     }
 
     def _frame_event_detail(self, ev):
