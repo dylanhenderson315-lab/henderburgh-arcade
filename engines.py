@@ -467,6 +467,13 @@ class Browsable:
             self._step(self.browse.dir)
 
 
+# Where GAME DAY hands the panel back to when its event ends. Assigned
+# from arcade_server.DEFAULT_MODE at import so the two can never drift.
+RESTING_MODE = "clock"
+
+GAMEDAY_ACCENT = (235, 45, 65)      # fight-night crimson
+GAMEDAY_GOLD = (255, 200, 70)       # the "occasion" second colour
+
 BASE_ON = (255, 226, 60)
 BASE_OFF = (46, 50, 62)
 OUT_ON = (255, 90, 80)
@@ -6636,6 +6643,7 @@ class MenuEngine:
         ("clock",    "CLOCK",    (120, 200, 255)),
         ("blog",     "BLOG",     (176, 96, 255)),
         ("ambient",  "AMBIENT",  (176, 96, 255)),
+        ("gameday",  "GAME DAY", GAMEDAY_ACCENT),
     ]
 
     def __init__(self):
@@ -6913,6 +6921,18 @@ class MenuEngine:
             block(3, 4, 3, 1, w)
             put_px(buf, x0 + 2, y0 + 6, c)      # tail
             put_px(buf, x0 + 2, y0 + 7, c)
+        elif gid == "gameday":
+            # A full border with a filled centre -- the icon IS the mode's
+            # identity (see GameDayEngine._occasion_frame): every other
+            # mode's icon is a subject, this one is the FRAME, because a
+            # takeover is about the whole panel rather than a subject.
+            for xx in range(0, 10):
+                put_px(buf, x0 + xx, y0 + 0, c)
+                put_px(buf, x0 + xx, y0 + 9, c)
+            for yy in range(0, 10):
+                put_px(buf, x0 + 0, y0 + yy, c)
+                put_px(buf, x0 + 9, y0 + yy, c)
+            block(3, 3, 4, 4, w)
         elif gid == "ambient":
             # A rotation arrow around a dot: "these modes cycle" -- distinct
             # from every single-subject icon since this one IS the loop.
@@ -8692,14 +8712,6 @@ class TicCartEngine:
 # takeover, and that comes for free: arcade_server composites the alert
 # over whatever the current mode drew, after this engine has run.
 # =============================================================================
-# Where GAME DAY hands the panel back to when its event ends. Assigned
-# from arcade_server.DEFAULT_MODE at import so the two can never drift.
-RESTING_MODE = "clock"
-
-GAMEDAY_ACCENT = (235, 45, 65)      # fight-night crimson
-GAMEDAY_GOLD = (255, 200, 70)       # the "occasion" second colour
-
-
 class GameDayEngine(Browsable):
     """One event, given the whole panel.
 

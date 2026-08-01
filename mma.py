@@ -66,6 +66,27 @@ Also confirmed and worth not rediscovering:
     following UTC day). Guessing dates returns 0 events. The league
     `calendar` list is the authoritative schedule and is used for that.
 
+FIGHT STATISTICS (sig. strikes, takedowns, control time -- the numbers a
+broadcast graphic shows) are NOT in the scoreboard payload at all. They
+live on ESPN's other, undocumented host, `sports.core.api.espn.com`, as a
+per-fighter sub-resource:
+    .../mma/leagues/ufc/events/{event_id}/competitions/{comp_id}
+        /competitors/{athlete_id}/statistics?lang=en&region=us
+Confirmed real on 2026-07-31 against THREE states, not just one: a
+completed fight (real non-zero significant-strike/takedown/control-time
+numbers, matching a real UFC broadcast graphic field-for-field), a
+scheduled fight that has not started (every field comes back an honest
+zero/"0:00", not missing and not stale), and the live scoreboard's own
+event/competition ids (so no separate lookup is needed to build the URL).
+
+This is a genuinely different cost shape from everything else in this
+module: it is TWO calls (one per fighter) and there is no batched
+"give me both corners" version. Fetched ONLY for the fight currently on
+screen, and only while it is live or was the last one that just finished
+-- never for the whole card -- same discipline as sports.py's win
+probability (pinned team's live game only, not every game in the
+ticker).
+
 Same two standing rules as every other feed here:
   1. NEVER block the render loop -- background thread, last-good cache.
   2. NEVER invent a value -- a field ESPN does not provide comes back
@@ -169,6 +190,43 @@ def panel_text(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
+STATS_URL = ("https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc"
+            "/events/{event_id}/competitions/{comp_id}/competitors/{athlete_id}"
+            "/statistics?lang=en&region=us")
+
+# ESPN's raw stat names -> the compact broadcast-style fields this module
+# exposes. Only the ones an on-air UFC stats graphic actually shows (see
+# the module docstring) -- ESPN exposes 40+ granular strike-location
+# splits (head/body/leg x distance/clinch/ground) that are real but not
+# what belongs on a 64px panel.
+_STAT_KEYS = {
+    "sigStrikesLanded": "sig_landed",
+    "sigStrikesAttempted": "sig_att",
+    "takedownsLanded": "td_landed",
+    "takedownsAttempted": "td_att",
+    "knockDowns": "knockdowns",
+    "timeInControl": "control_time",
+}
+
+
+def _parse_stats(payload):
+    """One fighter's statistics resource -> the compact dict above.
+
+    Every value defaults to None (not 0) if ESPN's response is missing
+    the category entirely -- e.g. a fight that somehow has no `general`
+    category -- so the engine can tell "genuinely zero" (a real 0-0 fight)
+    apart from "field not provided" and render each honestly.
+    """
+    out = {v: None for v in _STAT_KEYS.values()}
+    cats = ((payload.get("splits") or {}).get("categories") or [])
+    stats = cats[0].get("stats") if cats else []
+    for s in (stats or []):
+        key = _STAT_KEYS.get(s.get("name"))
+        if key:
+            out[key] = s.get("value") if key != "control_time" else panel_text(s.get("displayValue"))
+    return out
+
+
 def _get_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
@@ -186,6 +244,8 @@ def _fighter(competitor):
             rec = r.get("summary")
             break
     return {
+        "id": competitor.get("id"),          # athlete id -- needed to fetch
+                                              # per-fighter statistics below
         "name": panel_text(ath.get("shortName") or ath.get("displayName")),
         "full": panel_text(ath.get("fullName") or ath.get("displayName")),
         "record": panel_text(rec) or None,
@@ -292,6 +352,9 @@ class UfcFeed:
     other FEED here: never blocks the caller, never invents a value, stops
     polling once nothing has read from it for IDLE_STOP."""
 
+    STATS_REFRESH_LIVE = 15.0   # a fight in progress -- numbers move fast
+    STATS_REFRESH_DONE = 600.0  # a finished fight's stats don't change once final
+
     def __init__(self):
         self._lock = threading.Lock()
         self._card = None
@@ -304,6 +367,20 @@ class UfcFeed:
         self._last_read = 0.0
         self._thread = None
         self._err = None
+        # Fight-statistics side channel. Deliberately separate polling from
+        # the card itself: stats cost TWO extra calls (one per fighter) with
+        # no batched form, so they are fetched for AT MOST one fight at a
+        # time -- whichever one the engine is currently displaying -- never
+        # the whole card. want_stats() below is how the engine declares
+        # that interest each tick.
+        self._stats_want = None      # (event_id, comp_id, [athlete_id, athlete_id], live)
+        self._stats_last_read = 0.0  # own idle clock -- NOT shared with _last_read,
+                                      # which only the card getter touches
+        self._stats_cache = {}       # fight_id -> {athlete_id: parsed stats}
+        self._stats_updated = {}     # fight_id -> epoch
+        self._stats_try = 0.0
+        self._stats_thread = None
+        self._stats_err = None
 
     def get(self):
         """{card, next_label, next_date, age, err}. Never blocks."""
@@ -320,6 +397,93 @@ class UfcFeed:
             self._last_read = now
         self._ensure_thread()
         return out
+
+    def want_stats(self, fight_id, event_id, comp_id, athlete_ids, live):
+        """Declare which fight's statistics the engine wants right now.
+
+        Called every tick with the fight actually on screen. Switching to
+        a different fight_id drops interest in the old one (its cache
+        entry is simply not refreshed further, and is evicted once it's
+        not the current or most-recent fight) -- so a viewer browsing
+        through a 14-fight card never triggers 26 fighter-stat calls, only
+        ever the one or two fights actually looked at.
+        """
+        with self._lock:
+            self._stats_want = (fight_id, event_id, comp_id, tuple(athlete_ids), live)
+            self._stats_last_read = time.time()
+        self._ensure_stats_thread()
+
+    def get_stats(self, fight_id):
+        """Cached stats for a fight, keyed by athlete id, or {} if nothing
+        has been fetched for it (yet, or ever -- e.g. a fight several
+        positions away from the one being watched). Never blocks."""
+        with self._lock:
+            self._stats_last_read = time.time()
+            return dict(self._stats_cache.get(fight_id) or {})
+
+    def _ensure_stats_thread(self):
+        with self._lock:
+            alive = self._stats_thread is not None and self._stats_thread.is_alive()
+        if not alive:
+            t = threading.Thread(target=self._run_stats, daemon=True)
+            with self._lock:
+                self._stats_thread = t
+            t.start()
+
+    def _poll_stats(self):
+        with self._lock:
+            want = self._stats_want
+        if not want:
+            return
+        fight_id, event_id, comp_id, athlete_ids, live = want
+        fetched = {}
+        for aid in athlete_ids:
+            if not aid:
+                continue
+            url = STATS_URL.format(event_id=event_id, comp_id=comp_id, athlete_id=aid)
+            fetched[aid] = _parse_stats(_get_json(url))
+        with self._lock:
+            self._stats_cache[fight_id] = fetched
+            self._stats_updated[fight_id] = time.time()
+            self._stats_err = None
+            # Keep the cache small: only the fight just fetched and
+            # whatever was fetched immediately before it (covers the
+            # moment a result view is still holding the just-finished
+            # fight while the engine has already moved its "current"
+            # pointer on).
+            if len(self._stats_cache) > 2:
+                oldest = min(self._stats_updated, key=self._stats_updated.get)
+                if oldest != fight_id:
+                    self._stats_cache.pop(oldest, None)
+                    self._stats_updated.pop(oldest, None)
+
+    def _run_stats(self):
+        while True:
+            with self._lock:
+                idle = time.time() - self._stats_last_read > IDLE_STOP
+                want = self._stats_want
+                if want:
+                    fight_id, live = want[0], want[4]
+                    last = self._stats_updated.get(fight_id, 0.0)
+                    interval = self.STATS_REFRESH_LIVE if live else self.STATS_REFRESH_DONE
+                    due = time.time() - last >= interval
+                else:
+                    due = False
+            if idle:
+                with self._lock:
+                    self._stats_thread = None
+                return
+            if due:
+                with self._lock:
+                    self._stats_try = time.time()
+                try:
+                    self._poll_stats()
+                except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+                        ValueError, KeyError, TypeError) as e:
+                    with self._lock:
+                        self._stats_err = f"{type(e).__name__}"
+                    time.sleep(ERROR_BACKOFF_BASE)
+            time.sleep(1.0)
 
     def _ensure_thread(self):
         with self._lock:
