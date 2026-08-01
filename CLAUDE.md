@@ -783,10 +783,10 @@ additive and cannot regress another sport.
 - **Therefore the per-league poll is NOT redundant** for configured
   leagues — it is the only source of the count and win probability. Any
   "cut the redundant polling" work must be narrower than deleting it.
-- **Baseball's live layout has not yet been seen on a genuinely live
-  game** (built and swept against synthesized state from the verified
-  field shapes; the day's first game started after the work). Worth one
-  look at a live game.
+- **Baseball's live layout was later verified against 4 real live MLB
+  games** (2026-08-01, evening slate) -- exact pixel match on the real
+  panel. The earlier synthesized-state sweep is now backed by a live
+  check; no gap remains.
 
 ### Two-axis navigation (2026-08-01)
 
