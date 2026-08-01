@@ -437,41 +437,73 @@ class Browsable:
     control scheme stays identical system-wide.
     """
 
+    # Set True by an engine that also wants UP/DOWN as a second browse
+    # axis (see SportsEngine: left/right walks games, up/down walks
+    # leagues). Both axes get the identical tap/hold/accelerate feel from
+    # the same Scroller class, so the control scheme stays one system
+    # rather than two.
+    VERTICAL_BROWSE = False
+
     def _init_scroll(self):
         # NOT named `scroll`: NewsEngine/TickerEngine already use
         # self.scroll as a marquee pixel offset (a float). Colliding
         # with that made press() call .press on a float.
         self.browse = Scroller(getattr(self, "tick_rate", 0.05))
+        self.browse_v = Scroller(getattr(self, "tick_rate", 0.05)) \
+            if self.VERTICAL_BROWSE else None
 
     def _step(self, direction):                      # pragma: no cover - overridden
         raise NotImplementedError
 
+    def _step_v(self, direction):                    # pragma: no cover - overridden
+        raise NotImplementedError
+
+    def _axis(self, cmd):
+        """(scroller, step_fn, direction) for a d-pad command, or None."""
+        if cmd in ("left", "right"):
+            return self.browse, self._step, (-1 if cmd == "left" else 1)
+        if self.browse_v is not None and cmd in ("up", "down"):
+            return self.browse_v, self._step_v, (-1 if cmd == "up" else 1)
+        return None
+
     # Held-button entry points. arcade_server routes press/release here
     # when an engine defines them (see send_press/send_release).
     def press(self, cmd):
-        d = {"left": -1, "right": 1}.get(cmd)
-        if d is None:
+        ax = self._axis(cmd)
+        if ax is None:
             return self.input(cmd)
-        for _ in range(self.browse.press(d)):
-            self._step(d)
+        scroller, step, d = ax
+        for _ in range(scroller.press(d)):
+            step(d)
 
     def release(self, cmd):
-        if cmd in ("left", "right"):
-            self.browse.release()
+        ax = self._axis(cmd)
+        if ax is not None:
+            ax[0].release()
 
     def _browse_input(self, cmd):
-        """Handle left/right from a plain input(). Returns True if it was
-        a browse command and has been dealt with."""
-        d = {"left": -1, "right": 1}.get(cmd)
-        if d is None:
+        """Handle a browse command from a plain input(). Returns True if it
+        was one and has been dealt with."""
+        ax = self._axis(cmd)
+        if ax is None:
             return False
-        for _ in range(self.browse.tap(d)):
-            self._step(d)
+        scroller, step, d = ax
+        for _ in range(scroller.tap(d)):
+            step(d)
         return True
 
     def _scroll_tick(self):
         for _ in range(self.browse.tick()):
             self._step(self.browse.dir)
+        if self.browse_v is not None:
+            for _ in range(self.browse_v.tick()):
+                self._step_v(self.browse_v.dir)
+
+    @property
+    def _browse_auto_ok(self):
+        """Auto-advance may run only when NEITHER axis is being driven."""
+        return self.browse.auto_ok and (
+            self.browse_v is None or self.browse_v.auto_ok)
 
 
 # Where GAME DAY hands the panel back to when its event ends. Assigned
@@ -5238,6 +5270,16 @@ class SportsEngine(Browsable):
     name = "sports"
     tick_rate = 0.05
 
+    # LEFT/RIGHT walks games, UP/DOWN walks leagues. Grouping is by LEAGUE
+    # rather than sport: ESPN nests sports -> leagues -> events, so sport is
+    # the native outer key, but people name LEAGUES ("is the NWSL game
+    # on?"). Grouping by sport would also merge ATP with WTA and PGA with
+    # LPGA -- genuinely separate events -- and lump three unrelated soccer
+    # competitions together. League order follows ESPN's own payload order,
+    # which is editorially sensible and, more importantly, STABLE: sorting
+    # by "has a live game" would move leagues under the viewer's fingers.
+    VERTICAL_BROWSE = True
+
     BG = (0, 0, 0)
     INK = (150, 160, 185)
     INK_DIM = (70, 76, 92)
@@ -5318,24 +5360,6 @@ class SportsEngine(Browsable):
         happening, not merely when the configured leagues are off-season."""
         return bool(self.universal or self.data.get("games"))
 
-    def _step(self, direction):
-        """In TICKER, step through every event across every sport. In
-        PINNED (which shows exactly one game) there is no list to browse,
-        so the same gesture flips between the two views.
-
-        While EXPANDED, stepping moves to the next event and stays
-        expanded -- browsing a detail view should keep showing detail
-        rather than kicking you back to the list."""
-        if self.universal:
-            self.ucur = (self.ucur + direction) % len(self.universal)
-            if self.detail is not None:
-                self.detail = self.universal[self.ucur]["id"]
-            self.hold = 0
-            return
-        if self.data.get("favorite"):
-            self.view = (self.view + direction) % 2
-        self.hold = 0
-
     PANEL_TEAM = "team"
     PANEL_GOLF = "golf"
     PANEL_EVENTS = "events"
@@ -5358,6 +5382,71 @@ class SportsEngine(Browsable):
         if not self.panels:
             return None
         return self.panels[self.panel_i % len(self.panels)]
+
+    # ---- league grouping (the vertical axis) -----------------------------
+    def _league_key(self, ev):
+        return (ev.get("sport"), ev.get("league"))
+
+    def _league_order(self):
+        """Leagues present, in the feed's own (stable) order."""
+        out = []
+        for e in self.universal:
+            k = self._league_key(e)
+            if k not in out:
+                out.append(k)
+        return out
+
+    def _league_indices(self, key):
+        return [i for i, e in enumerate(self.universal) if self._league_key(e) == key]
+
+    def _current_league(self):
+        ev = self._current_event()
+        return self._league_key(ev) if ev else None
+
+    def _step(self, direction):
+        """LEFT/RIGHT: next game WITHIN the current league.
+
+        Wraps inside the league rather than spilling into the next one --
+        the two axes stay independent, so moving sideways never silently
+        changes which league you are in."""
+        if not self.universal:
+            return
+        key = self._current_league()
+        idxs = self._league_indices(key)
+        if not idxs:
+            return
+        pos = idxs.index(self.ucur) if self.ucur in idxs else 0
+        self.ucur = idxs[(pos + direction) % len(idxs)]
+        if self.detail is not None:
+            self.detail = self.universal[self.ucur]["id"]
+        self.hold = 0
+
+    def _step_v(self, direction):
+        """UP/DOWN: next LEAGUE, landing on its most interesting game.
+
+        Lands on a live game if the league has one, else its first -- so
+        arriving in a league shows you something happening rather than
+        whichever fixture happens to be first."""
+        if not self.universal:
+            return
+        order = self._league_order()
+        if not order:
+            return
+        key = self._current_league()
+        pos = order.index(key) if key in order else 0
+        nxt = order[(pos + direction) % len(order)]
+        idxs = self._league_indices(nxt)
+        if not idxs:
+            return
+        live = [i for i in idxs if self.universal[i]["live"]]
+        started = [i for i in idxs if self._started(self.universal[i])]
+        self.ucur = (live or started or idxs)[0]
+        if self.detail is not None:
+            self.detail = self.universal[self.ucur]["id"]
+        self.hold = 0
+        # Moving to a new league means the events panel is what you want.
+        if self.PANEL_EVENTS in self.panels:
+            self.panel_i = self.panels.index(self.PANEL_EVENTS)
 
     @staticmethod
     def _started(ev):
@@ -5399,7 +5488,11 @@ class SportsEngine(Browsable):
                 ev = self._current_event()
                 if ev:
                     self.detail = ev["id"]
-                    self.view = 1
+                    # Expanding is about an EVENT, so make sure the events
+                    # panel is the one selected (the old `view = 1` here
+                    # referred to the removed contested-slot scheme).
+                    if self.PANEL_EVENTS in self.panels:
+                        self.panel_i = self.panels.index(self.PANEL_EVENTS)
             self.hold = 0
             return
         if cmd == "drop":
@@ -5480,7 +5573,7 @@ class SportsEngine(Browsable):
         # opened one event, having it slide away on a timer is the exact
         # push-only behaviour the browse control exists to escape.
         # Auto-advance is suspended while EXPANDED (see above).
-        if self.cycling and self.browse.auto_ok and self.detail is None and self.panels:
+        if self.cycling and self._browse_auto_ok and self.detail is None and self.panels:
             self.hold += 1
             on_events = self._panel() == self.PANEL_EVENTS
             limit = self.SPOTLIGHT_TICKS if on_events else self.VIEW_TICKS
@@ -5750,6 +5843,54 @@ class SportsEngine(Browsable):
             return bytes(buf)
         return self._frame_universal_generic()
 
+    def _draw_league_rail(self, buf, ev):
+        """Vertical position indicator down the RIGHT edge: one pip per
+        league, the current one lit.
+
+        The two axes need to be discoverable without instructions, so each
+        gets its own visible affordance -- this rail for UP/DOWN, and the
+        header's N/M counter for LEFT/RIGHT. A rail rather than text
+        because it also shows HOW MANY leagues there are and roughly where
+        you sit among them, which a "3/11" label does not convey at a
+        glance.
+        """
+        order = self._league_order()
+        if len(order) < 2:
+            return
+        key = self._league_key(ev)
+        cur = order.index(key) if key in order else 0
+        n = len(order)
+        # Fit the rail to the panel height, capping the pip count so a
+        # 20-league day still renders discrete pips rather than a smear.
+        top, bottom = 10, HEIGHT - 6
+        span = bottom - top
+        step = max(2, min(4, span // max(1, n)))
+        h = step * n
+        y0 = top + max(0, (span - h) // 2)
+        x = WIDTH - 2
+        for i in range(n):
+            y = y0 + i * step
+            if y >= bottom:
+                break
+            on = (i == cur)
+            c = self._sport_accent(ev) if on else (40, 46, 60)
+            put_px(buf, x, y, c)
+            if on:
+                # The active pip is wider, so it reads as a position
+                # marker rather than one lit dot in a column.
+                put_px(buf, x - 1, y, c)
+                if y + 1 < bottom:
+                    put_px(buf, x, y + 1, c)
+                    put_px(buf, x - 1, y + 1, c)
+
+    def _league_position(self, ev):
+        """(index within league, count in league) for the header counter."""
+        idxs = self._league_indices(self._league_key(ev))
+        if not idxs:
+            return 1, 1
+        pos = idxs.index(self.ucur) + 1 if self.ucur in idxs else 1
+        return pos, len(idxs)
+
     def _frame_universal_generic(self):
         """The original shared two-row layout. Still the fallback for any
         sport without its own renderer -- deliberately unchanged.
@@ -5764,9 +5905,11 @@ class SportsEngine(Browsable):
         if not ev:
             return self._frame_empty("SPORTS", "NOTHING ON RIGHT NOW")
         accent = self._sport_accent(ev)
+        pos, total = self._league_position(ev)
         draw_header(buf, ev["league_name"] or ev["league"], accent,
-                    right_tag=f"{self.ucur + 1}/{len(self.universal)}",
+                    right_tag=f"{pos}/{total}",
                     stale=bool(self.data.get("age") and self.data["age"] > 300))
+        self._draw_league_rail(buf, ev)
 
         comps = ev["competitors"]
         if ev["leaderboard"]:
