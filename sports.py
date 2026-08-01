@@ -43,6 +43,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+
+import paneltext
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "sports_config.json"
@@ -674,17 +676,17 @@ def _header_competitor(c, sport):
         "id": c.get("id"),
         "is_team": is_team,
         # Teams get their abbreviation; athletes get "C. Young".
-        "abbr": str(name).upper().strip(),
-        "full": str(c.get("displayName") or name).upper().strip(),
+        "abbr": paneltext.panel_text(name),
+        "full": paneltext.panel_text(c.get("displayName") or name),
         "score": _num_or_none(score) if is_team else (
-            str(score).upper().strip() if score is not None else None),
+            paneltext.panel_text(score) if score is not None else None),
         "home_away": c.get("homeAway"),
         "winner": bool(c.get("winner")),
         "color": _hex_to_rgb(c.get("color")) if c.get("color") else None,
         "alt_color": _hex_to_rgb(c.get("alternateColor")) if c.get("alternateColor") else None,
         # `record` is a plain string on this endpoint ("7-2-0"), unlike the
         # per-league API's records[] list.
-        "record": (str(c["record"]).upper().strip()
+        "record": (paneltext.panel_text(c["record"])
                    if isinstance(c.get("record"), str) and c.get("record") else None),
         "seed": _num_or_none(c.get("tournamentSeed")),
         # Leaderboard fields -- golf. `thru` is holes completed; when a
@@ -716,34 +718,34 @@ def _header_event(e, sport, league_slug, league_name):
         "id": str(e.get("id") or ""),
         "competition_id": str(e.get("competitionId") or e.get("id") or ""),
         "sport": sport,
-        "league": (league_slug or "").upper(),
-        "league_name": (league_name or league_slug or "").upper(),
-        "name": str(e.get("name") or "").upper(),
-        "short_name": str(e.get("shortName") or "").upper(),
+        "league": paneltext.panel_text(league_slug),
+        "league_name": paneltext.panel_text(league_name or league_slug),
+        "name": paneltext.panel_text(e.get("name")),
+        "short_name": paneltext.panel_text(e.get("shortName")),
         "state": state,                       # pre | in | post
         "live": state == "in",
         # Display text ESPN already formatted for this sport: "Final", "FT",
         # "Round 3 - In Progress", "Bot 9th". Uppercased at the boundary.
-        "detail": str(e.get("summary") or "").upper().strip(),
+        "detail": paneltext.panel_text(e.get("summary")),
         "period": _num_or_none(e.get("period")),
-        "clock": (str(e.get("clock")).upper().strip()
+        "clock": (paneltext.panel_text(e.get("clock"))
                   if e.get("clock") not in (None, "") else None),
-        "venue": str(e.get("location") or "").upper().strip() or None,
-        "series": str(e.get("seriesSummary") or "").upper().strip() or None,
-        "note": str(e.get("note") or "").upper().strip() or None,
+        "venue": paneltext.panel_text(e.get("location")) or None,
+        "series": paneltext.panel_text(e.get("seriesSummary")) or None,
+        "note": paneltext.panel_text(e.get("note")) or None,
         # MMA weight class / tennis draw both live in competitionType.
-        "class_label": str((e.get("competitionType") or {}).get("text") or "").upper().strip() or None,
+        "class_label": paneltext.panel_text((e.get("competitionType") or {}).get("text")) or None,
         "match_number": _num_or_none(e.get("matchNumber")),
-        "card_segment": str(e.get("cardSegment") or "").upper().strip() or None,
-        "round": str(e.get("round") or "").upper().strip() or None,
+        "card_segment": paneltext.panel_text(e.get("cardSegment")) or None,
+        "round": paneltext.panel_text(e.get("round")) or None,
         "leaderboard": leaderboard,
         "competitors": comps,
         # Tennis ships completed-match summaries as free text.
-        "notes": [str(n.get("text") or "").upper().strip()
+        "notes": [paneltext.panel_text(n.get("text"))
                   for n in (e.get("notes") or []) if n.get("text")][:4],
         "bases": bases if any(bases) else None,
         "outs": outs,
-        "runners_text": str(e.get("baseRunnersText") or "").upper().strip() or None,
+        "runners_text": paneltext.panel_text(e.get("baseRunnersText")) or None,
     }
 
 

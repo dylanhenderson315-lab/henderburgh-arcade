@@ -96,9 +96,10 @@ import json
 import re
 import threading
 import time
-import unicodedata
 import urllib.error
 import urllib.request
+
+import paneltext
 
 SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard"
 SCOREBOARD_DATED = SCOREBOARD_URL + "?dates={day}"
@@ -132,63 +133,11 @@ METHOD_SHORT = {"SUBMISSION": "SUB", "KO/TKO": "KO/TKO", "DECISION": "DEC",
                 "DRAW": "DRAW", "DQ": "DQ", "NO CONTEST": "NC"}
 
 # ---- panel-safe text ---------------------------------------------------
-# THE RECURRING BUG IN THIS PROJECT, and MMA is its worst case yet.
-#
-# engines._FONT3x5 has 52 glyphs -- A-Z, 0-9, space and !$%&'+,-./:<>?@
-# -- and draw_text3x5 SILENTLY SKIPS anything else. It does
-# not raise, it does not substitute; the character just is not there. That
-# has now produced a visible bug six separate times in this codebase.
-#
-# UFC is the highest-risk feed we have for it: the roster is heavily
-# international and a single real card (2026-08-01) contained Medic,
-# Spasic, Milosevic, Rebecki, Cepo and Todorovic with accented characters
-# in every one of those names. Untreated, "MEDIC" would have rendered as
-# "MEDI" -- a wrong name, silently, with nothing in the output to hint at
-# it.
-#
-# So folding happens HERE, at the I/O boundary, exactly once, and the
-# engine can trust that every string this module emits is renderable.
-# NFKD decomposition handles the accented Latin letters; the map below
-# covers the ones that do not decompose (a stroke through a letter is not
-# a combining mark).
-_TRANSLIT = {
-    "Ø": "O", "ø": "O",      # O with stroke
-    "Ł": "L", "ł": "L",      # L with stroke (Blachowicz, Rebecki)
-    "Æ": "AE", "æ": "AE",
-    "Đ": "D", "đ": "D",      # D with stroke
-    "ß": "SS",
-    "Ħ": "H", "ħ": "H",
-    "Þ": "TH", "þ": "TH",
-    "Ĳ": "IJ", "ĳ": "IJ",
-    "’": "'", "‘": "'",      # curly quotes -> the straight one we have
-    "–": "-", "—": "-", "−": "-",
-    "×": "X",
-}
-_ALLOWED = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 !$%&'+,-./:<>?@")
-
-
-def panel_text(s):
-    """Fold any external string to something the 3x5 font can actually
-    draw, uppercased.
-
-    Order matters: explicit map first (those characters do not decompose),
-    then NFKD to strip combining accents, then a hard filter so ANY
-    remaining unsupported character becomes a space rather than vanishing.
-    A space is deliberate -- it preserves the shape of the name and is
-    visible as "something was here", whereas silent removal is the exact
-    failure mode this function exists to prevent.
-    """
-    if s is None:
-        return ""
-    s = str(s)
-    for bad, good in _TRANSLIT.items():
-        s = s.replace(bad, good)
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    s = s.upper()
-    s = "".join(c if c in _ALLOWED else " " for c in s)
-    return re.sub(r"\s+", " ", s).strip()
-
+# Folding lives in paneltext.py now, NOT here. It used to be a private copy
+# in this module, which is exactly how the same bug reappeared in sports.py
+# later on (a live PGA leader, "Hojgaard", drew as "HJGAARD"). One shared
+# fold, used by every feed at its I/O boundary. See paneltext.py's tally.
+panel_text = paneltext.panel_text
 
 STATS_URL = ("https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc"
             "/events/{event_id}/competitions/{comp_id}/competitors/{athlete_id}"
