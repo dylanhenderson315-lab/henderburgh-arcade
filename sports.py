@@ -851,6 +851,7 @@ def _header_competitor(c, sport):
         "rank": _num_or_none(c.get("rank")),          # tennis world ranking
         "form": paneltext.panel_text(c.get("form")) or None,   # soccer WDLDL
         "movement": _num_or_none(c.get("movement")),  # golf position change
+        "shootout": _num_or_none(c.get("shootoutScore")),  # soccer penalties
         # Leaderboard fields -- golf. `thru` is holes completed; when a
         # player has not teed off it is 0 and teeTime is what matters.
         "place": _num_or_none(c.get("place")),

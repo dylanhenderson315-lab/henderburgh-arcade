@@ -6234,12 +6234,77 @@ class SportsEngine(Browsable):
             draw_text_centered(buf, 58, fit_text(line, WIDTH - 6),
                                self.LIVE if ev["live"] else self.INK)
 
+    def _render_soccer(self, buf, ev):
+        """Soccer. Three things a football scoreboard has that a generic
+        renderer flattens away: FORM (recent results, not just today's
+        score), the clock already carrying stoppage time ("90'+3'" --
+        ESPN pre-formats this, it is not computed here), and a penalty
+        shootout score when a match was decided that way.
+
+        AGGREGATE SCORE (`ev["series"]`, from ESPN's `seriesSummary`) is
+        wired through and rendered if present, but UNVERIFIED: no
+        two-legged tie is live anywhere in today's feed to check it
+        against, the same honest gap football is in for down-and-distance.
+        It will render correctly the day a real one appears; nobody has
+        seen it do so yet.
+        """
+        accent = self._sport_accent(ev)
+        pos, total = self._league_position(ev)
+        draw_header(buf, ev["league_name"] or "SOCCER", accent, right_tag=f"{pos}/{total}")
+        self._draw_league_rail(buf, ev)
+
+        y = 12
+        for c in ev["competitors"][:2]:
+            bar = c.get("color") or self.INK_DIM
+            for by in range(9):
+                for bx in (1, 2):
+                    put_px(buf, bx, y + by, bar)
+            sc = c.get("score")
+            sc_txt = "" if sc is None else str(sc)
+            col = self.WIN if c.get("winner") else self.HERO_INK
+            avail = WIDTH - 12 - (text_w(sc_txt, 2) if sc_txt else 0)
+            draw_text3x5(buf, 5, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
+            if sc_txt:
+                draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
+            # Form beneath the score row -- most recent result rightmost,
+            # matching how a real match programme lists it.
+            form = c.get("form")
+            if form:
+                draw_text3x5(buf, 5, y + 10, form, self.INK_DIM)
+            y += 20
+
+        draw_divider(buf, 38)
+        shootouts = [c.get("shootout") for c in ev["competitors"][:2]]
+        if all(s is not None for s in shootouts):
+            # Decided on penalties: that IS the headline once it happens,
+            # not a footnote under a tied scoreline.
+            draw_text_centered(buf, 41, "PENALTIES", self.LIVE)
+            pk = "-".join(str(s) for s in shootouts)
+            draw_text_centered(buf, 48, pk, self.HERO_INK, scale=2)
+        else:
+            clock = ev.get("clock") or ""
+            live = ev["live"]
+            draw_text_centered(buf, 41, fit_text(clock, WIDTH - 6),
+                               self.LIVE if live else self.INK_DIM)
+            detail = ev.get("detail") or ""
+            if detail and detail != clock:
+                draw_text_centered(buf, 49, fit_text(detail, WIDTH - 6), self.INK)
+
+        # Aggregate, when ESPN supplies one -- see docstring on
+        # verification status.
+        agg = ev.get("series")
+        if agg:
+            draw_text_centered(buf, 57, fit_text(agg, WIDTH - 6), self.INK_DIM)
+        elif ev.get("note"):
+            draw_text_centered(buf, 57, fit_text(ev["note"], WIDTH - 6), self.INK_DIM)
+
     # Populated as each sport gets its own renderer. Empty here means
     # every sport still takes the generic path, so this step changes
     # nothing on screen -- it only creates the seam.
     SPORT_RENDERERS = {
         "baseball": _render_baseball,
         "mma": _render_mma,
+        "soccer": _render_soccer,
     }
 
     def _frame_event_detail(self, ev):
