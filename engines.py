@@ -459,6 +459,51 @@ class Browsable:
             self._step(self.browse.dir)
 
 
+def draw_ident(buf, accent, kicker, hero, sub=None, hero_scale=2,
+               hero_color=(235, 242, 255), sub_color=(130, 140, 168)):
+    """The shared AMBIENT layout -- one visual language for all six modes.
+
+    Ambient is watched, not operated, so this is deliberately NOT the
+    manual view. It leads with the single most important fact and strips
+    everything that only matters during interaction: no position dots, no
+    selection cursor, no navigation hints, no item counters.
+
+    Three slots, same geometry every time, so the eye learns where to
+    look once and the modes differ only in content and colour:
+        kicker -- what KIND of thing this is, small, in the mode's accent
+        hero   -- the one fact worth knowing, large
+        sub    -- supporting context, dim
+
+    The thick accent band is the "ident" itself: at a glance, before any
+    text resolves, the colour alone says which kind of content arrived.
+    """
+    for x in range(WIDTH):
+        for y in range(4):
+            put_px(buf, x, y, accent if y < 3 else rim(accent, 0.4))
+
+    if kicker:
+        draw_text_centered(buf, 8, fit_text(str(kicker), WIDTH - 4), color_on_dark(accent))
+
+    hero = str(hero or "")
+    # Drop to scale=1 rather than truncating a long hero: losing
+    # characters loses meaning, losing size only loses emphasis.
+    if hero_scale > 1 and text_w(hero, hero_scale) > WIDTH - 4:
+        hero_scale = 1
+    y_hero = 20 if hero_scale > 1 else 24
+    draw_text_centered(buf, y_hero, fit_text(hero, WIDTH - 4, hero_scale),
+                       hero_color, scale=hero_scale)
+
+    if sub:
+        lines = sub if isinstance(sub, (list, tuple)) else [sub]
+        y = 38
+        for ln in lines[:3]:
+            if not ln:
+                continue
+            draw_text_centered(buf, y, fit_text(str(ln), WIDTH - 4), sub_color)
+            y += 8
+    return buf
+
+
 class Pulse:
     """Shared "something just changed" flash.
 
@@ -4525,6 +4570,34 @@ class SatelliteEngine:
             return f"{m}M {s:02d}S"
         return f"{s}S"
 
+    AMBIENT_STYLE = "push_down"     # something arriving from above
+    AMBIENT_ACCENT = (255, 226, 60)
+
+    def ambient_weight(self):
+        q = satellite.pass_quality(self.data.get("next_pass"))
+        return 2.5 if (q and q[1] >= 2) else 1.0
+
+    def ambient_frame(self):
+        """Headline: how long until the next pass, and whether it's worth
+        going outside for."""
+        secs = self.data.get("seconds_to_rise")
+        nxt = self.data.get("next_pass")
+        if not isinstance(secs, (int, float)) or not nxt:
+            return None
+        buf = blank(); fill(buf, self.BG)
+        q = satellite.pass_quality(nxt)
+        sub = []
+        if q:
+            sub.append({"BRIGHT": "GO OUTSIDE", "GOOD": "GOOD PASS",
+                        "LOW": "VISIBLE"}.get(q[0], "NOT VISIBLE"))
+        elev = nxt.get("max_elev")
+        if isinstance(elev, (int, float)):
+            sub.append(f"{nxt.get('compass','')} {elev:.0f}DEG".strip())
+        draw_ident(buf, self.AMBIENT_ACCENT, "ISS PASS",
+                   self._fmt_countdown(secs), sub,
+                   hero_color=(self.VISIBLE if (q and q[1] >= 1) else self.NOT_VISIBLE))
+        return bytes(buf)
+
     def _frame_unconfigured(self, buf):
         msg = "SET LOCATION"
         draw_text3x5(buf, (WIDTH - (4 * len(msg) - 1)) // 2, 24, msg, self.INK)
@@ -4835,6 +4908,38 @@ class FlightEngine(Browsable):
             for i in range(16):
                 a = i / 16 * 2 * math.pi
                 put_px(buf, int(round(cx + 8 * math.cos(a))), int(round(cy + 8 * math.sin(a))), rim(color, 0.4))
+
+    AMBIENT_STYLE = "push_up"       # aircraft climb away
+    AMBIENT_ACCENT = (60, 220, 210)     # teal -- distinct from weather's sky blue
+
+    def ambient_weight(self):
+        acs = self.data.get("aircraft") or []
+        if any((a.get("notable") or (None, 0))[1] >= 3 for a in acs):
+            return 2.5            # something genuinely unusual overhead
+        return 1.0 if acs else 0.5
+
+    def ambient_frame(self):
+        """Headline: what is notable about this one, not the full readout."""
+        acs = self.data.get("aircraft") or []
+        if not acs:
+            return None
+        ac = acs[0]               # already sorted notable-first
+        buf = blank(); fill(buf, self.BG)
+        note = ac.get("notable")
+        alt = ac.get("alt_ft")
+        sub = []
+        typ = (ac.get("type") or "").upper()
+        if isinstance(alt, (int, float)):
+            sub.append(f"{typ} {alt:.0f}FT".strip())
+        route = ac.get("route") or {}
+        if route.get("origin") and route.get("dest"):
+            sub.append(f"{route['origin']}>{route['dest']}")
+        elif isinstance(ac.get("dist_nm"), (int, float)):
+            sub.append(f"{nm_to_mi(ac['dist_nm']):.0f}MI {self._compass(ac.get('dir_deg'))}".strip())
+        draw_ident(buf, self.AMBIENT_ACCENT, note[0] if note else "OVERHEAD",
+                   ac.get("ident") or "UNKNOWN", sub, hero_scale=1,
+                   hero_color=self._alt_color(alt))
+        return bytes(buf)
 
     def _frame_unconfigured(self, buf):
         msg = "SET LOCATION"
@@ -5330,6 +5435,36 @@ class SportsEngine(Browsable):
         draw_marquee(buf, 53, "   ".join(parts), self.INK_DIM, self.scroll)
         return bytes(buf)
 
+    AMBIENT_STYLE = "wipe_right"    # scoreboard wipe
+    AMBIENT_ACCENT = (255, 140, 40)
+
+    def ambient_weight(self):
+        games = self.data.get("games") or []
+        if any(g.get("state") == "in" for g in games):
+            return 3.0            # a live game is the most "happening" thing here
+        return 1.0 if games else 0.5
+
+    def ambient_frame(self):
+        """Headline: the score, then the stakes. Prefers a live game, then
+        the pinned team's, then anything on today."""
+        games = self.data.get("games") or []
+        g = (self.data.get("favorite_game")
+             or next((x for x in games if x.get("state") == "in"), None)
+             or (games[0] if games else None))
+        if not g:
+            return None
+        buf = blank(); fill(buf, self.BG)
+        a, h = g["away"], g["home"]
+        hero = f"{a['abbr']} {self._score_txt(a['score'])}-{self._score_txt(h['score'])} {h['abbr']}"
+        sub = [g.get("detail") or ""]
+        extra = self._situation_line(g) if g.get("state") == "in" else ""
+        if extra:
+            sub.append(extra)
+        elif a.get("record") and h.get("record"):
+            sub.append(f"{a['record']} / {h['record']}")
+        draw_ident(buf, self.AMBIENT_ACCENT, g["league"], hero, sub, hero_scale=1)
+        return bytes(buf)
+
     def _frame_for_view(self):
         if self.view == 0 and self.data.get("favorite"):
             return self._frame_pinned()
@@ -5445,6 +5580,38 @@ class NewsEngine(Browsable):
         if key != self._last_headline_key:
             self._last_headline_key = key
             self.scroll = 0.0     # fresh scroll from the start on every headline change
+
+    AMBIENT_STYLE = "push_up"       # ticker feel
+    AMBIENT_ACCENT = (215, 225, 245)    # newsprint white -- distinct from ISS gold
+
+    def ambient_weight(self):
+        return 1.0
+
+    def ambient_frame(self):
+        """Headline: literally the headline. No counter, no dots, no tape --
+        one story, readable, then move on."""
+        heads = self.data.get("headlines") or []
+        if not heads:
+            return None
+        buf = blank(); fill(buf, self.BG)
+        text = heads[self.cur % len(heads)]
+        words, lines, cur = text.split(), [], ""
+        for w in words:
+            trial = f"{cur} {w}".strip()
+            if text_w(trial) <= WIDTH - 6:
+                cur = trial
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = w
+            if len(lines) >= 4:
+                break
+        if cur and len(lines) < 4:
+            lines.append(cur)
+        draw_ident(buf, self.AMBIENT_ACCENT, self.data.get("label") or "NEWS",
+                   lines[0] if lines else "", lines[1:4], hero_scale=1,
+                   hero_color=self.pulse.mix((235, 242, 255)))
+        return bytes(buf)
 
     # ---- render --------------------------------------------------------
     def frame(self):
@@ -5690,6 +5857,30 @@ class WeatherEngine:
             draw_text_centered(buf, 58, sun, (255, 200, 120))
         else:
             draw_text_centered(buf, 58, "NO ALERTS", (60, 110, 70))
+        return bytes(buf)
+
+    AMBIENT_STYLE = "fade"          # atmospheric: weather dissolves in
+    AMBIENT_ACCENT = (120, 200, 255)
+
+    def ambient_weight(self):
+        return 3.0 if (self.data.get("alerts") or []) else 1.0
+
+    def ambient_frame(self):
+        """Headline: the temperature -- or the ALERT, which outranks it."""
+        alerts = self.data.get("alerts") or []
+        if alerts:
+            return draw_alert_frame(alerts[0], self.ticks,
+                                    place=self.data.get("place", ""))
+        buf = blank(); fill(buf, self.BG)
+        cond = self.data.get("conditions") or {}
+        c = cond.get("temp_c")
+        hero = f"{c_to_f(c):.0f}F" if isinstance(c, (int, float)) else "--F"
+        sub = [cond.get("text") or ""]
+        hi, lo = self.data.get("high_f"), self.data.get("low_f")
+        if isinstance(hi, (int, float)) and isinstance(lo, (int, float)):
+            sub.append(f"HI {hi:.0f}  LO {lo:.0f}")
+        draw_ident(buf, self.AMBIENT_ACCENT, self.data.get("place") or "WEATHER",
+                   hero, sub, hero_color=self.pulse.mix((255, 235, 180)))
         return bytes(buf)
 
     def _sun_line(self):
@@ -5961,6 +6152,23 @@ class BlogEngine(Browsable):
                 self.cur = (self.cur + 1) % n
         self.score = n
 
+    AMBIENT_STYLE = "fade"          # calm, like the mode itself
+    AMBIENT_ACCENT = (176, 96, 255)
+
+    def ambient_weight(self):
+        return 0.8                  # the quiet one: present, but brief
+
+    def ambient_frame(self):
+        posts = self.data.get("posts") or []
+        if not posts:
+            return None
+        p = posts[self.cur % len(posts)]
+        buf = blank(); fill(buf, self.BG)
+        draw_ident(buf, self.AMBIENT_ACCENT, "HENDERBURGH",
+                   p.get("name") or "", self._wrap(p.get("text") or "", WIDTH - 6, 3),
+                   hero_scale=1, hero_color=self.pulse.mix(self.NAME))
+        return bytes(buf)
+
     # ---- render --------------------------------------------------------
     @staticmethod
     def _wrap(text, max_px, max_lines):
@@ -6071,6 +6279,8 @@ class AmbientEngine(Browsable):
     SEQUENCE = ("flights", "satellite", "weather", "sports", "news", "blog")
 
     DWELL_TICKS = 400        # ~20s per mode at this tick rate
+    DWELL_MIN = 200          # ~10s -- floor, so nothing flashes past
+    DWELL_MAX = 900          # ~45s -- ceiling, so nothing hogs the rotation
     TRANSITION_TICKS = 8     # ~0.4s slide between sub-modes at this tick rate
     RECHECK_TICKS = 60       # ~3s before giving up on an all-empty rotation
 
@@ -6097,6 +6307,21 @@ class AmbientEngine(Browsable):
     def current(self):
         return self.engines[self.SEQUENCE[self.idx]]
 
+    def _dwell_for(self, eng):
+        """Dwell weighted by how much is actually going on in that mode
+        right now, instead of a flat duration for everything.
+
+        A live game or a bright ISS pass earns more of your attention than
+        an empty scoreboard; the guestbook is deliberately brief. Clamped
+        so nothing can starve or hog the rotation even if a weight is
+        wrong."""
+        try:
+            w = float(eng.ambient_weight())
+        except Exception:                  # noqa: BLE001
+            w = 1.0
+        w = max(0.5, min(3.0, w))
+        return int(clamp(self.DWELL_TICKS * w, self.DWELL_MIN, self.DWELL_MAX))
+
     def _available(self):
         return [i for i, n in enumerate(self.SEQUENCE)
                 if self.engines[n].has_content()]
@@ -6110,7 +6335,7 @@ class AmbientEngine(Browsable):
         # set_mode, so it would otherwise be the ONE place in the product
         # that still hard-cuts between screens.
         try:
-            self._trans_from = self.current.frame()
+            self._trans_from = self._render_current()
             self._trans_i = 0
         except Exception:                      # noqa: BLE001 - never break rotation
             self._trans_from = None
@@ -6164,7 +6389,7 @@ class AmbientEngine(Browsable):
 
         if self.cycling and len(avail) > 1 and self.browse.auto_ok:
             self.hold += 1
-            if self.hold >= self.DWELL_TICKS:
+            if self.hold >= self._dwell_for(self.current):
                 self.hold = 0
                 self._advance(1)
 
@@ -6181,14 +6406,33 @@ class AmbientEngine(Browsable):
             # where a wall display is most likely to be looked at.
             self._fallback.tick()
             return self._fallback.frame()
-        frame = self.current.frame()
+        frame = self._render_current()
         if self._trans_from and self._trans_i < self.TRANSITION_TICKS:
             self._trans_i += 1
             p = self._trans_i / float(self.TRANSITION_TICKS)
-            frame = transitions.blend(self._trans_from, frame, p)
+            # Each mode enters with its OWN transition style, so you know
+            # what kind of thing arrived before you have read a word --
+            # built on the shared system, not a second one.
+            style = getattr(self.current, "AMBIENT_STYLE", transitions.DEFAULT_STYLE)
+            frame = transitions.blend(self._trans_from, frame, p, style)
             if self._trans_i >= self.TRANSITION_TICKS:
                 self._trans_from = None
         return frame
+
+    def _render_current(self):
+        """Prefer the mode's AMBIENT framing -- headline-first, stripped of
+        anything that only matters while operating it. Falls back to the
+        manual view for any mode that hasn't defined one."""
+        eng = self.current
+        fn = getattr(eng, "ambient_frame", None)
+        if fn:
+            try:
+                f = fn()
+                if f:
+                    return f
+            except Exception:              # noqa: BLE001 - never break rotation
+                pass
+        return eng.frame()
 
 
 class BootEngine:
