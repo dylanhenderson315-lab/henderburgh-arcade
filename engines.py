@@ -23,6 +23,7 @@ from pathlib import Path
 
 import market
 import satellite
+import skypass
 import flights
 import sports
 import news
@@ -4514,6 +4515,8 @@ class SatelliteEngine:
     VISIBLE = (60, 230, 110)
     NOT_VISIBLE = (170, 178, 200)
     STALE = (255, 170, 40)
+    HERO = (235, 242, 255)      # primary value text (countdowns)
+    LOSE = (255, 70, 80)
     ORBIT = (40, 46, 66)
     ISS = (255, 226, 60)
 
@@ -4527,11 +4530,16 @@ class SatelliteEngine:
         self.data = {"configured": False, "label": "HOME", "pos": None,
                     "pos_age": None, "next_pass": None, "pass_age": None,
                     "seconds_to_rise": None, "err": None}
-        self.view = 0             # 0 = PASS, 1 = LIVE
+        # 0 = ISS PASS, 1 = ISS LIVE, 2 = SKY (next visible pass of ANY
+        # bright satellite). The two ISS views are unchanged; the third is
+        # additive so existing behaviour cannot regress.
+        self.view = 0
         self.hold = 0
         self.cycling = True
         self.ticks = 0
         self.orbit_phase = 0.0
+        self.sky = {"passes": [], "next": None, "available": False, "err": None}
+        self.sky_cur = 0
 
     # ---- input -----------------------------------------------------------
     # Which of the two views actually has data behind it. The views are
@@ -4539,9 +4547,14 @@ class SatelliteEngine:
     # polluxlabs for pass predictions) that fail separately -- and
     # satellite._refresh_pass swallows its exceptions, so a dead pass API
     # is invisible while position keeps working, and vice versa.
+    VIEWS = 3
+
     def _view_has_data(self, view):
-        return (self.data.get("next_pass") is not None) if view == 0 \
-            else (self.data.get("pos") is not None)
+        if view == 0:
+            return self.data.get("next_pass") is not None
+        if view == 1:
+            return self.data.get("pos") is not None
+        return bool(self.sky.get("passes"))
 
     def has_content(self):
         """Worth showing in the ambient rotation? Needs a real home
@@ -4553,14 +4566,23 @@ class SatelliteEngine:
         reported as no-content and skipped entirely by the rotation.
         """
         return bool(self.data.get("configured")) and (
-            self.data.get("pos") is not None or self.data.get("next_pass") is not None)
+            self.data.get("pos") is not None
+            or self.data.get("next_pass") is not None
+            or bool(self.sky.get("passes")))
 
     def input(self, cmd):
-        if cmd == "left":
-            self.view = (self.view - 1) % 2
-            self.hold = 0
-        elif cmd == "right":
-            self.view = (self.view + 1) % 2
+        if cmd in ("left", "right"):
+            d = -1 if cmd == "left" else 1
+            # Inside the SKY view, browse the pass LIST; at its edges, move
+            # on to the next view. Same tap-to-step feel as everywhere else.
+            if self.view == 2 and self.sky.get("passes"):
+                nxt = self.sky_cur + d
+                if 0 <= nxt < len(self.sky["passes"]):
+                    self.sky_cur = nxt
+                    self.hold = 0
+                    return
+                self.sky_cur = 0
+            self.view = (self.view + d) % self.VIEWS
             self.hold = 0
         elif cmd in ("rotate", "drop"):
             self.cycling = not self.cycling
@@ -4572,20 +4594,28 @@ class SatelliteEngine:
     def tick(self):
         self.ticks += 1
         self.data = satellite.FEED.get()
+        lat, lon, _lbl = satellite.FEED.get_location()
+        self.sky = skypass.FEED.get(lat, lon)
+        ps = self.sky.get("passes") or []
+        self.sky_cur = min(self.sky_cur, max(0, len(ps) - 1))
         self.orbit_phase += 0.035
         if self.cycling:
             self.hold += 1
             if self.hold >= self.VIEW_TICKS:
                 self.hold = 0
-                self.view = (self.view + 1) % 2
+                self.view = (self.view + 1) % self.VIEWS
         # Don't dwell on a view whose API is down while the other one has
         # real data -- otherwise half of every rotation slot is a
         # "NO PASS DATA" placeholder for no reason. Only switches away if
         # the OTHER view is actually populated, so with both down the
         # normal empty state still shows rather than flapping.
-        if not self._view_has_data(self.view) and self._view_has_data(1 - self.view):
-            self.view = 1 - self.view
-            self.hold = 0
+        if not self._view_has_data(self.view):
+            for step in (1, 2):
+                alt = (self.view + step) % self.VIEWS
+                if self._view_has_data(alt):
+                    self.view = alt
+                    self.hold = 0
+                    break
         alt_km = self.data.get("pos", {}).get("alt_km", 0) if self.data.get("pos") else 0
         self.score = int(km_to_mi(alt_km))     # miles, matching what's actually shown on screen
 
@@ -4755,11 +4785,139 @@ class SatelliteEngine:
             draw_text_centered(buf, 58, "SET LOCATION", (86, 94, 116))
         return bytes(buf)
 
+    # ---- SKY: any bright satellite ---------------------------------------
+    SKY_ACCENT = (150, 190, 255)
+    SKY_LIVE = (120, 255, 170)
+
+    def _sky_seconds_to(self, p):
+        """Seconds until rise (negative once the pass has begun)."""
+        import datetime as _dt
+        if not p:
+            return None
+        now = _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
+        return (p["rise"] - now).total_seconds()
+
+    def _frame_sky(self):
+        """Next visible pass of ANY bright satellite.
+
+        The ISS is often not visible for days at a time (verified: zero
+        visible ISS passes over this location for the next three days,
+        agreed by both our own predictor and polluxlabs). Meanwhile a
+        dozen other bright objects pass overhead tonight -- which is
+        exactly why this view exists alongside the ISS one rather than
+        replacing it.
+        """
+        buf = blank()
+        fill(buf, self.BG)
+        ps = self.sky.get("passes") or []
+
+        if not ps:
+            draw_header(buf, "SKY", self.SKY_ACCENT)
+            if not self.sky.get("available"):
+                # sgp4 missing: say so rather than showing an empty sky.
+                draw_text_centered(buf, 26, "PREDICTOR", self.INK_DIM)
+                draw_text_centered(buf, 34, "UNAVAILABLE", self.INK_DIM)
+            elif self.sky.get("err"):
+                draw_text_centered(buf, 30, "NO SKY DATA", self.LOSE)
+            else:
+                draw_text_centered(buf, 26, "NO VISIBLE", self.INK_DIM)
+                draw_text_centered(buf, 34, "PASSES", self.INK_DIM)
+            return bytes(buf)
+
+        p = ps[min(self.sky_cur, len(ps) - 1)]
+        secs = self._sky_seconds_to(p)
+        overhead = secs is not None and -p["duration_s"] <= secs <= 0
+
+        # "NOW" goes in the header rather than as a caption at the bottom:
+        # the arc's own compass labels already occupy that row, and the two
+        # collided there.
+        draw_header(buf, "SKY", self.SKY_ACCENT,
+                    right_tag="NOW" if overhead else f"{self.sky_cur + 1}/{len(ps)}")
+
+        # Satellite name -- never truncated to keep a size; losing letters
+        # loses WHICH satellite.
+        name = p["name"]
+        scale = 2 if text_w(name, 2) <= WIDTH - 6 else 1
+        draw_text_centered(buf, 12, fit_text(name, WIDTH - 6, scale),
+                           self.SKY_LIVE if overhead else self.INK, scale=scale)
+
+        if overhead:
+            # LIVE PASS: the arc across the sky, drawn for real from the
+            # pass's own rise/peak azimuth and peak elevation rather than a
+            # generic animation -- the shape tells you where to look.
+            self._draw_sky_arc(buf, p, secs)
+            return bytes(buf)
+
+        draw_text_centered(buf, 26, self._fmt_countdown(secs), self.HERO, scale=2)
+        q = skypass.quality(p)
+        draw_divider(buf, 44)
+        draw_text_centered(buf, 47,
+                           "%s  %.0f DEG" % (q, p["peak_el"]),
+                           self.VISIBLE if q in ("BRIGHT", "GOOD") else self.INK_DIM)
+        draw_text_centered(buf, 56,
+                           "%s TO %s  %s" % (skypass.compass(p["rise_az"]),
+                                             skypass.compass(p["peak_az"]),
+                                             self._fmt_dur(p["duration_s"])),
+                           self.INK_DIM)
+        return bytes(buf)
+
+    @staticmethod
+    def _fmt_dur(secs):
+        m, s = divmod(int(secs or 0), 60)
+        return f"{m}M{s:02d}" if m else f"{s}S"
+
+    def _draw_sky_arc(self, buf, p, secs):
+        """The pass as a real arc: horizon to horizon, peaking at the
+        pass's actual maximum elevation, with a marker at where the
+        satellite is RIGHT NOW.
+
+        Elevation maps to height and azimuth to horizontal position, so a
+        high pass visibly arcs higher than a grazing one -- the picture is
+        the information, not decoration.
+        """
+        y_horizon = 50
+        y_top = 24
+        # Progress through the pass, 0..1.
+        dur = max(1, p["duration_s"])
+        prog = min(1.0, max(0.0, (-secs) / dur))
+        peak_frac = max(0.05, min(1.0, p["peak_el"] / 90.0))
+
+        # Horizon line, so "up" has a reference.
+        for x in range(4, WIDTH - 4):
+            put_px(buf, x, y_horizon, (40, 46, 60))
+
+        pts = []
+        for i in range(41):
+            t = i / 40.0
+            x = int(6 + t * (WIDTH - 12))
+            # A simple sine arc is the correct shape for a pass seen from
+            # the ground: zero at both horizons, maximum at culmination.
+            h = math.sin(t * math.pi) * peak_frac
+            y = int(y_horizon - h * (y_horizon - y_top))
+            pts.append((x, y))
+        for x, y in pts:
+            put_px(buf, x, y, (70, 90, 130))
+
+        idx = min(len(pts) - 1, int(prog * (len(pts) - 1)))
+        cx, cy = pts[idx]
+        # The satellite itself, with a small glow so it reads as the moving
+        # thing rather than another arc pixel.
+        for dx, dy in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)):
+            put_px(buf, cx + dx, cy + dy, self.SKY_LIVE)
+        put_px(buf, cx, cy, (255, 255, 255))
+
+        # Direction labels at the horizon ends.
+        draw_text3x5(buf, 3, y_horizon + 3, skypass.compass(p["rise_az"]), self.INK_DIM)
+        rt = skypass.compass(p["peak_az"])
+        draw_text3x5(buf, WIDTH - 3 - text_w(rt), y_horizon + 3, rt, self.INK_DIM)
+
     def frame(self):
         buf = blank()
         fill(buf, self.BG)
         if not self.data.get("configured"):
             return self._frame_unconfigured(buf)
+        if self.view == 2:
+            return self._frame_sky()
         return self._frame_pass() if self.view == 0 else self._frame_live()
 
 
