@@ -11,10 +11,10 @@ file.
 
 A 64×64 LED matrix "arcade console" built on an Apollo M-1 WLED-MM panel
 (HUB75, ESP32-S3), currently driven by a Mac mini over the network. It
-runs classic games, live data "modes" (clock/dashboard, stock ticker,
+runs 14 classic games, live data "modes" (clock/dashboard, stock ticker,
 ISS tracker, flight tracker, sports scoreboard, news headline ticker,
 weather + severe alerts, site guestbook, and an `ambient` rotation tying
-them together),
+them together), a `gameday` event-takeover mode,
 video/screen mirroring, and WLED's own ambient lighting effects — all
 through one local HTTP server with a web control page and a
 phone-optimized remote controller page.
@@ -54,10 +54,12 @@ e.score
 ```
 
 Registered in `engines.ENGINES` (`name -> class`); `engines.PLAYABLE` is
-that set minus `menu`/`boot`. Adding a new mode means: write the engine
-class, add it to `ENGINES`, add it to `MenuEngine.NATIVE_GAMES` (label +
-accent color) if it should appear on the panel's own menu grid, and add a
-small icon case in `MenuEngine._icon`.
+that set minus `menu`/`boot`. **Adding a new mode means all of:** write the
+engine class, add it to `ENGINES`, add it to `MenuEngine.NATIVE_GAMES`
+(label + accent color) and a small icon case in `MenuEngine._icon` for the
+panel's own menu grid, **and add a button to `arcade.html`** (plus a config
+card if it has config). That last step was missed for seven consecutive
+modes — see the web-surfaces section for the cross-check that catches it.
 
 **Data modes are pure-I/O / pure-render, split into two files on
 purpose** — this is the load-bearing pattern for the whole project:
@@ -115,7 +117,8 @@ in-file software generators are dead code for any real display path,
 kept only as offline experiment helpers.
 
 **The 3×5 font (`_FONT3x5`/`draw_text3x5` in `engines.py`) is
-uppercase-only** and silently drops any character it doesn't have —
+uppercase-only** (52 glyphs: `A-Z`, `0-9`, space and ``!$%&'+,-./:<>?@``)
+and silently drops any character it doesn't have —
 no error, no crash, just a quietly wrong string on the panel. This has
 caused the *same bug three times* on three different modes (ticker,
 flights, sports), always from a live external API returning mixed-case
@@ -242,6 +245,60 @@ appends them to the menu automatically.
   `hour % 12` yields 0 for *both* 00:00 and 12:00, which is the classic
   bug. All 10 edge times are covered by the verification described in the
   self-audit section.
+
+**`gameday` — the EVENT / TAKEOVER mode** (`GameDayEngine` + `mma.py` +
+`gameday_config.json`, 2026-08-01). **A different CATEGORY of mode, and new
+modes should pick a side deliberately.** Every data mode above is a GLANCE
+mode: it shares the panel, gets a slice of attention, and ambient strips it
+to one fact. GAME DAY assumes the opposite — opt-in, one event, nothing else
+competing — so it is allowed to be maximally detailed and dramatic. It is
+**not** in `AmbientEngine.SEQUENCE` (a rotation cannot contain a takeover;
+its `has_content()` returns False), and it **hands the panel back on its
+own** when the event ends, reusing the existing `.launch` hand-off that
+`BootEngine`/`MenuEngine` already use — no new mechanism in the render loop.
+The severe-weather takeover still outranks it, for free, since that
+composites afterwards.
+
+Two targets via `gameday_config.json`: `ufc` (next/current card from
+`mma.FEED`) or `team` (the pinned favourite from `sports.FEED`, with the
+frame escalating on how CLOSE **and** how LATE the game is — multiplied, not
+averaged, and only while genuinely live).
+
+**`mma.py` — everything verified against real payloads, not assumed:**
+- **Structure is NOT like the team sports.** One `event` = the whole CARD;
+  `competitions[]` = the individual FIGHTS, **prelims first, main event
+  last**. A 5-round fight is how a main event is identified — there is no
+  `isMainEvent` flag.
+- **One request returns the entire card**, so a live poll is one call per
+  20s total, not one per fight. This matters given the ESPN volume risk.
+- **There is NO `method` field.** Finish method is only recoverable from the
+  play-by-play `details` list, keyed on **stable type IDs** (20 submission,
+  21 KO/TKO, 22 decision) because ESPN's own text for 21 is the mangled
+  token `"Kotko"`. Returns `None` rather than guessing when absent.
+- **`displayClock` is time ELAPSED in the final round**, not remaining — the
+  payload proves it, since every decision reads exactly `5:00` at its final
+  scheduled round.
+- **There is no working MMA summary endpoint** (`/mma/ufc/summary` 404s).
+- `?dates=YYYYMMDD` only works for a date a card actually exists on, and card
+  dates are **UTC** (a Saturday-night US card is often the next UTC day).
+  The league `calendar` list is the authoritative schedule; its `$ref` links
+  point at `sports.core.api.espn.pvt`, which does not resolve.
+- **Fight statistics** (sig. strikes, takedowns, control time) live on a
+  different host, `sports.core.api.espn.com`, as a **per-fighter**
+  sub-resource. That is **two calls with no batched form**, so they are
+  fetched ONLY for the fight currently on screen and only once it is live or
+  finished — never for the whole card. Same discipline as sports.py's win
+  probability.
+- **This is the highest-risk feed in the project for the glyph bug.** One
+  real card contained Medić, Spasić, Milošević, Rębecki, Čepo and Todorović.
+  Untreated, "MEDIĆ" renders as "MEDI" — a wrong name, silently.
+  `mma.panel_text()` folds diacritics (NFKD + an explicit map for the
+  letters that don't decompose, like Ł/Ø/Đ) at the I/O boundary.
+
+Views rotate UPCOMING → STATS → CARD (drill-down, then pull back). A finish
+**preempts everything** and holds ~22s. Results only fire for fights that
+finish **while watching** — loading a card already 9 fights deep must not
+replay nine finishes (same first-value rule as `Pulse`).
 
 **`ambient` — the master rotation mode** (`AmbientEngine`). Cycles
 flights → ISS → weather → sports → news → blog (guestbook), ~20s each,
@@ -399,6 +456,41 @@ rather than re-inlining `4*len(s)-1`** — that duplication (~40 sites) is
 how a scale=2 string silently overflowed. Games deliberately do NOT use
 this system; they have their own full-bleed visual language.
 
+**The two web surfaces** (`arcade.html` control panel, `remote.html` phone
+remote) — audited and brought current 2026-08-01. Before that, **seven modes
+had no button at all** and **every one of the seven config endpoints had a
+working API and no UI**, so setting a favourite team meant a raw `curl`.
+
+- Modes are **grouped**, not one flat list: Games (14, with the auto-play
+  demos folded into a `<details>`), Data & ambient, Event, Media. **GAME DAY
+  is styled as a takeover**, in its own crimson matching
+  `engines.GAMEDAY_ACCENT`, because it behaves differently from a peer mode.
+- Config cards for ticker, location, sports, news, guestbook and Game Day
+  appear with the mode they belong to; **night dimming lives in the rail**
+  because it is global. The **location card is shared** by ISS/flights/
+  weather rather than duplicated — there is one `location_config.json`.
+- **When adding a mode, add its button AND its config card**, then re-run the
+  cross-check that every `data-mode` maps to a real engine and every
+  selectable engine has a button. That check found all seven gaps.
+- **Field shapes must be read from `arcade_server.py`, not assumed.** Three
+  were wrong on the first pass: `/api/ticker/symbols` takes **separate
+  `crypto` and `stocks` lists** (crypto is validated against CoinGecko,
+  stocks are not), and news uses **`feed_url`** on both GET and POST.
+
+**Keyboard control** (`arcade.html`) — reuses the `Scroller` model rather
+than inventing a second one. `keydown` → `/api/press`, `keyup` →
+`/api/release`, so tap-to-step and hold-to-accelerate behave identically to
+the phone remote and the acceleration curve stays server-side.
+- **`e.repeat` is guarded**: the OS key-repeat must never re-fire `press`, or
+  a held key double-steps. Verified: a held key with six OS repeats still
+  sends exactly one press and one release.
+- **`INPUT`/`SELECT`/`TEXTAREA` are excluded**, or config fields become
+  unusable. Verified: arrows, space, P and Escape typed into a field send
+  nothing and leave focus intact.
+- The legend is **derived from the engine classes**: only modes that actually
+  subclass `Browsable` advertise "hold accelerates". `satellite`/`weather`/
+  `clock` cycle views without acceleration and say so.
+
 **Other modes**: `mirror` (screen capture -> panel, needs mss+Pillow),
 `video`/`stream` naming (see Known issues — `stream.py` is currently
 orphaned), `cast` (phone browser -> panel), WLED ambient backgrounds,
@@ -425,6 +517,10 @@ feed's thread hasn't idled out yet. Real per-mode request rates:
 - audio_sync: zero request cost — a blocking UDP socket, not polling.
 
 - blog: 1 call/300s.
+- gameday (UFC): **1 call** per poll for the WHOLE card — 20s while a fight
+  is live, 120s if a card exists today, 1800s otherwise. Fight statistics
+  add 2 calls (one per fighter) but only for the single fight on screen,
+  and only while it is live or just finished.
 
 None of this is a real load on the Mac (all network-I/O-bound, sleeping
 threads).
@@ -561,6 +657,15 @@ production device this multiplies by unit count; see `PRODUCTION.md`.
 5. **`@` was silently dropped from the sports tape** — fifth instance of
    the uppercase-only-font bug class. `"AWAY 3 @ HOME 5"` rendered as
    `"AWAY 3  HOME 5"`, losing the home/away distinction.
+6. **`&` was silently dropped from NFL down-and-distance** — the SEVENTH
+   instance, and it had already shipped. ESPN's `downDistanceText` is
+   literally `"3RD & 7"`, so the sports mode rendered `"3RD  7"`. The glyph
+   is now in `_FONT3x5`; the data was correct and the font was short.
+   Found while building GAME DAY's team view, which reuses the same
+   `situation_line()`.
+7. **GAME DAY's stats view had overlapping text** — the "FIGHT STATS"
+   kicker occupies rows 6-10 and the fighter names were drawn at y=8.
+   Invisible to a code read; caught by rendering the frame and looking.
 
 ### Methods worth reusing (each found something review didn't)
 - **Instrument `draw_text3x5` itself** to log any character absent from
