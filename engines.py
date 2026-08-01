@@ -283,6 +283,30 @@ def fit_text(s, max_px, scale=1):
     return s
 
 
+def fit_person(name, max_px, scale=1):
+    """Fit a PERSON's name, preferring the surname over the initial.
+
+    fit_text drops whole trailing words first, which is right for a
+    headline and exactly wrong for a name: "T. POSTARNAKOVA" became "T.",
+    throwing away the identity and keeping the least informative part.
+    Here, if the full name will not fit, the surname alone is tried before
+    anything is cut -- "POSTARNAKOVA" is still unambiguous, "T." is not.
+    """
+    name = str(name or "").strip()
+    if not name or text_w(name, scale) <= max_px:
+        return name
+    parts = name.split()
+    if len(parts) > 1:
+        surname = parts[-1]
+        if text_w(surname, scale) <= max_px:
+            return surname
+        name = surname
+    # Still too wide: cut characters, never whole words.
+    while name and text_w(name, scale) > max_px:
+        name = name[:-1]
+    return name
+
+
 def draw_header(buf, title, accent, right_tag=None, stale=False):
     """Standard top chrome for every data mode: a full-width accent rule,
     the mode/source title on it, and an optional right-aligned tag.
@@ -6146,11 +6170,76 @@ class SportsEngine(Browsable):
         if bc:
             draw_text_centered(buf, 57, fit_text(bc, WIDTH - 6), self.INK_DIM)
 
+    def _render_mma(self, buf, ev):
+        """MMA. A fight is not a score, it is a MATCHUP -- who, at what
+        weight, with what records behind them. So the weight class is a
+        primary line rather than a footnote, and each fighter's record
+        sits with their name instead of being dropped.
+
+        Card position is real structure worth showing: `cardSegment`
+        (MAIN / PRELIMS) plus `matchNumber`. Note the numbering here is
+        the OPPOSITE of the UFC scoreboard used by GAME DAY -- on this
+        feed match number 1 IS the main event, whereas there the main
+        event is last in the list. Verified against a real PFL card.
+
+        Round and finish time come from `period` and `clock`, which carry
+        the same meaning as in mma.py: time ELAPSED in the final round.
+        """
+        accent = self._sport_accent(ev)
+        pos, total = self._league_position(ev)
+        draw_header(buf, ev["league_name"] or "MMA", accent, right_tag=f"{pos}/{total}")
+        self._draw_league_rail(buf, ev)
+
+        # PRIMARY line: weight class, and whether this is the main event.
+        seg = ev.get("card_segment") or ""
+        num = ev.get("match_number")
+        headline = ev.get("class_label") or "MMA"
+        draw_text_centered(buf, 10, fit_text(headline, WIDTH - 6), color_on_dark(accent))
+        tag = "MAIN EVENT" if (num == 1 and seg.startswith("MAIN")) else seg
+        if tag:
+            draw_text_centered(buf, 17, fit_text(tag, WIDTH - 6), self.INK_DIM)
+
+        # Name on its own row, record beneath it. They shared a row at
+        # first and collided; reserving the record's width instead
+        # truncated "A. COLGAN" to "A.", which loses WHO -- the whole
+        # point of the view. The record is the thing that can afford its
+        # own dimmer line.
+        y = 25
+        for i, c in enumerate(ev["competitors"][:2]):
+            won = c.get("winner")
+            col = self.WIN if won else (self.INK if ev["state"] == "post" else self.HERO_INK)
+            draw_text3x5(buf, 6, y, fit_person(c.get("abbr"), WIDTH - 10), col)
+            if won:
+                # A block beside the winner: colour alone is ambiguous on
+                # a fight nobody has won yet, and a "W" column costs more
+                # width at 64px than it earns.
+                for dy in range(2):
+                    for dx in range(2):
+                        put_px(buf, 2 + dx, y + 1 + dy, self.WIN)
+            rec = c.get("record")
+            if rec:
+                draw_text3x5(buf, 8, y + 6, rec, self.INK_DIM)
+            y += 13
+            if i == 0:
+                draw_text_centered(buf, y, "VS", color_on_dark(accent))
+                y += 8
+
+        # Result: round and time when it is over, status otherwise.
+        rnd, clk = ev.get("period"), ev.get("clock")
+        if ev["state"] == "post" and rnd and clk:
+            line = f"R{rnd}  {clk}"
+        else:
+            line = ev.get("detail") or ""
+        if line:
+            draw_text_centered(buf, 58, fit_text(line, WIDTH - 6),
+                               self.LIVE if ev["live"] else self.INK)
+
     # Populated as each sport gets its own renderer. Empty here means
     # every sport still takes the generic path, so this step changes
     # nothing on screen -- it only creates the seam.
     SPORT_RENDERERS = {
         "baseball": _render_baseball,
+        "mma": _render_mma,
     }
 
     def _frame_event_detail(self, ev):
