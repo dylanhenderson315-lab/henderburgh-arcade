@@ -271,6 +271,48 @@ tick when NWS drops the alert. **Deliberate cost:** this reads
 out (a takeover that only worked while already viewing weather would be
 pointless).
 
+**Universal scroll control** (`Scroller` + `Browsable` in `engines.py`,
+2026-07-31) — **system-wide convention; new sequence modes must follow
+it.** Every competitor in this category is push-only; this is what lets
+someone actually browse.
+
+    tap left/right   -> step exactly one item, immediately
+    hold left/right  -> step once, ~0.35s delay, then ACCELERATING repeat
+    release          -> auto-advance stays paused ~4s
+
+Standard key-repeat model (as in holding an arrow key in a text field),
+so it needs no instructions. Uses the press/release the phone remote and
+control page **already** send (`bindHold` in `remote.html`) — no new
+hardware, no new gesture.
+
+**To opt a new mode in:** subclass `Browsable`, call `_init_scroll()` in
+`reset()`, implement `_step(direction)`, call `_scroll_tick()` at the top
+of `tick()`, and gate auto-advance on `self.browse.auto_ok`. That is the
+whole contract.
+
+Two traps, both hit once already:
+- **Do not name the scroller `self.scroll`** — `NewsEngine`/`TickerEngine`
+  already use that for a marquee pixel offset (a float). It is `self.browse`.
+- `bindHold` **also** fires a repeating `input()` every ~110ms while held.
+  `input()` is therefore ignored while a press is active, making the
+  server tick clock the single source of repeat timing (and the
+  acceleration curve independent of client repeat rate).
+
+Applied to ticker, flights, sports, news, blog **and ambient itself**,
+where left/right browses the rotation one level up. Verified live: news
+counter went `1/15` → tap → `2/15` → 2.5s hold → `9/15`.
+
+**Ambient is a presentation layer, not a rerun** (2026-07-31). Six
+"channel idents" sharing one geometry via `draw_ident()`: kicker / hero /
+sub. Everything that only matters while *operating* a mode is stripped —
+no dots, counters, cursors or nav hints. Each mode supplies
+`ambient_frame()` (headline-first), `AMBIENT_STYLE` (its characteristic
+entrance, reusing `transitions`), `AMBIENT_ACCENT` (its band colour) and
+`ambient_weight()` (drives dwell). Ident accents are **checked pairwise
+for distinctness** — two modes sharing a colour defeats the whole
+"know it before you read it" idea. Dwell is weighted (live game ~45s,
+guestbook ~16s) and clamped to 10–45s.
+
 **Motion system** (`transitions.py`, 2026-07-31) — one shared transition
 for the whole product, applied centrally in the render loop so all nine
 modes get the same motion rather than each inventing its own.
