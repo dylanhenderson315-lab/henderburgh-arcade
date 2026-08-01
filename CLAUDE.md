@@ -137,9 +137,16 @@ diacritics, maps the letters that don't decompose (Ł/Ø/Đ), uppercases, and
 turns anything still unsupported into a **space** so a loss is visible
 rather than silent.
 
-As of 2026-08-01 every feed that renders external text uses it: `sports`,
-`mma`, `news`, `blog`, `flights`, `weather`. (`market.py` deliberately does
-not — its `.upper()` calls are on user-typed ticker symbols, not API text.)
+As of 2026-08-01 every feed that renders external text uses it: `sports`
+(**both** the universal and the per-league parser — the per-league one was
+missed on the first migration), `mma`, `news`, `blog`, `flights`,
+`weather`. (`market.py` deliberately does not — its `.upper()` calls are on
+user-typed ticker symbols, not API text, and folding them could corrupt a
+symbol. `sports.py`'s remaining `.upper()` calls are on config values
+matched against `LEAGUE_PATHS` keys, which must NOT be folded.)
+
+**Enforced by `fold_audit.py`** — do not rely on reading the code for this;
+it has been read and pronounced complete twice while still being wrong.
 
 **Run `render_audit.py` instead of trusting a code read** — see below.
 
@@ -915,6 +922,38 @@ production device this multiplies by unit count; see `PRODUCTION.md`.
 7. **GAME DAY's stats view had overlapping text** — the "FIGHT STATS"
    kicker occupies rows 6-10 and the fighter names were drawn at y=8.
    Invisible to a code read; caught by rendering the frame and looking.
+
+### The two audits — run BOTH; they catch different things
+
+`render_audit.py` sees only the data flowing **right now**. `fold_audit.py`
+proves the fold is **applied at all**. A feed can pass the first and fail
+the second all day, and that is precisely the latent state every glyph bug
+has shipped from.
+
+### `fold_audit.py` — run after touching ANY feed parser
+
+    .venv/bin/python fold_audit.py
+
+Replays each feed's own real payload with five known-undrawable characters
+injected into the display strings (each one has already caused a real bug
+here), then asserts nothing undrawable reaches the output. Control tokens
+(`pre`/`in`/`post`, ids, dates) are skipped on purpose — parsers compare
+against them and none is drawn, so polluting them breaks the parse instead
+of testing the fold.
+
+**It found three unfolded boundaries on its first run**, all of which had
+passed a live check hours earlier *because that day's data was ASCII*:
+sports' per-league `record`/`score`/`display_clock`, mma's `clock`, and a
+news boundary that lived in the caller rather than in the function that
+looked like the boundary.
+
+**The lesson worth keeping: "I checked it live and it was clean" is not
+evidence a field is folded.** It is only evidence about today's data.
+
+**A fold belongs INSIDE the function that looks like the boundary**
+(`news._clean_title`, `blog._clean`, `flights._ident`). When it sits in the
+caller instead, an audit aimed at the obvious place passes while the real
+boundary is somewhere else.
 
 ### `render_audit.py` — run this before calling any layout done
 
