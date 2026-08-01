@@ -454,6 +454,31 @@ sessions, this is the first place to look, and the cheap fix is a longer
 `SCOREBOARD_REFRESH` or skipping leagues with no games today (their
 scoreboards are already known-empty from the `dates=` result).
 
+## Deliberately deferred (decided against, NOT missed)
+
+Things that were considered, priced, and consciously left out. They are
+recorded here so a future pass does not "discover" them as oversights and
+build them badly.
+
+### Long-haul / international flights as a "notable" category
+
+`flights._notable()` flags heavy jets, helicopters, airships, unusually
+high and unusually low traffic, and emergency squawks — all confirmed
+actually occurring in a real 213-aircraft sample before shipping.
+
+Long-haul or international was considered for the same list and
+**deliberately left out**: judging it means resolving the origin and
+destination airport of every aircraft to coordinates, which needs a
+second dataset (an airport-coordinates table) plus a per-flight lookup on
+a path that currently does none. That is a real cost on a hot path, and
+the cheap approximations (guessing from altitude, callsign prefix, or
+registration country) are wrong often enough to be worse than not
+labelling at all — a mislabelled "INTL" is more damaging than a missing
+one, because the whole point of the notable tag is that it is trustworthy.
+
+**Revisit only alongside an airport dataset**, not by inference. Until
+then this is a deferred enhancement, not a gap in the notable criteria.
+
 ## Known issues / in-progress work
 
 ### Panel lockup hazard — RESOLVED 2026-07-30, but the rule stands
