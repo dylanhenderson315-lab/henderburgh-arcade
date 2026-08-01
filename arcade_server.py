@@ -109,6 +109,7 @@ class Arcade:
         self.pause_bg = None        # last live frame, shown under the overlay
         self.pause_pulse = 0
         self.latest = self.engine.frame()
+        self._video_hold = None     # last raw decoded video frame (pre-dim)
         self.mirror = None
         self.mirror_error = None
         self.mirror_cfg = {"fit": "fill", "saturation": 1.35, "contrast": 1.15,
@@ -219,14 +220,12 @@ class Arcade:
                 # (it needs the cart's path, not zero args).
                 cart_name = mode[len("tic:"):]
                 self.engine = TicCartEngine(CARTS_DIR / cart_name)
-                self.latest = self.engine.frame()
             elif base in ENGINES:
                 self.engine = ENGINES[base]()
                 if base == "menu" and self.last_game and self.last_game != "menu":
                     # Land the cursor on whatever you actually played last,
                     # instead of always resetting to the first tile.
                     self.engine._select(self.last_game.split("-")[0])
-                self.latest = self.engine.frame()
             # Start a transition FROM whatever was on screen. Captured here,
             # after self.latest still holds the outgoing mode's last frame
             # for the paths above that don't rebuild it.
@@ -601,11 +600,8 @@ class Arcade:
                 if base:
                     frame = engines.draw_pause_overlay(
                         base, self.pause_sel, self.pause_pulse)
-            # Assign AFTER compositing: self.latest is what /api/state serves
-            # and what both pages preview, so setting it to the raw frame
-            # first would show the panel and the UI two different things.
-            if frame:
-                self.latest = frame
+            # Deliberately does NOT publish self.latest -- the render loop
+            # is the single publisher, after dimming. See PUBLISH below.
         if launch_to:
             self.set_mode(launch_to)
         return frame, last_tick
@@ -626,8 +622,6 @@ class Arcade:
             frame = self.video.read()
             if frame is not None:
                 self.video_error = None
-                with self.lock:
-                    self.latest = frame
             return frame
         except Exception as e:
             self.video_error = f"{type(e).__name__}: {e}"
@@ -647,8 +641,6 @@ class Arcade:
         try:
             frame = self.mirror.capture()
             self.mirror_error = None
-            with self.lock:
-                self.latest = frame
             return frame
         except Exception as e:
             self.mirror_error = f"{type(e).__name__}: {e}"
@@ -783,13 +775,16 @@ class Arcade:
                 elif mode == "video":
                     frame = self._video_frame()
                     if frame is None:            # not due yet -> hold last frame
-                        with self.lock:
-                            frame = self.latest
+                        # Hold the last RAW decoded frame, not self.latest:
+                        # self.latest is dimmed now, and re-feeding it into
+                        # the chain would dim it a second time on every
+                        # held frame until the next decode.
+                        frame = self._video_hold
+                    else:
+                        self._video_hold = frame
                 elif mode == "cast":
                     with self.lock:
                         frame = self.cast_frame
-                        if frame:
-                            self.latest = frame
                 else:
                     frame, last_tick = self._game_frame(
                         mode, eng, time.time(), last_tick)
@@ -813,8 +808,6 @@ class Arcade:
                                 self._request_bg_capture()
                         frame = backgrounds.composite(
                             bg_frame, frame, threshold=14, bg_gain=gain)
-                        with self.lock:
-                            self.latest = frame
 
                 # GLOBAL SEVERE-WEATHER TAKEOVER. Applied last, after every
                 # other composite, so it covers whatever was about to be
@@ -827,8 +820,6 @@ class Arcade:
                 alert_frame = self._severe_alert_frame() if mode != "weather" else None
                 if alert_frame is not None:
                     frame = alert_frame
-                    with self.lock:
-                        self.latest = frame
 
                 # MODE TRANSITION. Applied to the composed frame so it works
                 # for every mode uniformly -- games included -- and needs no
@@ -842,8 +833,6 @@ class Arcade:
                         p = (self._trans_i + 1) / float(TRANSITION_FRAMES)
                         frame = transitions.blend(self._trans_from, frame, p)
                         self._trans_i += 1
-                        with self.lock:
-                            self.latest = frame
                     else:
                         self._trans_from = None
 
@@ -852,8 +841,6 @@ class Arcade:
                 if frame is not None and self._wake_i < transitions.WAKE_FRAMES:
                     frame = transitions.wake(frame, self._wake_i)
                     self._wake_i += 1
-                    with self.lock:
-                        self.latest = frame
 
                 # TIME-OF-DAY DIMMING. Applied last, to whatever is about to
                 # be sent, so it covers every mode uniformly -- a game at
@@ -871,8 +858,17 @@ class Arcade:
                     level = brightness.level_now()
                     if level < 0.999:
                         frame = brightness.apply(frame, level)
-                        with self.lock:
-                            self.latest = frame
+
+                # PUBLISH. Exactly one assignment to self.latest per pass,
+                # after every composite AND after dimming, so /api/state can
+                # never hand out a half-composited or undimmed frame. Each
+                # stage above used to publish its own intermediate result,
+                # which left a microsecond window where the web preview and
+                # phone remote could sample a bright frame the panel never
+                # actually displayed.
+                if frame is not None:
+                    with self.lock:
+                        self.latest = frame
 
                 # Push when the image CHANGED (never faster than PANEL_FPS), or
                 # when the keepalive is due so WLED can't time out of realtime
