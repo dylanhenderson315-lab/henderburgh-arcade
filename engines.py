@@ -5462,9 +5462,17 @@ class WeatherEngine:
         else:
             draw_text_centered(buf, 14, "--F", self.INK_DIM, scale=2)
 
+        # Today's high/low, straight from the NWS forecast periods. This
+        # is the context that makes the current number mean something --
+        # 82F alone is a fact, "82F, HI 88 LO 76" tells you where in the
+        # day you are.
+        hi, lo = self.data.get("high_f"), self.data.get("low_f")
+        if isinstance(hi, (int, float)) and isinstance(lo, (int, float)):
+            draw_text_centered(buf, 23, f"HI {hi:.0f}  LO {lo:.0f}", (150, 160, 185))
+
         text = cond.get("text") or ""
         if text:
-            draw_text_centered(buf, 28, fit_text(text, WIDTH - 4), self.INK)
+            draw_text_centered(buf, 30, fit_text(text, WIDTH - 4), self.INK)
 
         draw_divider(buf, 37)
 
@@ -5500,8 +5508,40 @@ class WeatherEngine:
                 draw_text3x5(buf, vx, 47, val, self.INK)
 
         draw_divider(buf, 55)
-        draw_text_centered(buf, 58, "NO ALERTS", (60, 110, 70))
+        # Next sun event beats a static "NO ALERTS": the absence of an
+        # alert is already implied by this view being on screen at all,
+        # whereas "sunset in 2h" is a real, changing thing worth glancing
+        # at. Falls back to the alert-state line if sun times are
+        # unavailable (polar latitudes -- see weather.sun_times).
+        sun = self._sun_line()
+        if sun:
+            draw_text_centered(buf, 58, sun, (255, 200, 120))
+        else:
+            draw_text_centered(buf, 58, "NO ALERTS", (60, 110, 70))
         return bytes(buf)
+
+    def _sun_line(self):
+        """"SUNSET 8:16P" or "SUNRISE 6:26A" -- whichever comes next.
+
+        NWS does not provide sun times at all (verified: no sunrise/sunset
+        key anywhere in /points or the forecast payload), so these are
+        computed locally by weather.sun_times() and checked against an
+        independent source to within a minute."""
+        sr, ss = self.data.get("sunrise"), self.data.get("sunset")
+        now = time.time()
+        nxt = None
+        if isinstance(sr, (int, float)) and now < sr:
+            nxt = ("SUNRISE", sr)
+        elif isinstance(ss, (int, float)) and now < ss:
+            nxt = ("SUNSET", ss)
+        elif isinstance(sr, (int, float)):
+            nxt = ("SUNRISE", sr + 86400)      # past both: tomorrow's sunrise
+        if not nxt:
+            return ""
+        label, when = nxt
+        t = time.localtime(when)
+        hh = time.strftime("%I", t).lstrip("0") or "12"
+        return f"{label} {hh}:{time.strftime('%M', t)}{time.strftime('%p', t)[0]}"
 
     def frame(self):
         alerts = self.data.get("alerts") or []
@@ -5540,6 +5580,7 @@ class ClockEngine:
     DATE = (120, 130, 158)
     TEMP = (255, 200, 90)
     ISS = (255, 226, 60)
+    SUN = (255, 170, 90)
     DIM = (70, 76, 92)
 
     def __init__(self):
@@ -5643,8 +5684,33 @@ class ClockEngine:
         if isinstance(secs, (int, float)) and secs > 0:
             label = f"ISS {SatelliteEngine._fmt_countdown(secs)}"
             draw_text_centered(buf, y, fit_text(label, WIDTH - 4), self.ISS)
+            y += 8
+
+        # --- next sun event, reusing the weather feed (no new source) ---
+        # A clock that also tells you how much daylight is left is doing
+        # something a clock alone cannot. Costs nothing: weather.FEED is
+        # already read every tick for the temperature.
+        sun = self._sun_line()
+        if sun and y <= HEIGHT - 6:
+            draw_text_centered(buf, y, sun, self.SUN)
 
         return bytes(buf)
+
+    def _sun_line(self):
+        """Next sunrise/sunset, same computation the weather mode uses."""
+        sr, ss = (self.wx or {}).get("sunrise"), (self.wx or {}).get("sunset")
+        now = time.time()
+        if isinstance(sr, (int, float)) and now < sr:
+            label, when = "SUNRISE", sr
+        elif isinstance(ss, (int, float)) and now < ss:
+            label, when = "SUNSET", ss
+        elif isinstance(sr, (int, float)):
+            label, when = "SUNRISE", sr + 86400
+        else:
+            return ""
+        t = time.localtime(when)
+        hh = time.strftime("%I", t).lstrip("0") or "12"
+        return f"{label} {hh}:{time.strftime('%M', t)}{time.strftime('%p', t)[0]}"
 
 
 class BlogEngine:

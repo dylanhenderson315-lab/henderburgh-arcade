@@ -38,7 +38,12 @@ Two rules, same as every other feed: never block the render loop, never
 invent a number. A missing field comes back as None and the engine
 renders around it honestly.
 """
+import calendar
 import json
+import math
+from datetime import date as _date
+import math
+import calendar
 import threading
 import time
 import urllib.error
@@ -54,6 +59,7 @@ POINTS_URL = "https://api.weather.gov/points/{lat},{lon}"
 ALERTS_URL = "https://api.weather.gov/alerts/active?point={lat},{lon}"
 
 CONDITIONS_REFRESH = 600.0    # observations update ~hourly; 10 min is plenty
+FORECAST_REFRESH = 3600.0     # high/low changes slowly; one request an hour
 ALERTS_REFRESH = 120.0        # severe alerts are the time-critical half
 POINT_REFRESH = 86400.0       # gridpoint/station for a location never really changes
 MAX_STATION_TRIES = 4         # see _fetch_point: nearest station often under-reports
@@ -86,6 +92,80 @@ def _val(field):
     return field if isinstance(field, (int, float)) else None
 
 
+# ---- sun times ---------------------------------------------------------
+# NWS does NOT provide sunrise/sunset. Checked the whole /points and
+# /gridpoints/.../forecast payloads: no sunrise, sunset, or daylight key
+# anywhere. So these are COMPUTED locally with the standard NOAA solar
+# equations rather than fetched.
+#
+# That is calculation, not invention -- the same category as the haversine
+# distance in satellite.py. Sun times are a deterministic function of
+# latitude, longitude and date; there is nothing to guess. It also costs
+# no network request and cannot go stale.
+#
+# Verified against an independent source for the configured location
+# before being shipped (see the commit message for the comparison).
+
+def _solar_event(lat, lon, when, rising):
+    """UTC hour (float) of sunrise/sunset, or None above/below the polar
+    circles where the sun may not cross the horizon that day."""
+    n = when.toordinal() - _date(when.year, 1, 1).toordinal() + 1
+    lng_hour = lon / 15.0
+    t = n + ((6.0 if rising else 18.0) - lng_hour) / 24.0
+    m = 0.9856 * t - 3.289                                  # sun's mean anomaly
+    l = (m + 1.916 * math.sin(math.radians(m))
+         + 0.020 * math.sin(math.radians(2 * m)) + 282.634) % 360.0
+    ra = math.degrees(math.atan(0.91764 * math.tan(math.radians(l)))) % 360.0
+    # Right ascension must land in the same quadrant as L.
+    ra = (ra + (math.floor(l / 90.0) * 90.0 - math.floor(ra / 90.0) * 90.0)) / 15.0
+    sin_dec = 0.39782 * math.sin(math.radians(l))
+    cos_dec = math.cos(math.asin(sin_dec))
+    zenith = math.radians(90.833)                            # includes refraction + solar disc
+    cos_h = ((math.cos(zenith) - sin_dec * math.sin(math.radians(lat)))
+             / (cos_dec * math.cos(math.radians(lat))))
+    if cos_h > 1 or cos_h < -1:
+        return None                                          # sun never rises/sets here today
+    h = (360.0 - math.degrees(math.acos(cos_h))) if rising else math.degrees(math.acos(cos_h))
+    return (h / 15.0 + ra - 0.06571 * t - 6.622 - lng_hour) % 24.0
+
+
+def sun_times(lat, lon, when=None):
+    """(sunrise_epoch, sunset_epoch) in local time, or (None, None)."""
+    when = when or _date.today()
+    out = []
+    for rising in (True, False):
+        ut = _solar_event(lat, lon, when, rising)
+        if ut is None:
+            return (None, None)
+        secs = int(round(ut * 3600))
+        out.append(calendar.timegm((when.year, when.month, when.day,
+                                    secs // 3600, (secs % 3600) // 60, secs % 60, 0, 0, 0)))
+    return tuple(out)
+
+
+def _fetch_forecast(forecast_url):
+    """Today's high and low from the NWS forecast periods.
+
+    VERIFIED present: periods carry `temperature`, `temperatureUnit` and
+    `isDaytime`. Note the forecast endpoint returns FAHRENHEIT directly
+    (unlike the observations endpoint, which is metric) -- so this is one
+    of the few places no conversion is wanted.
+    """
+    d = _get_json(forecast_url)
+    periods = (d.get("properties") or {}).get("periods") or []
+    high = low = None
+    for p in periods[:3]:                    # today + tonight is enough
+        t, unit = p.get("temperature"), (p.get("temperatureUnit") or "F").upper()
+        if not isinstance(t, (int, float)):
+            continue
+        f = t if unit == "F" else t * 9.0 / 5.0 + 32.0
+        if p.get("isDaytime") and high is None:
+            high = round(f)
+        elif not p.get("isDaytime") and low is None:
+            low = round(f)
+    return {"high_f": high, "low_f": low}
+
+
 def _fetch_point(lat, lon):
     """Resolve a location to its observation station + place name."""
     d = _get_json(POINTS_URL.format(lat=_round_coord(lat), lon=_round_coord(lon)))
@@ -106,7 +186,8 @@ def _fetch_point(lat, lon):
     # KCPC a few miles away report both. Taking feats[0] blindly means
     # "feels like" would silently never appear for some locations.
     stations = [f["properties"]["stationIdentifier"] for f in feats[:MAX_STATION_TRIES]]
-    return {"stations": stations, "station": stations[0], "city": city, "state": state}
+    return {"stations": stations, "station": stations[0], "city": city, "state": state,
+            "forecast_url": props.get("forecast")}
 
 
 def _read_observation(station):
@@ -202,6 +283,8 @@ class WeatherFeed:
         self._point_try = 0.0
         self._cond_try = 0.0
         self._alerts_try = 0.0
+        self._fc = {}
+        self._fc_try = 0.0
         self._last_config_check = 0.0
         self._last_read = 0.0
         self._thread = None
@@ -217,14 +300,19 @@ class WeatherFeed:
             cond = dict(self._cond) if self._cond else None
             alerts = [dict(a) for a in self._alerts]
             point = dict(self._point) if self._point else None
+            fc = dict(self._fc)
             updated, err = self._cond_updated, self._err
             label = self._home[2]
         self._ensure_thread()
         place = label
         if point and point.get("city"):
             place = point["city"]
+        lat, lon, _ = self._home
+        sunrise, sunset = sun_times(lat, lon)
         return {
             "conditions": cond, "alerts": alerts, "place": place,
+            "high_f": fc.get("high_f"), "low_f": fc.get("low_f"),
+            "sunrise": sunrise, "sunset": sunset,
             "configured": satellite.FEED.configured,
             "age": (now - updated) if updated else None,
             "err": err,
@@ -248,6 +336,7 @@ class WeatherFeed:
             self._refresh_point()
             self._refresh_conditions()
             self._refresh_alerts()
+            self._refresh_forecast()
             time.sleep(2.0)
 
     def _maybe_reload_location(self):
@@ -306,6 +395,25 @@ class WeatherFeed:
         except Exception as e:                          # noqa: BLE001
             with self._lock:
                 self._err = f"{type(e).__name__}"
+
+    def _refresh_forecast(self):
+        """Today's high/low. Forecasts change slowly, so this is polled far
+        less often than observations -- one extra request per hour."""
+        now = time.time()
+        with self._lock:
+            if now - self._fc_try < FORECAST_REFRESH:
+                return
+            point = self._point
+            if not point or not point.get("forecast_url"):
+                return
+            self._fc_try = now
+            url = point["forecast_url"]
+        try:
+            fc = _fetch_forecast(url)
+            with self._lock:
+                self._fc = fc
+        except Exception:                                # noqa: BLE001
+            pass          # conditions already report errors; don't double up
 
     def _refresh_alerts(self):
         now = time.time()
