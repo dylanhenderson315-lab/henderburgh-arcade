@@ -38,7 +38,29 @@
   .pstate{font-size:10px;letter-spacing:.12em;color:var(--dim);text-transform:uppercase;margin-top:-6px;}
 
   .modes{display:flex;flex-wrap:wrap;gap:7px;justify-content:center;max-width:420px;}
-  .modes.dim{opacity:.42;}
+  #modes.dim{opacity:.42;}
+
+  /* Grouped mode picker. Four genuinely different kinds of thing, so the
+     grouping is structural rather than decorative. */
+  #modes{display:flex;flex-direction:column;gap:14px;max-width:420px;width:100%;}
+  .group{display:flex;flex-direction:column;align-items:center;gap:8px;}
+  .group h3{font-size:9.5px;letter-spacing:.2em;color:var(--dim);margin:0;
+            text-transform:uppercase;font-weight:600;}
+  .demos{width:100%;max-width:420px;}
+  .demos summary{font-size:10px;letter-spacing:.1em;color:var(--dim);cursor:pointer;
+                 text-align:center;padding:4px;list-style:none;}
+  .demos summary::-webkit-details-marker{display:none;}
+  .demos summary:hover{color:var(--accent);}
+  .demos .modes{margin-top:8px;}
+
+  /* GAME DAY is a takeover, not a peer of the other modes -- it seizes the
+     whole panel and hands it back on its own. Its own colour says so
+     before the label is read, matching engines.GAMEDAY_ACCENT. */
+  #modes button.takeover{border-color:#7a2230;color:#ff5f72;font-weight:700;letter-spacing:.1em;}
+  #modes button.takeover:hover{border-color:#eb2d41;color:#ff8b98;}
+  /* ID-qualified purely for robustness against any future generic button
+     rule; plain `button.takeover.active` already wins on specificity. */
+  #modes button.takeover.active{background:#eb2d41;color:#fff;border-color:#eb2d41;}
   .pad{display:grid;grid-template-columns:repeat(3,56px);grid-template-rows:repeat(3,56px);gap:7px;}
   .pad button{font-size:19px;padding:0;}
   .pad .sp{visibility:hidden;}
@@ -99,41 +121,81 @@
     <button id="homebtn">⌂ Home <span class="hint">Esc</span></button>
   </div>
 
-  <div class="modes" id="modes">
-    <button data-mode="snake">▶ Snake</button>
-    <button data-mode="tetris">▶ Tetris</button>
-    <button data-mode="pong">▶ Pong</button>
-    <button data-mode="breakout">▶ Breakout</button>
-    <button data-mode="tron">▶ Tron</button>
-    <button data-mode="flappy">▶ Flappy</button>
-    <button data-mode="invaders">▶ Invaders</button>
-    <button data-mode="dodge">▶ Dodge</button>
-    <button data-mode="2048">▶ 2048</button>
-    <button data-mode="life">▶ Life</button>
-    <button data-mode="brawler">▶ Brawler</button>
-    <button data-mode="chase">▶ Chase</button>
-    <button data-mode="tunnel">▶ Tunnel</button>
-    <button data-mode="powder">▶ Powder</button>
-    <button data-mode="ticker">▶ Ticker</button>
-    <button data-mode="satellite">▶ ISS Tracker</button>
-    <button data-mode="flights">▶ Flights</button>
-    <button data-mode="snake-demo">🤖 Snake auto</button>
-    <button data-mode="tetris-demo">🤖 Tetris auto</button>
-    <button data-mode="pong-demo">🤖 Pong auto</button>
-    <button data-mode="breakout-demo">🤖 Breakout auto</button>
-    <button data-mode="tron-demo">🤖 Tron auto</button>
-    <button data-mode="flappy-demo">🤖 Flappy auto</button>
-    <button data-mode="invaders-demo">🤖 Invaders auto</button>
-    <button data-mode="dodge-demo">🤖 Dodge auto</button>
-    <button data-mode="2048-demo">🤖 2048 auto</button>
-    <button data-mode="life-demo">🤖 Life auto</button>
-    <button data-mode="brawler-demo">🤖 Brawler auto</button>
-    <button data-mode="chase-demo">🤖 Chase auto</button>
-    <button data-mode="tunnel-demo">🤖 Tunnel auto</button>
-    <button data-mode="powder-demo">🤖 Powder auto</button>
-    <button data-mode="mirror">🖥 Mirror</button>
-    <button data-mode="video">🎬 Video</button>
-    <button data-mode="cast">📱 Cast</button>
+  <!-- Mode picker, GROUPED. A flat list of 36 buttons stopped being
+       navigable once the data modes landed; these are four genuinely
+       different kinds of thing and the grouping says so. -->
+  <div id="modes">
+    <div class="group">
+      <h3>Games</h3>
+      <div class="modes">
+      <button data-mode="snake">▶ Snake</button>
+      <button data-mode="tetris">▶ Tetris</button>
+      <button data-mode="pong">▶ Pong</button>
+      <button data-mode="breakout">▶ Breakout</button>
+      <button data-mode="tron">▶ Tron</button>
+      <button data-mode="flappy">▶ Flappy</button>
+      <button data-mode="invaders">▶ Invaders</button>
+      <button data-mode="dodge">▶ Dodge</button>
+      <button data-mode="2048">▶ 2048</button>
+      <button data-mode="life">▶ Life</button>
+      <button data-mode="brawler">▶ Brawler</button>
+      <button data-mode="chase">▶ Chase</button>
+      <button data-mode="tunnel">▶ Tunnel</button>
+      <button data-mode="powder">▶ Powder</button>
+      </div>
+      <details class="demos">
+        <summary>Auto-play demos — the panel plays itself</summary>
+        <div class="modes">
+      <button data-mode="snake-demo">🤖 Snake auto</button>
+      <button data-mode="tetris-demo">🤖 Tetris auto</button>
+      <button data-mode="pong-demo">🤖 Pong auto</button>
+      <button data-mode="breakout-demo">🤖 Breakout auto</button>
+      <button data-mode="tron-demo">🤖 Tron auto</button>
+      <button data-mode="flappy-demo">🤖 Flappy auto</button>
+      <button data-mode="invaders-demo">🤖 Invaders auto</button>
+      <button data-mode="dodge-demo">🤖 Dodge auto</button>
+      <button data-mode="2048-demo">🤖 2048 auto</button>
+      <button data-mode="life-demo">🤖 Life auto</button>
+      <button data-mode="brawler-demo">🤖 Brawler auto</button>
+      <button data-mode="chase-demo">🤖 Chase auto</button>
+      <button data-mode="tunnel-demo">🤖 Tunnel auto</button>
+      <button data-mode="powder-demo">🤖 Powder auto</button>
+        </div>
+      </details>
+    </div>
+
+    <div class="group">
+      <h3>Data &amp; ambient</h3>
+      <div class="modes">
+      <button data-mode="clock">🕐 Clock</button>
+      <button data-mode="ticker">📈 Ticker</button>
+      <button data-mode="satellite">🛰 ISS</button>
+      <button data-mode="flights">✈ Flights</button>
+      <button data-mode="sports">🏆 Sports</button>
+      <button data-mode="news">📰 News</button>
+      <button data-mode="weather">🌤 Weather</button>
+      <button data-mode="blog">💬 Guestbook</button>
+      <button data-mode="ambient">🔄 Ambient</button>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Event</h3>
+      <div class="modes">
+        <button data-mode="gameday" class="takeover">🥊 Game Day</button>
+      </div>
+      <div class="hint">Takes over the whole panel for one event and hands it
+        back when the event ends. Only a severe weather alert interrupts it.</div>
+    </div>
+
+    <div class="group">
+      <h3>Media</h3>
+      <div class="modes">
+      <button data-mode="mirror">🖥 Mirror</button>
+      <button data-mode="video">🎬 Video</button>
+      <button data-mode="cast">📱 Cast</button>
+      </div>
+    </div>
   </div>
 
   <div id="err" class="err hide"></div>
@@ -147,6 +209,92 @@
     </div>
     <button data-in="drop">⤓ DROP</button>
     <div class="hint">Keyboard: arrows / WASD · ↑ rotate · Space drop</div>
+  </div>
+
+  <!-- ============ PER-MODE CONFIG ============
+       Every one of these had a working API endpoint and NO user interface,
+       so the only way to set a favourite team or an RSS feed was a raw
+       curl. Same shape as the mirror/video/cast cards: shown when the mode
+       it belongs to is selected. -->
+
+  <div id="tickercard" class="card hide">
+    <h2>Ticker — watchlist</h2>
+    <!-- Two fields, not one: the API validates crypto against CoinGecko's
+         known list and passes stocks through to Yahoo, so they are
+         genuinely different lists rather than one merged box. -->
+    <div class="row"><label>Crypto</label>
+      <input type="text" id="tk-crypto" placeholder="BTC, ETH"></div>
+    <div class="row"><label>Stocks</label>
+      <input type="text" id="tk-stocks" placeholder="AAPL, NVDA"></div>
+    <div class="row"><button id="tk-save">Save watchlist</button>
+      <span id="tk-msg" class="badge"></span></div>
+    <div class="hint" id="tk-known"></div>
+  </div>
+
+  <div id="loccard" class="card hide">
+    <h2>Home location — ISS, flights &amp; weather</h2>
+    <div class="row"><label>Latitude</label><input type="text" id="lc-lat" placeholder="40.7128"></div>
+    <div class="row"><label>Longitude</label><input type="text" id="lc-lon" placeholder="-74.0060"></div>
+    <div class="row"><label>Label</label><input type="text" id="lc-label" placeholder="HOME"></div>
+    <div class="row"><button id="lc-save">Save location</button>
+      <span id="lc-msg" class="badge"></span></div>
+    <div class="hint">One shared location for all three modes — ISS pass
+      predictions, nearby aircraft and the NWS weather gridpoint. Weather is
+      US-only (NWS coverage).</div>
+  </div>
+
+  <div id="sportscard" class="card hide">
+    <h2>Sports — leagues &amp; pinned team</h2>
+    <div class="row"><label>Leagues</label><input type="text" id="sp-leagues"
+      placeholder="NFL, NBA, MLB, NHL"></div>
+    <div class="row"><button id="sp-lg-save">Save leagues</button>
+      <span id="sp-lg-msg" class="badge"></span></div>
+    <div class="hint" id="sp-known" style="margin-bottom:10px;"></div>
+    <div class="row"><label>Pin team</label>
+      <input type="text" id="sp-fav-lg" placeholder="league" style="max-width:88px;">
+      <input type="text" id="sp-fav-tm" placeholder="team abbr" style="max-width:110px;"></div>
+    <div class="row"><button id="sp-fav-save">Pin</button>
+      <button id="sp-fav-clear">Unpin</button>
+      <span id="sp-fav-msg" class="badge"></span></div>
+    <div class="hint">The pinned team gets a full-screen score with live game
+      state. More leagues = more requests against ESPN's undocumented API.</div>
+  </div>
+
+  <div id="newscard" class="card hide">
+    <h2>News — RSS source</h2>
+    <div class="row"><label>Feed URL</label><input type="text" id="nw-url"
+      placeholder="https://example.com/rss"></div>
+    <div class="row"><button id="nw-save">Save feed</button>
+      <span id="nw-msg" class="badge"></span></div>
+    <div class="hint">Any standard RSS 2.0 feed. Headlines only — never article
+      bodies. AP's and Reuters' public URLs currently redirect to their
+      homepages with nothing parseable, so they aren't offered as presets.</div>
+  </div>
+
+  <div id="blogcard" class="card hide">
+    <h2>Guestbook — source</h2>
+    <div class="row"><label>API URL</label><input type="text" id="bl-url"></div>
+    <div class="row"><button id="bl-save">Save source</button>
+      <span id="bl-msg" class="badge"></span></div>
+    <div class="hint">Visitor messages posted to the HENDERBURGH site. This is a
+      guestbook / message board, not an article feed.</div>
+  </div>
+
+  <div id="gamedaycard" class="card hide">
+    <h2>Game Day — what tonight is</h2>
+    <div class="row"><label>Event</label>
+      <select id="gd-target">
+        <option value="ufc">UFC card — next/current, auto-detected</option>
+        <option value="team">Team game — uses the pinned sports team</option>
+      </select></div>
+    <div class="row"><label>Auto-exit</label>
+      <select id="gd-exit">
+        <option value="1">Yes — hand the panel back when it ends</option>
+        <option value="0">No — stay until I switch away</option>
+      </select></div>
+    <div class="row"><button id="gd-save">Save</button>
+      <span id="gd-msg" class="badge"></span></div>
+    <div id="gd-event" class="hint"></div>
   </div>
 
   <!-- Mirror settings -->
@@ -248,6 +396,31 @@
       <label for="bg-speed">Speed <span id="bg-spd-val" class="badge">50</span></label>
       <input type="range" id="bg-speed" min="1" max="100" value="50" style="margin-bottom:10px;">
       <div class="hint" id="bg-hint">All <b>255 Apollo M-1 / WLED effects</b> (live from the panel). Pick one with no game = <b>real</b> effect on the matrix. With a game running, a matching animation fills black pixels under the sprites (DDP has to own the full frame).</div>
+    </div>
+
+    <!-- Night dimming is GLOBAL (applied in the render loop to whatever is
+         about to be sent), so it belongs in the rail, not behind a mode. -->
+    <div class="card" id="dimcard">
+      <h2>Night dimming</h2>
+      <div class="row"><label>Enabled</label>
+        <select id="br-on"><option value="1">On</option><option value="0">Off</option></select></div>
+      <label for="br-day">Day <span id="br-day-val" class="badge"></span></label>
+      <input type="range" id="br-day" min="0.05" max="1" step="0.01" style="margin-bottom:10px;">
+      <label for="br-night">Night <span id="br-night-val" class="badge"></span></label>
+      <input type="range" id="br-night" min="0.05" max="1" step="0.01" style="margin-bottom:10px;">
+      <div class="row"><label>Starts</label><input type="text" id="br-start" placeholder="22:00"></div>
+      <div class="row"><label>Ends</label><input type="text" id="br-end" placeholder="07:00"></div>
+      <div class="row"><label>Fade</label><input type="text" id="br-fade" placeholder="30"></div>
+      <div class="row"><button id="br-save">Save</button><span id="br-msg" class="badge"></span></div>
+      <div class="hint">Applies to every mode. A severe weather alert is exempt —
+        it must stay bright at 3am to be worth anything. Current level:
+        <b id="br-now">—</b></div>
+    </div>
+
+    <!-- Key bindings have to be visible to be usable. -->
+    <div class="card" id="keycard">
+      <h2>Keyboard</h2>
+      <div class="hint" id="keylegend"></div>
     </div>
   </aside>
   </div><!-- /.shell -->
@@ -357,6 +530,152 @@ $('bg-speed').addEventListener('input', () => {
 $('bg-speed').addEventListener('change', pushBackground);
 loadBackgrounds();
 
+/* ---------- per-mode config ----------
+   Every endpoint below already existed and had no UI at all. `cfgTouched`
+   is the same guard the background selector uses: don't fight the user's
+   typing with a value echoed back by the poll. */
+const post = (url, body) => fetch(url, {method:'POST',
+  headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+const say = (el, txt, ok) => {
+  const n = $(el); if (!n) return;
+  n.textContent = txt; n.style.color = ok === false ? 'var(--red)' : 'var(--accent)';
+  setTimeout(() => { n.textContent = ''; }, 4000);
+};
+const mark = () => { cfgTouched = Date.now(); };
+document.querySelectorAll('.card input, .card select').forEach(
+  el => el.addEventListener('input', mark));
+
+const csv = el => $(el).value.split(',').map(x=>x.trim()).filter(Boolean);
+async function loadTicker(){
+  try{ const j = await (await fetch('/api/ticker/symbols')).json();
+       $('tk-crypto').value = (j.crypto || []).join(', ');
+       $('tk-stocks').value = (j.stocks || []).join(', ');
+       $('tk-known').innerHTML = 'Crypto is validated against CoinGecko: <b>'
+         + (j.known_crypto || []).join(' ') + '</b>. Stocks go to Yahoo Finance.';
+  }catch(_){}
+}
+$('tk-save').addEventListener('click', async () => {
+  const j = await (await post('/api/ticker/symbols',
+    {crypto: csv('tk-crypto'), stocks: csv('tk-stocks')})).json();
+  say('tk-msg', j.rejected && j.rejected.length ? 'rejected: '+j.rejected.join(' ') : 'saved',
+      !(j.rejected && j.rejected.length));
+  loadTicker();
+});
+
+async function loadLoc(){
+  try{ const j = await (await fetch('/api/satellite/location')).json();
+       if (j.lat != null) $('lc-lat').value = j.lat;
+       if (j.lon != null) $('lc-lon').value = j.lon;
+       $('lc-label').value = j.label || ''; }catch(_){}
+}
+$('lc-save').addEventListener('click', async () => {
+  const r = await post('/api/satellite/location', {
+    lat: parseFloat($('lc-lat').value), lon: parseFloat($('lc-lon').value),
+    label: $('lc-label').value});
+  const j = await r.json();
+  say('lc-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
+});
+
+async function loadSports(){
+  try{ const j = await (await fetch('/api/sports/config')).json();
+       $('sp-leagues').value = (j.leagues || []).join(', ');
+       $('sp-known').innerHTML = 'Known: <b>' + (j.known_leagues || []).join(' · ') + '</b>';
+       if (j.favorite){ $('sp-fav-lg').value = j.favorite.league || '';
+                        $('sp-fav-tm').value = j.favorite.team_abbr || ''; } }catch(_){}
+}
+$('sp-lg-save').addEventListener('click', async () => {
+  const lg = $('sp-leagues').value.split(',').map(x=>x.trim()).filter(Boolean);
+  const j = await (await post('/api/sports/leagues', {leagues: lg})).json();
+  say('sp-lg-msg', j.rejected && j.rejected.length ? 'rejected: '+j.rejected.join(' ') : 'saved',
+      !(j.rejected && j.rejected.length));
+  loadSports();
+});
+$('sp-fav-save').addEventListener('click', async () => {
+  const j = await (await post('/api/sports/favorite',
+    {league: $('sp-fav-lg').value, team_abbr: $('sp-fav-tm').value})).json();
+  say('sp-fav-msg', j.ok === false ? (j.error || 'error') : 'pinned', j.ok !== false);
+  loadSports();
+});
+$('sp-fav-clear').addEventListener('click', async () => {
+  await post('/api/sports/favorite', {});
+  $('sp-fav-lg').value = ''; $('sp-fav-tm').value = '';
+  say('sp-fav-msg', 'unpinned');
+});
+
+async function loadNews(){
+  try{ const j = await (await fetch('/api/news/config')).json();
+       $('nw-url').value = j.feed_url || ''; }catch(_){}
+}
+$('nw-save').addEventListener('click', async () => {
+  const j = await (await post('/api/news/source', {feed_url: $('nw-url').value})).json();
+  say('nw-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
+  loadNews();
+});
+
+async function loadBlog(){
+  try{ const j = await (await fetch('/api/blog/config')).json();
+       $('bl-url').value = j.api_url || ''; }catch(_){}
+}
+$('bl-save').addEventListener('click', async () => {
+  const j = await (await post('/api/blog/source', {api_url: $('bl-url').value})).json();
+  say('bl-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
+  loadBlog();
+});
+
+async function loadGameday(){
+  try{
+    const j = await (await fetch('/api/gameday/config')).json();
+    if (Date.now() - cfgTouched > 3000){
+      $('gd-target').value = j.target || 'ufc';
+      $('gd-exit').value = j.auto_exit ? '1' : '0';
+    }
+    const e = j.event || {};
+    $('gd-event').innerHTML = j.target === 'ufc'
+      ? (e.name ? `<b>${e.name}</b><br>${e.done}/${e.total} fights done`
+                  + (e.live ? ' · <b>LIVE</b>' : e.completed ? ' · finished' : ' · scheduled')
+                : (e.next ? 'Next: <b>' + e.next + '</b>' : 'No card loaded yet.'))
+      : (e.game ? `<b>${e.game}</b> · ${e.state}` : 'No game today for the pinned team.');
+  }catch(_){}
+}
+$('gd-save').addEventListener('click', async () => {
+  const j = await (await post('/api/gameday/config',
+    {target: $('gd-target').value, auto_exit: $('gd-exit').value === '1'})).json();
+  say('gd-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
+  cfgTouched = 0; loadGameday();
+});
+
+async function loadBrightness(){
+  try{
+    const j = await (await fetch('/api/brightness')).json();
+    if (Date.now() - cfgTouched > 3000){
+      $('br-on').value = j.enabled ? '1' : '0';
+      $('br-day').value = j.day_brightness;
+      $('br-night').value = j.night_brightness;
+      $('br-start').value = j.night_start; $('br-end').value = j.night_end;
+      $('br-fade').value = j.fade_minutes;
+    }
+    $('br-day-val').textContent = Math.round(j.day_brightness*100)+'%';
+    $('br-night-val').textContent = Math.round(j.night_brightness*100)+'%';
+    $('br-now').textContent = Math.round((j.current_level ?? 0)*100)+'%';
+  }catch(_){}
+}
+['br-day','br-night'].forEach(id => $(id).addEventListener('input', () => {
+  $(id+'-val').textContent = Math.round($(id).value*100)+'%';
+}));
+$('br-save').addEventListener('click', async () => {
+  const j = await (await post('/api/brightness', {
+    enabled: $('br-on').value === '1',
+    day_brightness: parseFloat($('br-day').value),
+    night_brightness: parseFloat($('br-night').value),
+    night_start: $('br-start').value, night_end: $('br-end').value,
+    fade_minutes: parseInt($('br-fade').value, 10)})).json();
+  say('br-msg', 'saved');
+  cfgTouched = 0; loadBrightness();
+});
+
+loadTicker(); loadLoc(); loadSports(); loadNews(); loadBlog(); loadBrightness();
+setInterval(loadBrightness, 30000);
+
 /* ---------- power + modes ---------- */
 function syncUI(){
   const on = curMode && curMode !== 'off';
@@ -368,6 +687,7 @@ function syncUI(){
   $('pstate').textContent = on ? 'panel live · arcade in control'
                                : 'panel released · normal lighting';
   $('modes').classList.toggle('dim', !on);
+  renderLegend();
   // Playable engines only (not *-demo and not media modes).
   const base = (curMode || '').split('-')[0];
   const PLAYABLE = new Set(['snake','tetris','pong','breakout','tron','flappy',
@@ -381,6 +701,17 @@ function syncUI(){
   $('mirrorcard').classList.toggle('hide', !mirroring);
   $('videocard').classList.toggle('hide', curMode !== 'video');
   $('castcard').classList.toggle('hide', curMode !== 'cast');
+
+  // Per-mode config. The location card is shared by the three modes that
+  // actually use location_config.json, rather than duplicated per mode.
+  $('tickercard').classList.toggle('hide', base !== 'ticker');
+  $('loccard').classList.toggle('hide',
+      !['satellite','flights','weather'].includes(base));
+  $('sportscard').classList.toggle('hide', base !== 'sports');
+  $('newscard').classList.toggle('hide', base !== 'news');
+  $('blogcard').classList.toggle('hide', base !== 'blog');
+  $('gamedaycard').classList.toggle('hide', base !== 'gameday');
+  if (base === 'gameday' && Date.now() - cfgTouched > 3000) loadGameday();
 }
 const setMode = m => fetch('/api/mode/' + m, {method:'POST'});
 const sendInput = c => fetch('/api/input/' + c, {method:'POST'});
@@ -398,9 +729,18 @@ const KEYS = {ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',
               w:'up',s:'down',a:'left',d:'right',' ':'drop',
               Enter:'rotate', e:'rotate', q:'rotate',
               h:'hold', f:'hold', Shift:'hold'};
+/* Every mode the keyboard may drive. The data modes are here because they
+   are Browsable (engines.Scroller): left/right is a real browse control
+   there, with the SAME tap-to-step / hold-to-accelerate behaviour as a
+   game's dpad, so there is one input model rather than two. Previously
+   these arrow keys were dead in sports/news/weather/blog/ambient/gameday
+   even though the server was ready for them. */
 const PLAYABLE = new Set(['snake','tetris','pong','breakout','tron','flappy',
                           'invaders','dodge','2048','life',
-                          'brawler','chase','tunnel','powder','ticker','satellite','flights']);
+                          'brawler','chase','tunnel','powder',
+                          'ticker','satellite','flights',
+                          'sports','news','weather','clock','blog',
+                          'ambient','gameday']);
 /* Powder is genuinely pointer-driven, so on the desktop dashboard you draw
    straight onto the preview canvas: it is already a 1:1 map of the panel,
    which makes it the honest place to aim. Sends the same /api/pointer the
@@ -453,6 +793,44 @@ async function kRelease(c){
 }
 const REPEATABLE = {up:1, down:1, left:1, right:1};
 const keyHeld = {};
+/* The legend is context-aware: arrows genuinely MEAN different things in
+   a game vs a data mode, and printing one fixed list would be wrong half
+   the time. Kept visible rather than hidden behind a help toggle -- a
+   binding nobody can discover may as well not exist. */
+/* Derived from the engine classes, not guessed: these are exactly the
+   modes that subclass engines.Browsable and therefore get the real
+   tap-to-step / hold-to-accelerate Scroller. satellite, weather and clock
+   handle left/right themselves as a plain view cycle with no hold
+   acceleration, so they are listed separately and described honestly
+   rather than promising a hold behaviour they do not implement. */
+const BROWSABLE = new Set(['ticker','flights','sports','news','blog',
+                           'ambient','gameday']);
+const STEPPABLE = new Set(['satellite','weather','clock']);
+function renderLegend(){
+  const el = $('keylegend'); if (!el) return;
+  const base = (curMode || '').split('-')[0];
+  const rows = [];
+  if (BROWSABLE.has(base)){
+    rows.push(['← →', 'browse — tap steps, <b>hold accelerates</b>']);
+    rows.push(['Enter', 'pause / resume auto-advance']);
+  } else if (STEPPABLE.has(base)){
+    rows.push(['← →', 'next / previous view']);
+  } else if (PLAYABLE.has(base)){
+    rows.push(['← → ↑ ↓', 'move  <span style="opacity:.6">(or WASD)</span>']);
+    rows.push(['Enter / E', 'rotate']);
+    rows.push(['Space', 'drop']);
+    rows.push(['H / Shift', 'hold']);
+  } else {
+    rows.push(['← → ↑ ↓', 'active once a game or data mode is running']);
+  }
+  rows.push(['P', 'pause']);
+  rows.push(['Esc', 'home / menu']);
+  el.innerHTML = rows.map(([k,v]) =>
+    `<div style="display:flex;gap:8px;margin-bottom:4px;">
+       <span style="color:var(--ink);min-width:74px;">${k}</span><span>${v}</span></div>`).join('')
+    + '<div style="margin-top:8px;opacity:.7;">Keys are ignored while typing in a field.</div>';
+}
+
 const playable = () => {
   const base = (curMode || '').split('-')[0];
   return PLAYABLE.has(base) && curMode && !curMode.endsWith('-demo');
