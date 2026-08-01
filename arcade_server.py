@@ -47,6 +47,7 @@ import news
 import weather
 import blog
 import brightness
+import transitions
 
 PORT = 7333
 HERE = Path(__file__).parent
@@ -63,6 +64,11 @@ PANEL_FPS = 16                     # cap on packets actually SENT to the panel
 # sent when the image CHANGES, so a static picture would silently hand the panel
 # back mid-session. Re-send the last frame this often to hold the takeover.
 KEEPALIVE_S = 1.0
+# Mode-change transition length. ~0.4s at RENDER_FPS -- long enough to
+# read as intentional motion, short enough never to feel like latency.
+# Cost is ~0.001ms/frame (pure byte slicing), so this is nowhere near the
+# frame-rate or DDP-flood limits documented above.
+TRANSITION_FRAMES = 10
 # The panel RESTS on the clock rather than sitting dark. A 64x64 display
 # on a wall doing nothing is the one state that earns nothing, and clock
 # needs no network so it works even with every feed down.
@@ -117,6 +123,13 @@ class Arcade:
                           "contrast": 1.1, "autocrop": False}
         self.cast_frame = None
         self.cast_at = 0.0
+        # Mode-change transition state. _trans_from is the last frame of the
+        # OUTGOING mode; the loop slides the incoming mode in over it.
+        self._trans_from = None
+        self._trans_i = 0
+        # First-light: ramp the very first frames up out of black rather
+        # than snapping to a fully-lit panel.
+        self._wake_i = 0
         self.stats = {"sent": 0, "errors": 0, "loop_errors": 0}
         # Apollo M-1 WLED effect as background (id = effect index string, or "none")
         self.background = "none"   # "none" | "0".."254"
@@ -189,6 +202,7 @@ class Arcade:
                 mode = RESUME_GAME
             was_off = self.mode == "off"
             prev = self.mode
+            prev_frame = self.latest if prev != "off" else None
             if mode != "off":
                 # Don't treat pure ambient background, the boot splash, or
                 # the system menu itself as a "game" to resume -- last_game
@@ -213,9 +227,21 @@ class Arcade:
                     # instead of always resetting to the first tile.
                     self.engine._select(self.last_game.split("-")[0])
                 self.latest = self.engine.frame()
+            # Start a transition FROM whatever was on screen. Captured here,
+            # after self.latest still holds the outgoing mode's last frame
+            # for the paths above that don't rebuild it.
+            if prev != mode and mode != "off":
+                self._trans_from = prev_frame
+                self._trans_i = 0
 
         # Do panel HTTP outside the lock — it must never stall the render loop.
         if was_off and mode != "off":
+            # Coming from released/dark: play the first-light ramp, and do
+            # NOT also slide -- there is nothing meaningful to slide away
+            # from, and doing both at once reads as a glitch.
+            with self.lock:
+                self._wake_i = 0
+                self._trans_from = None
             self._take_panel()
         elif not was_off and mode == "off":
             threading.Timer(0.4, self._release_panel).start()   # after last packet
@@ -801,6 +827,31 @@ class Arcade:
                 alert_frame = self._severe_alert_frame() if mode != "weather" else None
                 if alert_frame is not None:
                     frame = alert_frame
+                    with self.lock:
+                        self.latest = frame
+
+                # MODE TRANSITION. Applied to the composed frame so it works
+                # for every mode uniformly -- games included -- and needs no
+                # cooperation from any engine.
+                #
+                # A severe-alert takeover is deliberately NOT transitioned:
+                # it is an interrupt, and sliding it in gently would soften
+                # exactly the moment that is supposed to feel abrupt.
+                if frame is not None and alert_frame is None and self._trans_from:
+                    if self._trans_i < TRANSITION_FRAMES:
+                        p = (self._trans_i + 1) / float(TRANSITION_FRAMES)
+                        frame = transitions.blend(self._trans_from, frame, p)
+                        self._trans_i += 1
+                        with self.lock:
+                            self.latest = frame
+                    else:
+                        self._trans_from = None
+
+                # FIRST LIGHT. The panel blooms up out of black on takeover
+                # rather than snapping on fully lit.
+                if frame is not None and self._wake_i < transitions.WAKE_FRAMES:
+                    frame = transitions.wake(frame, self._wake_i)
+                    self._wake_i += 1
                     with self.lock:
                         self.latest = frame
 

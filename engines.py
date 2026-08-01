@@ -29,6 +29,7 @@ import news
 import weather
 import blog
 import tic80_core
+import transitions
 
 WIDTH = 64
 HEIGHT = 64
@@ -5658,6 +5659,7 @@ class AmbientEngine:
     SEQUENCE = ("flights", "satellite", "weather", "sports", "news", "blog")
 
     DWELL_TICKS = 400        # ~20s per mode at this tick rate
+    TRANSITION_TICKS = 8     # ~0.4s slide between sub-modes at this tick rate
     RECHECK_TICKS = 60       # ~3s before giving up on an all-empty rotation
 
     def __init__(self):
@@ -5675,6 +5677,8 @@ class AmbientEngine:
         self.hold = 0
         self.ticks = 0
         self.cycling = True
+        self._trans_from = None
+        self._trans_i = 0
 
     @property
     def current(self):
@@ -5688,6 +5692,15 @@ class AmbientEngine:
         avail = self._available()
         if not avail:
             return
+        # Capture the outgoing sub-mode's last frame so frame() can slide
+        # the next one in. Ambient advances internally rather than through
+        # set_mode, so it would otherwise be the ONE place in the product
+        # that still hard-cuts between screens.
+        try:
+            self._trans_from = self.current.frame()
+            self._trans_i = 0
+        except Exception:                      # noqa: BLE001 - never break rotation
+            self._trans_from = None
         # Move to the next available index in rotation order, wrapping --
         # not just "next in avail", so manual stepping stays predictable
         # when availability changes between presses.
@@ -5750,7 +5763,14 @@ class AmbientEngine:
             # where a wall display is most likely to be looked at.
             self._fallback.tick()
             return self._fallback.frame()
-        return self.current.frame()
+        frame = self.current.frame()
+        if self._trans_from and self._trans_i < self.TRANSITION_TICKS:
+            self._trans_i += 1
+            p = self._trans_i / float(self.TRANSITION_TICKS)
+            frame = transitions.blend(self._trans_from, frame, p)
+            if self._trans_i >= self.TRANSITION_TICKS:
+                self._trans_from = None
+        return frame
 
 
 class BootEngine:
