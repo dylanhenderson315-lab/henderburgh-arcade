@@ -252,7 +252,7 @@ def _parse_fight(comp, index, total):
         "final_round": status.get("period") or None,
         "final_time": panel_text(status.get("displayClock")) or None,
         "period": status.get("period") or 0,
-        "clock": status.get("displayClock") or None,
+        "clock": panel_text(status.get("displayClock")) or None,
     }
 
 

@@ -201,9 +201,12 @@ def _team_row(competitor):
     team = competitor.get("team") or {}
     score = competitor.get("score")
     return {
-        "abbr": (team.get("abbreviation") or "").upper(),
-        "name": (team.get("shortDisplayName") or team.get("name") or "").upper(),
-        "score": int(score) if isinstance(score, str) and score.isdigit() else score,
+        "abbr": paneltext.panel_text(team.get("abbreviation")),
+        "name": paneltext.panel_text(team.get("shortDisplayName") or team.get("name")),
+        # A numeric score stays an int; anything else is DISPLAY TEXT and
+        # must be folded (soccer aggregate strings, tennis set scores).
+        "score": (int(score) if isinstance(score, str) and score.isdigit()
+                  else (paneltext.panel_text(score) if isinstance(score, str) else score)),
         "home_away": competitor.get("homeAway"),
         "winner": bool(competitor.get("winner")),
         "color": _hex_to_rgb(team.get("color")),
@@ -226,7 +229,7 @@ def _team_record(competitor):
     """
     for rec in competitor.get("records") or []:
         if rec.get("type") == "total" and rec.get("summary"):
-            return str(rec["summary"]).strip()
+            return paneltext.panel_text(rec["summary"])
     return None
 
 
@@ -320,7 +323,7 @@ def _situation(comp, state):
         "bases": bases if any(bases) else None,
         # Display-ready string when ESPN supplies one (NFL). Uppercased at
         # the I/O boundary like every other externally-sourced string.
-        "down_distance": (str(sit.get("downDistanceText")).upper().strip()
+        "down_distance": (paneltext.panel_text(sit.get("downDistanceText"))
                           if sit.get("downDistanceText") else None),
     }
     return out if any(v is not None for v in out.values()) else None
@@ -340,7 +343,7 @@ def _parse_event(event, league):
     return {
         "event_id": event["id"],
         "league": league,
-        "short_name": (event.get("shortName") or "").upper(),
+        "short_name": paneltext.panel_text(event.get("shortName")),
         "state": stype.get("state"),          # "pre" | "in" | "post"
         "completed": bool(stype.get("completed")),
         # ESPN returns this mixed-case ("Final", "Top 5th", "Halftime").
@@ -349,10 +352,10 @@ def _parse_event(event, league):
         # this exact bug already ("United Airlines" rendered as just "U"
         # "A"). Every other display string in this codebase is uppercased
         # at the source for that reason; this is that same fix applied here.
-        "detail": (stype.get("shortDetail") or stype.get("detail") or "").upper(),
+        "detail": paneltext.panel_text(stype.get("shortDetail") or stype.get("detail")),
         "period": status.get("period"),
         "situation": _situation(comp, stype.get("state")),
-        "display_clock": status.get("displayClock"),
+        "display_clock": paneltext.panel_text(status.get("displayClock")) or None,
         "home": home_row,
         "away": away_row,
     }

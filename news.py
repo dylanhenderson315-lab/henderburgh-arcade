@@ -57,11 +57,16 @@ _WS_RE = re.compile(r"\s+")
 
 
 def _clean_title(raw):
-    """RSS titles can carry HTML entities (already decoded by
-    ElementTree) and odd whitespace/line breaks from the source feed --
-    collapse to one clean line. Does not alter the actual words, only
-    whitespace."""
-    return _WS_RE.sub(" ", (raw or "").strip())
+    """RSS titles carry HTML entities (already decoded by ElementTree),
+    odd whitespace, and -- the part that actually broke -- curly quotes,
+    en-dashes and accented characters the 3x5 font cannot draw.
+
+    The fold lives HERE rather than in the caller so this function IS the
+    boundary, matching blog._clean and flights._ident. When it was only in
+    the caller, a fold audit pointed at this function passed while the
+    real boundary sat somewhere else -- the kind of split that makes a
+    missed migration hard to see."""
+    return _WS_RE.sub(" ", paneltext.panel_text(raw))
 
 
 def load_config():
@@ -95,7 +100,7 @@ def _fetch_headlines(feed_url):
             # paneltext, NOT .upper(): RSS titles carry curly quotes,
             # en-dashes and accented names, all of which .upper()
             # leaves intact and the font then silently DROPS.
-            headlines.append(paneltext.panel_text(title))
+            headlines.append(title)          # already folded by _clean_title
     return headlines, channel_title
 
 
