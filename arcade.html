@@ -258,6 +258,16 @@
       <span id="sp-fav-msg" class="badge"></span></div>
     <div class="hint">The pinned team gets a full-screen score with live game
       state. More leagues = more requests against ESPN's undocumented API.</div>
+    <h2 style="margin-top:14px;">Golf — pinned player</h2>
+    <div class="row"><label>Player</label>
+      <input type="text" id="sp-golf" placeholder="e.g. Hojgaard"></div>
+    <div class="row"><button id="sp-golf-save">Pin</button>
+      <button id="sp-golf-clear">Unpin</button>
+      <span id="sp-golf-msg" class="badge"></span></div>
+    <div id="sp-golf-now" class="hint"></div>
+    <div class="hint">Surname is enough — accents are handled. Their position,
+      score to par and hole are shown full-screen, and the panel flashes on a
+      notable move (eagle, birdie, bogey, taking or losing the lead).</div>
   </div>
 
   <div id="newscard" class="card hide">
@@ -581,8 +591,30 @@ async function loadSports(){
        $('sp-leagues').value = (j.leagues || []).join(', ');
        $('sp-known').innerHTML = 'Known: <b>' + (j.known_leagues || []).join(' · ') + '</b>';
        if (j.favorite){ $('sp-fav-lg').value = j.favorite.league || '';
-                        $('sp-fav-tm').value = j.favorite.team_abbr || ''; } }catch(_){}
+                        $('sp-fav-tm').value = j.favorite.team_abbr || ''; }
+       if (j.golf_player && !$('sp-golf').matches(':focus')) $('sp-golf').value = j.golf_player;
+       const g = j.golf_status, live = (j.golf_live || []);
+       // Say plainly whether the saved name actually matched someone, so a
+       // typo doesn't just silently never appear on the panel.
+       $('sp-golf-now').textContent = g
+         ? ('On the board: ' + g.name + '  ·  pos ' + (g.place ?? '-') + '  ·  ' +
+            (g.score ?? '-') + (g.thru ? '  ·  thru ' + g.thru : '') +
+            (g.event ? '  ·  ' + g.event : ''))
+         : (j.golf_player
+             ? ('Not on a live leaderboard right now' +
+                (live.length ? ' (live: ' + live.join(', ') + ')' : ' (no tournament running)'))
+             : '');
+     }catch(_){}
 }
+$('sp-golf-save').addEventListener('click', async () => {
+  const j = await (await post('/api/sports/golf_player', {name: $('sp-golf').value})).json();
+  say('sp-golf-msg', j.ok === false ? (j.error || 'error') : 'pinned', j.ok !== false);
+  loadSports();
+});
+$('sp-golf-clear').addEventListener('click', async () => {
+  await post('/api/sports/golf_player', {name: ''});
+  $('sp-golf').value = ''; say('sp-golf-msg', 'unpinned'); loadSports();
+});
 $('sp-lg-save').addEventListener('click', async () => {
   const lg = $('sp-leagues').value.split(',').map(x=>x.trim()).filter(Boolean);
   const j = await (await post('/api/sports/leagues', {leagues: lg})).json();

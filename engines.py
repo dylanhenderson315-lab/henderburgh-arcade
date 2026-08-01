@@ -5126,6 +5126,12 @@ class SportsEngine(Browsable):
         self.universal = []
         self.ucur = 0
         self.detail = None            # event id being shown expanded, or None
+        # Pinned golfer, resolved by the feed each poll.
+        self.golf_pinned = None
+        self.golf_event = None
+        self.golf_move = None
+        self.golf_pulse = Pulse(ticks=30)   # longer than the standard 14: a
+                                             # notable move deserves to be seen
         self._init_scroll()
         self.cycling = True
         self.ticks = 0
@@ -5201,6 +5207,12 @@ class SportsEngine(Browsable):
         self.data = sports.FEED.get()
         u = sports.FEED.get_universal()
         self.universal = u.get("events") or []
+        self.golf_pinned = u.get("golf_pinned")
+        self.golf_event = u.get("golf_event")
+        self.golf_move = u.get("golf_move")
+        # Pulse keys on the MOVE, so it fires once per notable move rather
+        # than continuously while the move is still being reported.
+        self.golf_pulse.note(("golf", self.golf_move) if self.golf_move else None)
         if self.universal:
             self.ucur %= len(self.universal)
         else:
@@ -5215,7 +5227,11 @@ class SportsEngine(Browsable):
         # placeholder while real games sat one view away. Only forced when
         # the ticker actually has games -- otherwise the pinned view's
         # message is the more informative of two empty screens.
-        if games and not self.data.get("favorite_game"):
+        # Force the ticker only when view 0 has nothing real to show. A
+        # PINNED GOLFER counts as real content here -- without this the
+        # golfer view was unreachable whenever the configured leagues had
+        # any game at all, which is most of the time.
+        if games and not self.data.get("favorite_game") and not self.golf_pinned:
             self.view = 1
         if games:
             self.cur %= len(games)
@@ -5248,14 +5264,18 @@ class SportsEngine(Browsable):
             limit = self.VIEW_TICKS if self.view == 0 else self.SPOTLIGHT_TICKS
             if self.hold >= limit:
                 self.hold = 0
-                if self.data.get("favorite") and not self.universal:
+                pinned_exists = bool(self.data.get("favorite_game") or self.golf_pinned)
+                if pinned_exists and not self.universal:
                     self.view = (self.view + 1) % 2
                 elif self.universal:
-                    self.ucur = (self.ucur + 1) % len(self.universal)
-                    # Cycle back through the pinned view periodically rather
-                    # than never showing it once universal events exist.
-                    if self.ucur == 0 and self.data.get("favorite_game"):
-                        self.view = 0 if self.view == 1 else 1
+                    if self.view == 0 and pinned_exists:
+                        self.view = 1          # pinned had its turn
+                    else:
+                        self.ucur = (self.ucur + 1) % len(self.universal)
+                        # Give the pinned view a turn each time the ticker
+                        # completes a lap, rather than never showing it.
+                        if self.ucur == 0 and pinned_exists:
+                            self.view = 0
         self.score = len(self.universal) or len(games)
 
     # ---- render --------------------------------------------------------
@@ -5543,6 +5563,76 @@ class SportsEngine(Browsable):
             draw_text_centered(buf, 56, fit_text(ev["series"], WIDTH - 6), self.INK_DIM)
         return bytes(buf)
 
+    def _frame_golf_pinned(self):
+        """The pinned player, given the panel.
+
+        Golf's whole question is "where is MY player and did they just do
+        something", so this leads with position / score to par / through
+        -- the three numbers that answer it -- rather than a leaderboard
+        they'd have to scan.
+
+        Flashes via the shared Pulse on a NOTABLE move only (eagle,
+        birdie, bogey, taking or losing the lead). Routine holes do not
+        flash; a flash that fires constantly is one you stop seeing.
+        """
+        buf = blank(); fill(buf, self.BG)
+        c = self.golf_pinned
+        ev = self.golf_event or {}
+        accent = self.SPORT_ACCENT["golf"]
+        move = self.golf_move
+        flash = self.golf_pulse.on
+
+        draw_event_frame(buf, 1.0 if flash else 0.45, accent, accent)
+        head = ev.get("league") or "GOLF"
+        draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
+                           (255, 255, 255) if flash else color_on_dark(accent), x_min=3)
+
+        # Name, largest that fits -- never truncated, since a clipped
+        # surname is the wrong player.
+        name = c.get("abbr") or c.get("full") or "-"
+        scale = 2 if text_w(name, 2) <= WIDTH - 8 else 1
+        draw_text_centered(buf, 14, fit_text(name, WIDTH - 8, scale),
+                           self.HERO_INK, scale=scale, x_min=3)
+
+        # POSITION and SCORE side by side -- the two headline numbers.
+        place = c.get("place")
+        pos = f"T{place}" if place and self._golf_tied(place) else (str(place) if place else "-")
+        par = c.get("score") or "-"
+        y = 28 if scale > 1 else 24
+        draw_text3x5(buf, 5, y, "POS", self.INK_DIM)
+        draw_text3x5(buf, 5, y + 7, pos, self.HERO_INK, scale=2)
+        pw = text_w(str(par), 2)
+        draw_text3x5(buf, WIDTH - 5 - text_w("PAR"), y, "PAR", self.INK_DIM)
+        draw_text3x5(buf, WIDTH - 5 - pw, y + 7, str(par),
+                     self.WIN if str(par).startswith("-") else self.HERO_INK, scale=2)
+
+        # THROUGH -- the piece that says how live this number is. A player
+        # who has not teed off yet has thru 0, which is not "through 0
+        # holes doing badly", so it says so instead.
+        thru = c.get("thru")
+        if c.get("player_state") == "pre" or not thru:
+            foot = "NOT STARTED" if c.get("player_state") == "pre" else (ev.get("detail") or "")
+        else:
+            foot = f"THRU {thru}"
+        draw_text_centered(buf, 48, fit_text(foot, WIDTH - 8), self.INK, x_min=3)
+
+        # The move itself, when there is one, in place of the tournament name.
+        if move:
+            draw_text_centered(buf, 56, fit_text(move, WIDTH - 8),
+                               (255, 255, 255) if flash else self.WIN, x_min=3)
+        else:
+            draw_text_centered(buf, 56, fit_text(ev.get("name") or "", WIDTH - 8),
+                               self.INK_DIM, x_min=3)
+        return bytes(buf)
+
+    def _golf_tied(self, place):
+        """Is anyone else on the same place? ESPN repeats the place number
+        for ties (three players all shown as 2), so a 'T' prefix is real
+        information recoverable from the leaderboard itself."""
+        ev = self.golf_event or {}
+        n = sum(1 for x in (ev.get("competitors") or []) if x.get("place") == place)
+        return n > 1
+
     def _frame_event_detail(self, ev):
         """EXPANDED single event -- the same visual language as GAME DAY
         (draw_event_frame), because it is the same idea: one event given
@@ -5639,6 +5729,12 @@ class SportsEngine(Browsable):
             if ev:
                 return self._frame_event_detail(ev)
             self.detail = None
+        # A notable move preempts whatever else was showing -- same
+        # reasoning as the scoring flash: the moment is the content.
+        if self.golf_pinned and self.golf_move:
+            return self._frame_golf_pinned()
+        if self.view == 0 and self.golf_pinned and not self.data.get("favorite_game"):
+            return self._frame_golf_pinned()
         if self.view == 0 and self.data.get("favorite_game"):
             return self._frame_pinned()
         if self.universal:

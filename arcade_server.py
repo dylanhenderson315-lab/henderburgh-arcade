@@ -972,8 +972,22 @@ class Handler(BaseHTTPRequestHandler):
                         "configured": satellite.FEED.configured})
         elif path == "/api/sports/config":
             leagues, favorite = sports.FEED.get_config()
+            u = sports.FEED.get_universal()
+            pinned = u.get("golf_pinned")
             self._json({"leagues": leagues, "favorite": favorite,
-                        "known_leagues": sorted(sports.LEAGUE_PATHS)})
+                        "known_leagues": sorted(sports.LEAGUE_PATHS),
+                        "golf_player": sports.FEED.get_golf_player(),
+                        # Enough to show whether the pinned name actually
+                        # matched anyone on a live leaderboard, rather than
+                        # silently saving a name that will never resolve.
+                        "golf_status": ({"name": pinned["abbr"],
+                                         "place": pinned["place"],
+                                         "score": pinned["score"],
+                                         "thru": pinned["thru"],
+                                         "event": (u.get("golf_event") or {}).get("name")}
+                                        if pinned else None),
+                        "golf_live": sorted({e["league"] for e in u.get("events") or []
+                                             if e.get("leaderboard")})})
         elif path == "/api/gameday/config":
             cfg = gameday.load_config()
             cfg["targets"] = list(gameday.TARGETS)
@@ -1126,6 +1140,13 @@ class Handler(BaseHTTPRequestHandler):
                     resp["rejected"] = rejected
                     resp["note"] = "unrecognized league(s), not added: " + ", ".join(rejected)
                 self._json(resp)
+            except (ValueError, AttributeError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/sports/golf_player":
+            try:
+                j = json.loads(body or b"{}")
+                name = sports.FEED.set_golf_player(j.get("name"))
+                self._json({"ok": True, "golf_player": name})
             except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/sports/favorite":

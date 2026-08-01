@@ -118,9 +118,60 @@ def load_config():
     return list(DEFAULT_LEAGUES), None
 
 
+def load_golf_player():
+    """Pinned golfer, or None. Stored in the same sports_config.json as the
+    favorite team -- one config file for one mode -- but read separately
+    because load_config()'s two-value contract is used in several places
+    and widening it would touch all of them for no benefit.
+
+    Matched by NAME rather than ESPN athlete id: the id is stable but a
+    person setting this from a phone types a name, and the leaderboard
+    carries "R. HOJGAARD" style abbreviations that we can match against
+    without making them look up a numeric id.
+    """
+    if not CONFIG_PATH.exists():
+        return None
+    try:
+        data = json.loads(CONFIG_PATH.read_text())
+    except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+        return None
+    p = data.get("golf_player")
+    if isinstance(p, str) and p.strip():
+        return paneltext.panel_text(p)
+    return None
+
+
+def save_golf_player(name):
+    """Persist (or clear, with a falsy name) the pinned golfer."""
+    data = {}
+    if CONFIG_PATH.exists():
+        try:
+            data = json.loads(CONFIG_PATH.read_text()) or {}
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+            data = {}
+    cleaned = paneltext.panel_text(name) if name else None
+    if cleaned:
+        data["golf_player"] = cleaned
+    else:
+        data.pop("golf_player", None)
+    data.setdefault("leagues", list(DEFAULT_LEAGUES))
+    data.setdefault("favorite", None)
+    CONFIG_PATH.write_text(json.dumps(data, indent=2))
+    return cleaned
+
+
 def save_config(leagues, favorite):
-    CONFIG_PATH.write_text(json.dumps(
-        {"leagues": list(leagues), "favorite": favorite}, indent=2))
+    """Preserves any key this function does not own (golf_player), so
+    setting a favorite team can never silently wipe the pinned golfer."""
+    data = {}
+    if CONFIG_PATH.exists():
+        try:
+            data = json.loads(CONFIG_PATH.read_text()) or {}
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+            data = {}
+    data["leagues"] = list(leagues)
+    data["favorite"] = favorite
+    CONFIG_PATH.write_text(json.dumps(data, indent=2))
 
 
 def _hex_to_rgb(hex_str, min_brightness=90):
@@ -375,6 +426,15 @@ class SportsFeed:
         self._universal_try = 0.0
         self._universal_interval = 0.0
         self._universal_fails = 0
+        # Pinned golfer: the config name, plus the last (place, par) seen so
+        # a NOTABLE move can be detected between polls. Cached in the FEED
+        # rather than the engine because the engine is recreated on every
+        # mode switch and would lose the baseline -- and then flash on
+        # arrival, which is exactly what Pulse's first-value rule forbids.
+        self._golf_player = load_golf_player()
+        self._golf_prev = None
+        self._golf_move = None
+        self._golf_move_at = 0.0
         self._thread = None
         self._err = None
 
@@ -492,6 +552,19 @@ class SportsFeed:
                     ERROR_BACKOFF_MAX,
                     ERROR_BACKOFF_BASE * (2 ** (self._universal_fails - 1)))
             return
+        # Notable-move detection for the pinned golfer, done HERE rather
+        # than in the engine: this is the only place that sees consecutive
+        # polls, which is what a "move" is defined against.
+        with self._lock:
+            pinned = self._golf_player
+        if pinned:
+            _, pc = find_pinned_golfer(events, pinned)
+            cur = (pc.get("place"), _par_value(pc.get("score"))) if pc else None
+            with self._lock:
+                mv = golfer_move(self._golf_prev, cur)
+                if mv:
+                    self._golf_move, self._golf_move_at = mv, time.time()
+                self._golf_prev = cur
         with self._lock:
             self._universal = events
             self._universal_updated = time.time()
@@ -514,13 +587,22 @@ class SportsFeed:
             self._last_read = now
             events = [dict(e) for e in self._universal]
             age = (now - self._universal_updated) if self._universal_updated else None
+            golf_player = self._golf_player
+            golf_move = (self._golf_move
+                         if self._golf_move and (now - self._golf_move_at) < GOLF_MOVE_TTL
+                         else None)
         self._ensure_thread()
         # Live first, then upcoming, then finished -- within that, keep
         # ESPN's own ordering, which already groups by sport sensibly.
         rank = {"in": 0, "pre": 1, "post": 2}
         events.sort(key=lambda e: rank.get(e["state"], 3))
+        gev, gc = find_pinned_golfer(events, golf_player)
         return {"events": events, "age": age,
-                "leagues": sorted({(e["sport"], e["league"]) for e in events})}
+                "leagues": sorted({(e["sport"], e["league"]) for e in events}),
+                "golf_player": golf_player, "golf_event": gev, "golf_pinned": gc,
+                # Reported for a short window then lapses on its own, so the
+                # engine never has to acknowledge or clear it.
+                "golf_move": golf_move}
 
     def _maybe_reload_config(self):
         now = time.time()
@@ -528,10 +610,27 @@ class SportsFeed:
             return
         self._last_config_check = now
         leagues, favorite = load_config()
+        gp = load_golf_player()
         with self._lock:
             if leagues != self.leagues or favorite != self.favorite:
                 self.leagues, self.favorite = leagues, favorite
                 self._win_prob_try = 0.0
+            if gp != self._golf_player:
+                # Changed under us (edited file / other process): drop the
+                # baseline so the new player cannot flash on arrival.
+                self._golf_player, self._golf_prev, self._golf_move = gp, None, None
+
+    def set_golf_player(self, name):
+        cleaned = save_golf_player(name)
+        with self._lock:
+            self._golf_player = cleaned
+            self._golf_prev = None
+            self._golf_move = None
+        return cleaned
+
+    def get_golf_player(self):
+        with self._lock:
+            return self._golf_player
 
     @staticmethod
     def _interval_for(games):
@@ -650,6 +749,7 @@ HEADER_URL = "https://site.api.espn.com/apis/v2/scoreboard/header"
 HEADER_REFRESH_LIVE = 25.0     # something is actually in progress
 HEADER_REFRESH_IDLE = 180.0    # events exist but none live
 HEADER_REFRESH_EMPTY = 900.0   # nothing at all anywhere (rare on this endpoint)
+GOLF_MOVE_TTL = 20.0           # how long a notable move stays reportable
 
 # Sports whose "event" is a multi-competitor standing rather than a head-to-
 # head fixture. Determined by the competitor `type` being athlete AND there
@@ -763,3 +863,93 @@ def _parse_header(payload):
                 except (AttributeError, TypeError, ValueError):
                     continue          # one malformed event must not lose the rest
     return out
+
+
+# ---- pinned golfer -----------------------------------------------------
+# Golf is the one sport here where the interesting question is not "what is
+# the score" but "where is MY player, and did they just do something".
+# Everything below is derived from fields verified against two LIVE
+# tournaments (Rocket Classic and the AIG Women's Open, both mid-round on
+# 2026-08-01): place, score to par as a string ("-11"), and status.thru.
+
+
+def _par_value(score):
+    """'-11' -> -11, 'E' -> 0, '+3' -> 3. None if unparseable.
+
+    Golf scores are STRINGS and 'E' (even par) is not a number -- treating
+    it as one is how a leaderboard ends up sorting or comparing wrongly.
+    """
+    if score is None:
+        return None
+    t = str(score).strip().upper()
+    if t in ("E", "EVEN", "0"):
+        return 0
+    try:
+        return int(t.replace("+", ""))
+    except ValueError:
+        return None
+
+
+def find_pinned_golfer(events, pinned):
+    """Locate the pinned player on any live leaderboard.
+
+    Returns (event, competitor) or (None, None). Matching is deliberately
+    forgiving because the leaderboard shows "R. HOJGAARD" while someone
+    would type "Rasmus Hojgaard" or just "Hojgaard": a match is any of an
+    exact hit, a surname hit, or one containing the other.
+    """
+    if not pinned:
+        return None, None
+    want = paneltext.panel_text(pinned)
+    if not want:
+        return None, None
+    want_last = want.split()[-1]
+    for ev in events:
+        if not ev.get("leaderboard"):
+            continue
+        for c in ev.get("competitors") or []:
+            name = c.get("full") or c.get("abbr") or ""
+            if not name:
+                continue
+            last = name.split()[-1] if name.split() else ""
+            if (name == want or last == want_last
+                    or want in name or name in want):
+                return ev, c
+    return None, None
+
+
+def golfer_move(prev, cur):
+    """What NOTABLE thing just happened to the pinned player, or None.
+
+    Only genuinely notable events, because a flash that fires on every
+    routine par is a flash you learn to ignore -- the same reasoning as
+    Pulse never firing on a first value.
+
+      LEAD      -- moved into a share of the lead (place 1)
+      LOST LEAD -- was leading, no longer is
+      EAGLE     -- score to par improved by 2+ since the last look, which
+                   on one poll interval is an eagle or better
+      BIRDIE    -- improved by exactly 1
+      BOGEY     -- worsened by 1 or more
+
+    `prev` and `cur` are the (place, par) tuples this module caches. Any
+    missing value returns None rather than guessing a move happened.
+    """
+    if not prev or not cur:
+        return None
+    p_place, p_par = prev
+    c_place, c_par = cur
+    if p_par is not None and c_par is not None and c_par != p_par:
+        delta = c_par - p_par
+        if delta <= -2:
+            return "EAGLE"
+        if delta == -1:
+            return "BIRDIE"
+        if delta >= 1:
+            return "BOGEY"
+    if p_place is not None and c_place is not None and p_place != c_place:
+        if c_place == 1:
+            return "LEAD"
+        if p_place == 1:
+            return "LOST LEAD"
+    return None
