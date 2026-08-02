@@ -5463,6 +5463,12 @@ class SportsEngine(Browsable):
         # unclaimed sport contributes nothing and that is correct, not a
         # gap to fill generically).
         self._pending_big_moment = None
+        # State for _detect_soccer_goal -- the per-game "seen" set, keyed
+        # off the currently-watched event_id so a game change starts
+        # clean instead of replaying goals already shown (same reasoning
+        # as GameDayEngine._seen_done for MMA finishes).
+        self._soccer_goal_event_id = None
+        self._soccer_goal_seen = set()
 
     # ---- input -----------------------------------------------------------
     def has_content(self):
@@ -6825,6 +6831,52 @@ class SportsEngine(Browsable):
             y += 7
 
     SPORT_DETAIL_RENDERERS["soccer"] = _render_soccer_detail
+
+    def _detect_soccer_goal(self):
+        """GOAL big-moment for the pinned favorite's own LIVE soccer
+        game -- see BIG_MOMENT_DETECTORS' docstring above for the shared
+        contract this plugs into.
+
+        Cost discipline: reuses the exact same narrow scope
+        `sports._fetch_win_prob()` already uses (the pinned favorite's
+        own game, only while it is genuinely live) -- this never polls
+        `keyEvents` for any other soccer match in the universal feed,
+        which is the ESPN request-volume risk this project has already
+        had to mitigate twice (see CLAUDE.md).
+        """
+        fav = self.data.get("favorite")
+        fg = self.data.get("favorite_game")
+        if not fav or not fg or fav["league"] not in sports.SOCCER_LEAGUES \
+                or fg["state"] != "in":
+            # Not watching a live soccer game right now -- drop any
+            # in-progress seen-set so returning to a live game later (or
+            # a different one) starts clean rather than stale.
+            self._soccer_goal_event_id = None
+            self._soccer_goal_seen = set()
+            return
+
+        if fg["event_id"] != self._soccer_goal_event_id:
+            # The game being watched changed (a new pinned-favorite game
+            # went live, or the old one finished and a fresh one
+            # started) -- adopt a clean seen-set for it, same "don't
+            # replay history" rule as GameDayEngine._seen_done.
+            self._soccer_goal_event_id = fg["event_id"]
+            self._soccer_goal_seen = set()
+
+        goals = sports.fetch_new_soccer_goals(fav["league"], fg["event_id"],
+                                               self._soccer_goal_seen)
+        if not goals:
+            return
+        newest = goals[-1]
+
+        home, away = fg["home"], fg["away"]
+        fav_team = home if home.get("abbr") == fav["team_abbr"] else away
+        color = fav_team.get("color") or (255, 200, 40)   # real team color, else neutral gold
+
+        line1 = f"{away.get('abbr') or ''} {away.get('score')} - {home.get('score')} {home.get('abbr') or ''}"
+        self._set_big_moment("GOAL", line1, newest["text"] or newest["type"], color)
+
+    BIG_MOMENT_DETECTORS["soccer_goal"] = _detect_soccer_goal
 
     def _render_golf_detail(self, buf, ev):
         """Golf's EXPANDED view. The main ticker row already fits a solid

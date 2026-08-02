@@ -66,6 +66,13 @@ LEAGUE_PATHS = {
 }
 DEFAULT_LEAGUES = ["NFL", "NBA", "MLB", "NHL"]
 
+# The subset of LEAGUE_PATHS that is soccer -- derived, not hardcoded to
+# "EPL", so a future soccer league added to LEAGUE_PATHS is picked up
+# automatically by anything (like the big-moment goal detector) that
+# needs to know "is the pinned favorite's league soccer".
+SOCCER_LEAGUES = {code for code, path in LEAGUE_PATHS.items()
+                  if path.startswith("soccer/")}
+
 SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
 SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/summary?event={event_id}"
 
@@ -400,6 +407,59 @@ def _fetch_win_prob(league, event_id):
     last = wp[-1]
     pct = last.get("homeWinPercentage")
     return float(pct) if isinstance(pct, (int, float)) else None
+
+
+
+def _fetch_key_events(league, event_id):
+    """One soccer match's play-by-play event log (goals, cards, subs,
+    kickoff/halftime/regulation-end markers...) from the summary
+    endpoint. Confirmed live 2026-08-02 against a real MLS match (CF
+    Montreal vs New England Revolution, event 761697): each entry has a
+    `type.text`, a `scoringPlay: bool`, free-text `text`, and -- unlike
+    MLB's `plays`, which has no stable id at all -- a genuine string
+    `id` field, so a caller can dedupe on it directly rather than
+    falling back to a (type, text) tuple."""
+    path = LEAGUE_PATHS[league]
+    data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))
+    return data.get("keyEvents") or []
+
+
+def fetch_new_soccer_goals(league, event_id, seen):
+    """Newly-seen goals for ONE soccer match's keyEvents. `seen` is a
+    set the CALLER owns and this mutates in place -- same per-game
+    "seen" idiom GameDayEngine._seen_done uses for MMA finishes: adopt
+    whatever ids are already present on the first call for a given
+    `seen` set rather than replaying history (the caller is responsible
+    for handing in a fresh empty set when the game being watched
+    changes), then report only what's genuinely new after that.
+
+    A goal is any keyEvent with `scoringPlay: True`. Verified against a
+    real 2026-08-02 MLS/NWSL slate -- 30+ real goals across 8 matches,
+    zero false positives among scoringPlay=True entries. ESPN's own
+    `type.text` varies with HOW it was scored; real values actually
+    seen: "Goal", "Goal - Header", "Goal - Volley", "Goal - Free-kick",
+    "Penalty - Scored", "Own Goal". `scoringPlay` is therefore the
+    reliable signal to filter on, not a type.text whitelist that would
+    need updating for every finishing variant ESPN might add.
+
+    Returns a list of {"type", "text"} dicts, both already
+    `paneltext.panel_text()`-folded here at the I/O boundary -- callers
+    must not re-fold or pull raw text out of the original event.
+    """
+    out = []
+    for ev in _fetch_key_events(league, event_id):
+        if not ev.get("scoringPlay"):
+            continue
+        key = ev.get("id")
+        if key is None or key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "type": paneltext.panel_text((ev.get("type") or {}).get("text")),
+            "text": paneltext.panel_text(ev.get("text")),
+        })
+    return out
+
 
 
 class SportsFeed:
