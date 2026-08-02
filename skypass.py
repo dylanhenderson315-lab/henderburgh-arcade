@@ -302,10 +302,25 @@ def sky_now(tles, lat, lon, elev=0.0, now=None, min_elevation=0.0):
 
     Returns objects sorted highest-elevation first, since on a crowded
     dome the high ones are the ones actually worth looking at.
+
+    Each object carries `visible`: elevation >= MIN_ELEVATION AND sunlit
+    AND the OBSERVER is in darkness -- the exact same three-part test
+    predict() uses to decide a pass counts at all. This matters a lot:
+    "above the horizon" and "sunlit" are true for plenty of objects in
+    broad daylight (confirmed live: 8 objects returned this way at
+    16:05 UTC with the sun 66.5 deg up), and none of those are actually
+    visible to a person outside. Anything that decides whether the dome
+    is "worth showing" must use `visible`, never the raw list -- using
+    the raw list would make the dome claim content nearly around the
+    clock, which is exactly the kind of invented worth this project's
+    standing rule exists to prevent.
     """
     if not HAVE_SGP4 or not tles:
         return []
     when = (now or datetime.now(timezone.utc)).replace(tzinfo=None)
+    jd = _jd_of(when)
+    sun_alt = _sun_altitude(*jd, lat, lon, elev)
+    observer_dark = sun_alt <= SUN_MAX_ALT
     out = []
     for name, l1, l2 in tles:
         try:
@@ -324,6 +339,7 @@ def sky_now(tles, lat, lon, elev=0.0, now=None, min_elevation=0.0):
             "is_iss": sat.satnum == ISS_NORAD_ID,
             "el": round(el, 2), "az": round(az, 2),
             "range_km": round(rng), "sunlit": lit,
+            "visible": bool(lit and observer_dark and el >= MIN_ELEVATION),
         })
     out.sort(key=lambda o: -o["el"])
     return out

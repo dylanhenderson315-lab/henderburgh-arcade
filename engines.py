@@ -4909,14 +4909,32 @@ class SatelliteEngine(Browsable):
 
     # ---- input -------------------------------------------------------
     def has_content(self):
-        """Worth showing? A real home location AND at least one upcoming
-        pass. Deliberately NOT "true whenever ISS position resolves" the
-        way the old always-on ISS LIVE view was -- continuous ISS
-        telemetry with nothing passing overhead soon is trivia, not the
-        go-outside moment this mode exists for. On a quiet night this
-        mode now honestly has nothing to show, same as golf with no
-        tournament running."""
-        return bool(self.data.get("configured")) and bool(self.sky.get("passes"))
+        """Worth showing? A real home location AND (an upcoming pass OR a
+        genuinely visible object crossing the sky RIGHT NOW).
+
+        Second clause added 2026-08-02: the dome can show real bright
+        objects mid-pass on a clear night while the predictor has nothing
+        QUEUED next -- before this, that exact night would never surface
+        the dome in ambient at all, withholding one of the best visuals in
+        the whole project at the moment it would land best. Deliberately
+        NOT "true whenever ANY object is above the horizon" -- confirmed
+        live that in broad daylight 8-14 objects sit above the horizon and
+        sky_now() correctly marks 0 of them `visible`, because "above the
+        horizon" and "sunlit" are both true for plenty of objects at noon
+        and none of those are visible to a person outside.
+        Uses sky_now()'s `visible` flag (elevation + sunlit + observer
+        darkness, same three-part test predict() itself uses), never the
+        raw list -- the raw list would make this mode claim content nearly
+        around the clock, exactly the invented-worth failure the "never
+        invent" rule exists to prevent. Still deliberately NOT "true
+        whenever ISS position resolves" the way the old always-on ISS LIVE
+        view was -- continuous ISS telemetry with nothing visible is
+        trivia, not the go-outside moment this mode exists for."""
+        if not self.data.get("configured"):
+            return False
+        if self.sky.get("passes"):
+            return True
+        return any(o.get("visible") for o in (self.sky.get("sky_now") or []))
 
     def _step(self, direction):
         ps = self.sky.get("passes") or []
@@ -4963,6 +4981,18 @@ class SatelliteEngine(Browsable):
             self.cur %= len(ps)
         else:
             self.cur = 0
+            # NO QUEUED PASS is not the same as nothing to show -- a real
+            # object can be visibly crossing the sky right now with
+            # nothing predicted NEXT (has_content() reflects exactly this
+            # case; see its docstring). VIEW_PASSES has nothing to draw
+            # for an empty pass list, so force the dome rather than
+            # leaving the view pinned to a screen that would render "NO
+            # VISIBLE PASSES" while a real object is genuinely up there --
+            # found by rendering this exact scenario, not by inspection:
+            # has_content() alone does not guarantee frame() shows the
+            # content it claims to have.
+            if any(o.get("visible") for o in (self.sky.get("sky_now") or [])):
+                self.view = self.VIEW_SCOPE
 
         # A pass beginning overhead PREEMPTS wherever the cursor was --
         # same idiom as a golf notable move or a GAME DAY finish: the
@@ -5233,14 +5263,17 @@ class SatelliteEngine(Browsable):
             if frac is None or az is None:
                 continue
             x, y = scope_xy(az, frac)
-            # SUNLIT vs shadow is the honest visibility distinction: an
-            # object in Earth's shadow is above the horizon but genuinely
-            # cannot be seen, so it is drawn present-but-dim rather than
-            # given the same weight as one you could actually go out and
-            # look at.
+            # `visible` (elevation + sunlit + observer darkness), not just
+            # `sunlit`, drives the bright/dim split -- an object that is
+            # sunlit but it's broad daylight here, or one in Earth's
+            # shadow, is above the horizon but genuinely cannot be seen
+            # from the ground right now, so it draws present-but-dim
+            # rather than given the same weight as one you could actually
+            # go out and look at. Same `visible` flag has_content() uses
+            # to decide whether the dome is worth showing at all.
             if o.get("is_iss"):
                 col = self.ISS
-            elif o.get("sunlit"):
+            elif o.get("visible"):
                 col = self.VISIBLE
             else:
                 col = (64, 72, 96)
