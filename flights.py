@@ -383,6 +383,13 @@ def _fetch_positions(lat, lon):
         phase, rate = _phase(ac, alt=alt)
         out.append({
             "ident": _ident(ac),
+            # Raw ICAO24 hex -- the one field ADS-B guarantees is stable
+            # for a given aircraft for as long as it's in range, unlike
+            # `ident` (a callsign can theoretically repeat across two
+            # different real aircraft on different legs) or list position
+            # (which reorders every refresh). Used as the SELECTION key,
+            # not for display -- `ident` is still what's shown on screen.
+            "hex": (ac.get("hex") or "").strip().upper() or None,
             "callsign": (ac.get("flight") or "").strip(),
             "type": (ac.get("t") or "").strip(),
             "alt_ft": alt,

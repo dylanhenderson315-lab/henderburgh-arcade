@@ -5428,7 +5428,17 @@ class FlightEngine(Browsable):
     def reset(self):
         self.data = {"aircraft": [], "age": None, "home_label": "HOME",
                     "configured": False, "err": None}
-        self.cur = 0
+        # SELECTION IS IDENTITY-KEYED, not positional. `self.sel_key` is
+        # the stable key (hex, falling back to ident) of whichever real
+        # aircraft is selected, or None meaning "no explicit selection --
+        # default to the top of the list". This replaced a bare list
+        # index (`self.cur`) that silently pointed at whatever aircraft
+        # now occupied that slot once the live-reordering ADS-B list
+        # reshuffled underneath it -- a real correctness bug, not
+        # theoretical: flights.FEED re-sorts by notability/distance every
+        # refresh, so an index survives across ticks but the AIRCRAFT AT
+        # that index does not.
+        self.sel_key = None
         self.hold = 0
         self.cycling = True
         self.ticks = 0
@@ -5469,6 +5479,26 @@ class FlightEngine(Browsable):
         dwell on for 20 seconds in a rotation."""
         return bool(self.data.get("configured")) and bool(self.data.get("aircraft"))
 
+    @staticmethod
+    def _sel_key(ac):
+        """The stable identity key for one real aircraft -- hex (ICAO24)
+        preferred, ident as fallback for the rare payload missing hex.
+        THE ONE place this lookup happens, so selection, auto-cycle, and
+        ATC correlation all agree on what "the same aircraft" means."""
+        return ac.get("hex") or ac.get("ident")
+
+    @classmethod
+    def _find_by_key(cls, aircraft, key):
+        """Index of the aircraft matching `key`, or None if it isn't in
+        the current list -- e.g. it flew out of RADIUS_NM. Never falls
+        back to a position; a miss is a miss, not "whatever's now there"."""
+        if key is None:
+            return None
+        for i, ac in enumerate(aircraft):
+            if cls._sel_key(ac) == key:
+                return i
+        return None
+
     def _step(self, direction):
         # Context-sensitive: left/right browses AIRCRAFT on the scope/
         # detail views (unchanged), but PAGES through the transcript
@@ -5482,10 +5512,21 @@ class FlightEngine(Browsable):
                 self.atc_page = (self.atc_page + direction) % len(self.atc_pages)
                 self.atc_hold = 0
             return
-        n = len(self.data.get("aircraft") or [])
-        if n:
-            self.cur = (self.cur + direction) % n
-            self.hold = 0
+        aircraft = self.data.get("aircraft") or []
+        n = len(aircraft)
+        if not n:
+            return
+        # Step FROM the current selection's real position in today's
+        # list, not from a stale index -- a manual left/right always
+        # means "the aircraft next to the one I'm looking at right now",
+        # which only means the same thing every time if it's resolved by
+        # identity first.
+        idx = self._find_by_key(aircraft, self.sel_key)
+        if idx is None:
+            idx = 0 if direction > 0 else -1   # first press with nothing selected: land on the near edge
+        new_idx = (idx + direction) % n
+        self.sel_key = self._sel_key(aircraft[new_idx])
+        self.hold = 0
 
     def input(self, cmd):
         if self._browse_input(cmd):
@@ -5593,8 +5634,20 @@ class FlightEngine(Browsable):
         # new is overhead" moment, not merely the list reordering.
         self.pulse.note(ac_list[0]["ident"] if ac_list else None)
         n = len(ac_list)
-        if n:
-            self.cur %= n
+
+        # SELECTION-LOSS CHECK: if something was selected and it is no
+        # longer in today's list, it left RADIUS_NM -- do not silently
+        # re-point the selection at whatever real aircraft now happens to
+        # sit in the old slot (that WAS the bug). Drop the selection and
+        # fall back to the scope, same as arriving fresh: an honest "back
+        # to overview" beats a selection that quietly became a lie.
+        if self.sel_key is not None and self._find_by_key(ac_list, self.sel_key) is None:
+            self.sel_key = None
+            if self.view != self.VIEW_SCOPE:
+                self.view = self.VIEW_SCOPE
+                self._auto_detail = False
+                self.hold = 0
+
         # Sweep advances every tick regardless of view or pause: it is the
         # mode's heartbeat, and freezing it while browsing would make a
         # live scope look crashed. Cheap -- one float add, no propagation.
@@ -5613,14 +5666,16 @@ class FlightEngine(Browsable):
                     self.hold = 0
                     self.view = self.VIEW_DETAIL
                     self._auto_detail = True
-                    self.cur = 0
+                    self.sel_key = self._sel_key(ac_list[0])
             elif self.hold >= self.VIEW_TICKS:
                 self.hold = 0
-                self.cur = (self.cur + 1) % n
+                idx = self._find_by_key(ac_list, self.sel_key)
+                new_idx = ((idx if idx is not None else -1) + 1) % n
+                self.sel_key = self._sel_key(ac_list[new_idx])
                 # Back to the scope after walking the whole list once, so
                 # the overview is a recurring anchor rather than a screen
                 # you only see when the mode first comes up.
-                if self.cur == 0:
+                if new_idx == 0:
                     self.view = self.VIEW_SCOPE
                     self._auto_detail = False
         self.score = n
@@ -5693,14 +5748,17 @@ class FlightEngine(Browsable):
                 draw_scope_target(buf, x, y, self.ROUTE,
                                   glow=scope_glow(brg, self.sweep), big=True)
 
-        for i, ac in enumerate(aircraft):
+        for ac in aircraft:
             frac = self._scope_r_frac(ac.get("dist_nm"))
             brg = ac.get("dir_deg")
             if frac is None or brg is None:
                 continue          # no position fix -- plot nothing, guess nothing
             x, y = scope_xy(brg, frac)
             col = self._alt_color(ac.get("alt_ft"))
-            sel = (i == self.cur % max(1, len(aircraft)))
+            # IDENTITY-keyed, not positional -- see reset()'s note on
+            # self.sel_key. A reordering list can no longer silently move
+            # the highlight to a different real aircraft.
+            sel = (self._sel_key(ac) == self.sel_key)
             # PHASE 3 reciprocal touch: the aircraft a real ATC
             # transmission was just confidence-matched to gets the same
             # bright-green treatment on the scope, so the correlation is
@@ -5916,7 +5974,10 @@ class FlightEngine(Browsable):
 
         buf = blank()
         fill(buf, self.BG)
-        ac = aircraft[self.cur % len(aircraft)]
+        idx = self._find_by_key(aircraft, self.sel_key)
+        if idx is None:
+            idx = 0   # nothing explicitly selected yet -- default to the top of the list
+        ac = aircraft[idx]
         alt = ac.get("alt_ft")
         col = self._alt_color(alt)
 
@@ -5936,7 +5997,7 @@ class FlightEngine(Browsable):
         # index it is, and the dots at the bottom already show position.
         note = ac.get("notable")
         draw_header(buf, ident, self.pulse.mix(col),
-                    right_tag=(note[0] if note else f"{self.cur + 1}/{len(aircraft)}"),
+                    right_tag=(note[0] if note else f"{idx + 1}/{len(aircraft)}"),
                     stale=bool(self.data.get("age") and self.data["age"] > 60))
 
         # Heading-oriented icon, the visual centerpiece -- colour-coded by
@@ -6012,7 +6073,7 @@ class FlightEngine(Browsable):
             typ_x = gap_start + max(0, (gap - text_w(typ)) // 2)
             draw_text3x5(buf, typ_x, 41, typ, (86, 94, 116))
 
-        draw_dots(buf, 47, len(aircraft), self.cur, on=col, cap=8)
+        draw_dots(buf, 47, len(aircraft), idx, on=col, cap=8)
         draw_divider(buf, 50)
 
         route = ac.get("route")
