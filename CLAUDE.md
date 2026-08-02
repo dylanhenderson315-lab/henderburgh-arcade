@@ -1601,6 +1601,61 @@ per-sport renderer sections above, the satellite section, the two-audits
 section) rather than duplicated into an ever-growing single list here.
 Check those sections, not just this one, for the full picture.
 
+### "Content exists" and "the render path reaches it" are two different claims — a standing risk class, not a one-off
+
+Same weight as the glyph-drop pattern in `paneltext.py`'s tally: this has
+now failed **three separate times**, independently, in three different
+subsystems. It deserves the same "assume it will happen again, test for
+it specifically" treatment rather than being treated as three unrelated
+bugs that happened to rhyme.
+
+The shape every time: something correctly determines that real content
+exists (`has_content()`, a config check, a capability check) — but a
+SECOND, separately-maintained piece of state decides what actually gets
+drawn or offered, and nothing keeps the two in sync. The first piece says
+yes; the second was never told.
+
+1. **The pinned-golfer view** (2026-08-01). `tick()` force-set `view = 1`
+   whenever the configured leagues had any game — a leftover contested-slot
+   design, not something aware that a pinned golfer had real content sitting
+   at `view == 0`. The golfer view rendered perfectly in isolation and never
+   once appeared on the panel. Caught only by an end-to-end pixel match
+   against the real hardware, not by reading the code or testing the view
+   function directly.
+2. **The keyboard legend** (2026-08-01). `arcade.html` kept its own list of
+   "browsable modes" in the UI, in parallel with the engine classes that are
+   the actual source of truth. When sports gained a second browse axis, the
+   engine knew; the parallel list didn't, so the legend kept advertising
+   left/right only and up/down — a real, working binding — was completely
+   undiscoverable. Caught by manual testing in a real browser, counting
+   actual outbound input requests, not by reading the legend code.
+3. **The satellite dome's `has_content()`** (2026-08-02, this session).
+   Fixing `has_content()` to count real objects visible right now — not just
+   queued passes — was step one. Step two, found only by actually rendering
+   that exact scenario: `tick()`'s view stayed pinned to `VIEW_PASSES`, which
+   has nothing to draw for an empty pass list, so the mode would have
+   reported real content to `AmbientEngine` and then shown "NO VISIBLE
+   PASSES" the moment it was selected. `has_content()` was completely
+   correct and the bug was invisible from reading it.
+
+**The common root**: a boolean or a list computed in one place (`has_content()`,
+a UI's mode registry, a view-selection flag) that something else was
+supposed to keep synchronized with, but nothing enforces the sync — so it
+holds by construction until the day a new feature changes one side and not
+the other. Same failure shape as the glyph-drop bug (a fold applied in one
+place, trusted everywhere, missed the one place it wasn't), just one layer
+up: a fact known in one place, assumed everywhere, missed the one place the
+render path forgot to check it.
+
+**What this means going forward**: whenever a change touches `has_content()`,
+a mode's view-selection logic, or anything that gates what a UI offers based
+on a capability check — **render or exercise the specific scenario the
+change claims to enable, end to end, not just the function that reports it
+truthfully.** The lesson from all three instances is identical: the
+function that says "yes, there is content" was correct every single time.
+The bug was always one hop further down, in whatever decides what to
+actually show once that yes has been given.
+
 ### The two audits — run BOTH; they catch different things
 
 `render_audit.py` sees only the data flowing **right now**. `fold_audit.py`
