@@ -5474,6 +5474,12 @@ class SportsEngine(Browsable):
         # as GameDayEngine._seen_done for MMA finishes).
         self._soccer_goal_event_id = None
         self._soccer_goal_seen = set()
+        # One-shot cursor for _detect_mma_finish() -- same idiom as
+        # GameDayEngine._seen_done: ids of MMA/PFL events already
+        # state=="post" the first time this engine reads the universal
+        # feed are ADOPTED, not fired on, so opening ambient after a
+        # card already finished doesn't replay it.
+        self._seen_mma_done = None
 
     # ---- input -----------------------------------------------------------
     def has_content(self):
@@ -6631,6 +6637,64 @@ class SportsEngine(Browsable):
         self._set_big_moment("HOME RUN", line1, newest["text"], color)
 
     BIG_MOMENT_DETECTORS["mlb_hr"] = _detect_mlb_home_run
+
+    def _detect_mma_finish(self):
+        """MMA finish detector for the SHARED big-moment celebration.
+
+        Do not confuse this with GameDayEngine's existing `_finish_round`/
+        `_seen_done` mechanism -- that is a different, older, already-working
+        system that drives GAME DAY's dedicated UFC-card RESULT takeover
+        from `mma.FEED` (the dedicated card feed) and is untouched here.
+        This detector instead fires the shared `draw_celebration()` graphic
+        while `ambient` is showing, off whatever MMA/PFL event
+        `sports.FEED.get_universal()` happens to surface -- a completely
+        separate feed pathway from `mma.FEED`, confirmed non-interchangeable
+        in an earlier session.
+
+        One-shot per event id, same idiom as GameDayEngine._seen_done: the
+        first read adopts whatever is already state=="post" without firing
+        (an event already over before ambient started watching must not
+        replay), and only a NEWLY post id fires.
+
+        UNVERIFIED END-TO-END: as of this build, sports.FEED.get_universal()
+        has ZERO mma/PFL events (checked live), and mma.FEED (GAME DAY's own
+        card feed) also has no next card -- a real, current data gap, not a
+        reason to fabricate test data (see CLAUDE.md's "never invent" rule).
+        This is built from the already-verified type-ID facts in mma.py
+        (20=submission, 21=KO/TKO, 22=decision -- see mma.METHOD_BY_ID) and
+        wired the same way as the other detectors, but has never fired
+        against a real finish. See sports._fetch_mma_finish_method()'s own
+        docstring for the two specific open unknowns (whether a per-event
+        summary endpoint even exists for a universal-feed MMA event id, and
+        whether the guessed league slug is right) -- both are genuine
+        blockers, not gaps papered over by guessing. If the fetch fails or
+        returns nothing, `kind` falls back to "RESULT" rather than
+        inventing a method, and the moment still fires (a fight ending is
+        real and worth celebrating even if the HOW is unknown), matching
+        this project's every-other-feed discipline of degrading one field
+        at a time instead of hiding the whole event.
+        """
+        done_ids = {e["id"] for e in self.universal
+                    if e.get("sport") == "mma" and e.get("state") == "post"}
+        if self._seen_mma_done is None:
+            self._seen_mma_done = done_ids       # first read: adopt, don't replay
+            return
+        new_ids = done_ids - self._seen_mma_done
+        self._seen_mma_done = done_ids
+        if not new_ids:
+            return
+        ev = next((e for e in self.universal if e["id"] in new_ids), None)
+        if not ev:
+            return
+        method = sports._fetch_mma_finish_method(ev.get("league") or "", ev.get("id"))
+        winner = next((c for c in (ev.get("competitors") or []) if c.get("winner")), None)
+        name = (winner or {}).get("full") or (winner or {}).get("abbr") or "WINNER"
+        kind = method or "RESULT"
+        line2 = ev.get("class_label") or ""
+        color = (winner or {}).get("color") or (255, 200, 40)
+        self._set_big_moment(kind, name, line2, color)
+
+    BIG_MOMENT_DETECTORS["mma_finish"] = _detect_mma_finish
 
     def _frame_event_detail(self, ev):
         fn = self.SPORT_DETAIL_RENDERERS.get(ev.get("sport"))

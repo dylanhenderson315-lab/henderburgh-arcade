@@ -1119,6 +1119,66 @@ ESPN parsing, no new polling.
   reporting the same move, and BOGEY/LOST LEAD never fire regardless of
   repetition.
 
+**MMA finish — built, UNVERIFIED against live data (2026-08-02).**
+`sports._fetch_mma_finish_method(league_slug, event_id)` +
+`SportsEngine._detect_mma_finish()` (registered as
+`BIG_MOMENT_DETECTORS["mma_finish"]`).
+
+- **Do not confuse this with GameDayEngine's existing `_finish_round`/
+  `_seen_done` mechanism.** That is a different, older, already-working
+  system driving GAME DAY's dedicated UFC-card RESULT takeover from
+  `mma.FEED` (the dedicated card feed). This is the new, separate thing:
+  firing the shared `draw_celebration()` graphic while `ambient` is
+  showing, off whatever MMA/PFL event `sports.FEED.get_universal()`
+  happens to surface -- a completely different feed pathway from
+  `mma.FEED`, confirmed non-interchangeable in an earlier session.
+  Neither `GameDayEngine` nor `mma.py`'s existing finish handling was
+  touched.
+- **Reuses the already-verified type-ID facts from mma.py** (20 =
+  submission, 21 = KO/TKO, 22 = decision -- `mma.METHOD_BY_ID`/
+  `mma.METHOD_BY_TEXT`), not re-derived. One-shot per event id, same
+  idiom as `GameDayEngine._seen_done`/`_seen_home_runs`: the first read
+  adopts whatever is already `state == "post"` without firing, only a
+  newly-post id fires.
+- **Real, current data gap, honestly documented, not worked around**: as
+  of this build `sports.FEED.get_universal()` has ZERO mma/PFL events
+  (checked live), and `mma.FEED` (GAME DAY's own dedicated card feed)
+  also has no next card. Per this project's "never invent" rule, no
+  synthetic event was fabricated to force a test.
+- **Two specific open unknowns in `_fetch_mma_finish_method()`, both
+  genuine blockers, not guessed past**: (1) whether a per-event summary
+  endpoint (`.../mma/{slug}/summary?event=ID`, same URL shape
+  `SUMMARY_URL` already uses for every team sport) even exists for a
+  universal-feed event id -- mma.py's own docstring already established
+  the BARE `.../mma/ufc/summary` (no event id) 404s, but the per-event
+  form was never tested because no live/recent MMA event exists to build
+  the URL from; (2) the league slug used to build that URL is a guess --
+  the universal header event only exposes the already-uppercased,
+  `panel_text()`-folded league display name ("UFC", "PFL"), not ESPN's
+  raw path slug, so this lowercases the display name rather than the
+  real slug (`"ufc"`) `mma.py`'s own `SCOREBOARD_URL` is built on.
+- **Degrades honestly if the fetch fails**: `_fetch_mma_finish_method()`
+  returns `None` on absolutely anything unexpected (wrong shape, no
+  `details`/`plays` list, 404, timeout, malformed json) rather than a
+  guessed method, and the detector still fires the celebration with
+  `kind = "RESULT"` in that case -- a fight ending is real and worth
+  celebrating even when the HOW is unknown, same "degrade one field at a
+  time" discipline as every other feed here.
+- **Cost discipline**: the fetch only ever runs once per newly-observed
+  finish (a one-shot transition, not continuous polling), matching the
+  narrow per-event scope `mlb_hr`/soccer-goal detectors already use.
+- **Verified**: `render_audit.py sports` -- 0 modes failed.
+  `fold_audit.py` -- 0 feeds not folding. Confirmed the detector is a
+  true no-op against REAL current data: ticked a real `SportsEngine`
+  against the live universal feed (45 real events, zero MMA/PFL among
+  them), `pop_big_moment()` returned `None`, `_seen_mma_done` correctly
+  adopted an empty set, zero exceptions.
+- **NOT verified end-to-end against a real finish, and cannot be from
+  this session** -- no live/recent MMA event exists in either feed. The
+  code is ready and additive; the first real UFC/PFL finish the
+  universal feed ever surfaces is what proves this live, not a synthetic
+  push.
+
 ### Per-sport EXPANDED-DETAIL renderers (started 2026-08-01)
 
 **Why, and why it's a SEPARATE follow-up rather than part of the main-

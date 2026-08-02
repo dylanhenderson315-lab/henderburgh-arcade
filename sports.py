@@ -44,6 +44,7 @@ import time
 import urllib.error
 import urllib.request
 
+import mma
 import paneltext
 from pathlib import Path
 
@@ -502,6 +503,76 @@ def fetch_new_soccer_goals(league, event_id, seen):
         })
     return out
 
+
+
+def _fetch_mma_finish_method(league_slug, event_id):
+    """Best-effort finish-method lookup for an MMA/PFL event surfaced
+    through the UNIVERSAL header feed (sports.FEED.get_universal()) --
+    NOT mma.FEED, the separate dedicated UFC-card feed GAME DAY uses,
+    confirmed non-interchangeable in an earlier session.
+
+    Reuses the ALREADY-VERIFIED type-ID logic from mma.py (20=submission,
+    21=KO/TKO, 22=decision -- see mma.METHOD_BY_ID/mma.METHOD_BY_TEXT)
+    rather than re-deriving it, on the theory that IF a `details` play-by-
+    play list is reachable for a universal-feed event id, it has the same
+    shape mma.py's own SCOREBOARD_URL already proved out.
+
+    TWO GENUINE, DOCUMENTED-NOT-GUESSED-PAST UNKNOWNS, because there is no
+    live/recent MMA event in either feed as of this build to test against:
+
+    1. Whether this endpoint even EXISTS for a universal-feed event id.
+       mma.py's own docstring already established that the bare
+       `.../mma/ufc/summary` (no event id) 404s. This calls the per-event
+       form instead -- the same URL SHAPE sports.py's own SUMMARY_URL uses
+       for every team sport's win-probability/home-run/goal lookups
+       (`.../mma/{slug}/summary?event=ID`) -- on the theory that a summary
+       endpoint commonly 404s with no event id and behaves differently
+       with one, the way ESPN's other sports do. That theory is UNTESTED.
+    2. `league_slug` is a guess. The universal header event only exposes
+       the ALREADY-UPPERCASED, panel_text()-folded league display name
+       ("UFC", "PFL") -- see sports._header_event()'s `league` field --
+       not ESPN's raw path slug, so this lowercases the display name
+       rather than using the real slug mma.py's own SCOREBOARD_URL is
+       built on ("ufc"). For UFC these likely happen to match; PFL is
+       unconfirmed either way.
+
+    Returns None on absolutely anything unexpected -- wrong shape, no
+    `details`/`plays` list, 404, timeout, malformed json -- never a
+    guessed method. Never call this more than once per finish: it is one
+    request per fight ending, the same narrow per-event scope every other
+    big-moment detector in this file uses (mlb_hr, soccer goals), not a
+    new source of continuous polling.
+    """
+    try:
+        path = f"mma/{(league_slug or '').lower()}"
+        data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))
+    except Exception:                    # noqa: BLE001 - never invent, never raise
+        return None
+    if not isinstance(data, dict):
+        return None
+    # mma.py's own `_method()` reads a flat `details` list off the
+    # competition; this endpoint's shape (if it exists at all) is
+    # unverified, so also try the `plays` key soccer/MLB's summary
+    # payloads use, on the chance MMA's differs -- either way, nothing is
+    # invented if neither is present.
+    details = data.get("details")
+    if not isinstance(details, list):
+        details = data.get("plays")
+    if not isinstance(details, list):
+        return None
+    for d in details:
+        if not isinstance(d, dict):
+            continue
+        t = d.get("type") or {}
+        text = str(t.get("text") or "")
+        if "Winner" not in text:
+            continue
+        by_id = mma.METHOD_BY_ID.get(str(t.get("id")))
+        if by_id:
+            return by_id
+        token = paneltext.panel_text(text.replace("Unofficial", "").replace("Winner", ""))
+        return mma.METHOD_BY_TEXT.get(token, token or None)
+    return None
 
 
 class SportsFeed:
