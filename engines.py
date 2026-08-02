@@ -6329,10 +6329,37 @@ class SportsEngine(Browsable):
         "golf": _render_golf,
     }
 
+    # ---- per-sport EXPANDED-detail dispatch -------------------------------
+    # Same seam as SPORT_RENDERERS, one level deeper. The generic detail
+    # view below was fine when every sport's MAIN view was equally generic
+    # -- but now baseball's main row shows inning/count/diamond, MMA's
+    # shows weight class and records as the headline, soccer's shows form
+    # and shootout scores, golf's shows a real leaderboard. The shared
+    # detail view still only shows a plain two-row score plus whatever
+    # generic "extra" fits -- for baseball specifically it shows LESS live
+    # state (bases/outs, no count) than the compact main row already does,
+    # which is backwards for a view whose whole point is "more detail".
+    #
+    # A sport claims its own expanded renderer, or falls back to the
+    # generic one -- same additive, cannot-regress-another-sport contract
+    # as SPORT_RENDERERS. Registry starts EMPTY so this commit is a pure
+    # seam, verified byte-identical to the old behaviour before anything
+    # is added to it.
+    SPORT_DETAIL_RENDERERS = {}
+
     def _frame_event_detail(self, ev):
+        fn = self.SPORT_DETAIL_RENDERERS.get(ev.get("sport"))
+        if fn:
+            buf = blank(); fill(buf, self.BG)
+            fn(self, buf, ev)
+            return bytes(buf)
+        return self._frame_event_detail_generic(ev)
+
+    def _frame_event_detail_generic(self, ev):
         """EXPANDED single event -- the same visual language as GAME DAY
         (draw_event_frame), because it is the same idea: one event given
-        the whole panel, rather than a row in a list.
+        the whole panel, rather than a row in a list. Still the fallback
+        for any sport without its own expanded renderer.
 
         Shows everything the sport genuinely provides and silently omits
         what it doesn't -- these payloads are NOT uniform (see sports.py).
