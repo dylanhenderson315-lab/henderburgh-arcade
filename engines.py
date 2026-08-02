@@ -924,7 +924,13 @@ def draw_scope_rings(buf, ring_fracs, color=(22, 52, 34),
 def draw_scope_crosshair(buf, color=(22, 52, 34),
                          cx=SCOPE_CX, cy=SCOPE_CY, radius=SCOPE_R):
     """N/S and E/W tick marks at the rim -- orientation cues that cost four
-    short strokes instead of four text labels, which would not fit."""
+    short strokes instead of four text labels.
+
+    Text labels were tried and reverted same-session: real feedback was
+    that letters read as clunky against the sweep/rings aesthetic this is
+    going for. The fix for "how do I orient this" is a real landmark (the
+    coastline, the airport), not instrument-panel compass letters -- see
+    the ground-radar coastline note below."""
     for k in range(3):
         put_px(buf, cx, cy - radius + k, color)          # N
         put_px(buf, cx, cy + radius - k, color)          # S
@@ -5287,7 +5293,11 @@ class SatelliteEngine(Browsable):
         draw_scope_home(buf, color=(120, 130, 155))
 
         if not objs:
-            draw_text_centered(buf, 31, "NOTHING UP", self.INK_DIM)
+            # y=31 collided with the crosshair's new W/E letter labels
+            # (both sit at cy-2=31) -- caught by render_audit's rotate-
+            # driven coverage, not by eye. y=40 clears the W/E row
+            # (ends y=36) and the S label row (starts y=47) with margin.
+            draw_text_centered(buf, 40, "NOTHING UP", self.INK_DIM)
         lbl = "EL " + "/".join(str(e) for e in self.SCOPE_RING_EL) + "/0"
         draw_text_centered(buf, 58, fit_text(lbl, WIDTH - 4), (86, 94, 116))
         return bytes(buf)
@@ -5524,6 +5534,28 @@ class FlightEngine(Browsable):
 
         draw_scope_rings(buf, [math.sqrt(nm / float(flights.RADIUS_NM))
                                for nm in self.SCOPE_RING_NM])
+
+        # REAL coastline (flights.COASTLINE -- Natural Earth data, see its
+        # own docstring for provenance), not a decorative shape. This is
+        # the orientation fix that replaced the N/S/E/W text labels: real
+        # feedback was that compass letters read as clunky against this
+        # view, and a landmark you actually recognise (the shoreline,
+        # which the airport itself sits inside of) is the more intuitive
+        # answer to "where am I looking" than instrument-panel letters.
+        # Drawn as CONNECTED segments through the same bearing/distance ->
+        # scope_xy() pipeline every other element uses, so it moves
+        # correctly if the configured home ever changes -- not baked in
+        # as fixed pixels.
+        lat, lon, _lbl = satellite.FEED.get_location()
+        pts = []
+        for clat, clon in flights.COASTLINE:
+            brg, nm = flights.bearing_distance(lat, lon, clat, clon)
+            frac = self._scope_r_frac(nm)
+            pts.append(scope_xy(brg, frac) if frac is not None else None)
+        for a, b in zip(pts, pts[1:]):
+            if a is not None and b is not None:
+                draw_line(buf, a[0], a[1], b[0], b[1], (26, 78, 108))
+
         draw_scope_crosshair(buf)
         draw_scope_sweep(buf, self.sweep)
 
@@ -5552,7 +5584,11 @@ class FlightEngine(Browsable):
                               glow=scope_glow(brg, self.sweep), big=sel)
 
         draw_scope_home(buf)
-        # States the scale rather than leaving the sqrt compression silent.
+        # Tried an alternating text legend ("<>=HOME +=MYR") same session,
+        # reverted: real feedback was that text captions read as clunky
+        # against this view's aesthetic. Orientation now comes from real
+        # landmarks (the coastline outline, the airport mark) rather than
+        # instrument-panel labels -- see the coastline note above.
         ring_txt = "/".join(str(nm) for nm in self.SCOPE_RING_NM) + "NM"
         draw_text_centered(buf, 58, fit_text(ring_txt, WIDTH - 4), (86, 94, 116))
         return bytes(buf)

@@ -130,6 +130,76 @@ def bearing_distance(lat1, lon1, lat2, lon2):
     return brg, d_km * 0.539957
 
 
+# ---- coastline, for the ground radar scope ------------------------------
+# REAL geography, not a decorative squiggle: extracted from Natural Earth's
+# public-domain 10m coastline vector data
+# (github.com/nvkelso/natural-earth-vector, ne_10m_coastline.geojson) on
+# 2026-08-02, clipped to the contiguous run of points within 55nm of the
+# configured home (33.735277, -78.9089469) -- a margin beyond the scope's
+# 40nm radius so the line clips naturally at the rim instead of stopping
+# abruptly right at the edge. Verified against the raw source before
+# embedding: nearest real coastline point to home is 2.77nm at bearing
+# 131.7deg (SE), consistent with the Grand Strand shoreline curving away
+# to the southeast from a few miles inland -- not assumed, checked.
+#
+# STATIC AND LOCATION-SPECIFIC ON PURPOSE. This is reference geography for
+# THIS deployment's configured home, the same category of fact as the MYR
+# airport coordinates (also a one-time real lookup, not a live feed) --
+# coastlines do not move, so there is no feed to build, and a live fetch
+# (Overpass API's "natural=coastline" query) was tried first and reliably
+# times out server-side on real coastline ways, a known limitation of that
+# API for this query shape, not a transient failure. If the home location
+# ever moves somewhere the Atlantic Ocean is not nearby, this data becomes
+# wrong and needs re-extracting the same way -- same manual-refresh
+# expectation as re-picking the home airport after a move.
+COASTLINE = (
+    (33.0138, -79.5848), (33.0193, -79.5701), (33.0363, -79.5387),
+    (33.0412, -79.5200), (33.0292, -79.5118), (33.0217, -79.5090),
+    (33.0019, -79.4957), (32.9914, -79.4913), (33.0001, -79.4770),
+    (33.0067, -79.4576), (33.0110, -79.4354), (33.0124, -79.4125),
+    (33.0173, -79.3870), (33.0297, -79.3798), (33.0463, -79.3787),
+    (33.0640, -79.3715), (33.0788, -79.3518), (33.0954, -79.3077),
+    (33.1087, -79.2926), (33.1300, -79.2899), (33.1375, -79.3076),
+    (33.1425, -79.3298), (33.1558, -79.3404), (33.1539, -79.3199),
+    (33.1491, -79.2973), (33.1394, -79.2792), (33.1223, -79.2722),
+    (33.1241, -79.2660), (33.1267, -79.2609), (33.1306, -79.2563),
+    (33.1360, -79.2517), (33.1452, -79.2628), (33.1566, -79.2700),
+    (33.1661, -79.2689), (33.1701, -79.2551), (33.1668, -79.2472),
+    (33.1497, -79.2393), (33.1422, -79.2306), (33.1579, -79.2229),
+    (33.1678, -79.2102), (33.1752, -79.1959), (33.1838, -79.1835),
+    (33.1879, -79.1972), (33.1929, -79.2030), (33.2111, -79.2101),
+    (33.2227, -79.2124), (33.2340, -79.2113), (33.2425, -79.2140),
+    (33.2501, -79.2483), (33.2615, -79.2720), (33.2777, -79.2914),
+    (33.2968, -79.2995), (33.3178, -79.2964), (33.3393, -79.2882),
+    (33.3591, -79.2771), (33.4121, -79.2323), (33.4284, -79.2120),
+    (33.4370, -79.1896), (33.4308, -79.1896), (33.4221, -79.2010),
+    (33.3865, -79.2372), (33.3403, -79.2632), (33.3173, -79.2720),
+    (33.3067, -79.2685), (33.3063, -79.2269), (33.3007, -79.2137),
+    (33.2868, -79.2033), (33.2685, -79.1986), (33.2323, -79.1974),
+    (33.2179, -79.1896), (33.2179, -79.1835), (33.2413, -79.1826),
+    (33.3578, -79.1561), (33.3688, -79.1487), (33.3756, -79.1561),
+    (33.4174, -79.1331), (33.5336, -79.0315), (33.6421, -78.9380),
+    (33.7045, -78.8675), (33.7786, -78.7633), (33.8319, -78.6570),
+    (33.8458, -78.6151), (33.8480, -78.5733), (33.8572, -78.5772),
+    (33.8637, -78.5829), (33.8676, -78.5904), (33.8690, -78.6000),
+    (33.8759, -78.6000), (33.8895, -78.5454), (33.8833, -78.5454),
+    (33.8798, -78.5501), (33.8690, -78.5590), (33.8963, -78.4709),
+    (33.9106, -78.4083), (33.9226, -78.3849), (33.9509, -78.3747),
+    (33.9509, -78.3673), (33.9324, -78.3617), (33.9242, -78.3624),
+    (33.9168, -78.3673), (33.9101, -78.3335), (33.9251, -78.2525),
+    (33.9206, -78.2269), (33.9155, -78.2140), (33.9168, -78.1587),
+    (33.9152, -78.1396), (33.8939, -78.0493), (33.8923, -78.0323),
+    (33.8963, -78.0178), (33.9047, -78.0089), (33.9526, -77.9722),
+    (33.9895, -77.9532), (34.0027, -77.9494), (34.0372, -77.9505),
+    (34.0537, -77.9486), (34.0676, -77.9420), (34.0917, -77.9523),
+    (34.1632, -77.9629), (34.1912, -77.9625), (34.1912, -77.9563),
+    (34.1476, -77.9407), (34.1086, -77.9216), (34.0798, -77.9296),
+    (34.0010, -77.9213), (33.9714, -77.9359), (33.9652, -77.9359),
+    (33.9577, -77.9323), (33.9489, -77.9338), (33.9305, -77.9420),
+    (33.9582, -77.9111),
+)
+
+
 def _ident(ac):
     """Best available identifier: callsign, then registration, then the
     ICAO24 hex address -- some aircraft (mostly small GA) don't broadcast
