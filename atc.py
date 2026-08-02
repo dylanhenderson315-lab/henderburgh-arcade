@@ -167,3 +167,69 @@ class AtcLogFeed:
 
 
 FEED = AtcLogFeed()
+
+
+# ---- callsign matching (phase 3) ----------------------------------------
+# CONFIDENCE-GATED HIGHLIGHT ONLY, NEVER A SILENT FILTER. Per the
+# feasibility research's own finding, GA tail numbers (spoken digit/
+# phonetic sequences like "one whiskey") cannot be reliably reconstructed
+# from ASR text -- this module does not attempt them, full stop. It only
+# ever matches AIRLINE NAME + FLIGHT NUMBER, and only ever REPORTS a match
+# when the reconstructed callsign is an EXACT match against a real
+# currently-tracked ADS-B ident. A same-airline-different-flight-number
+# candidate (confirmed against real data: "SOUTHWEST 1437" spoken
+# repeatedly while the only real Southwest aircraft in range was
+# SWA2587) is correctly reported as NO match, not a fuzzy near-miss --
+# exactly the honesty this feature exists to guarantee.
+import re
+
+# Real FAA-registered radio callsigns -> real ICAO 3-letter airline codes,
+# same category of static reference data as flights.ICAO_TYPE_NAMES (a
+# public, bounded fact table, not invented). Limited to carriers actually
+# plausible in US airspace generally and the Myrtle Beach/Grand Strand
+# area specifically -- confirmed several of these appear VERBATIM in real
+# transcribed MYR audio during this feature's own development (DELTA,
+# SOUTHWEST, FRONTIER, AMERICAN all observed live).
+AIRLINE_ICAO = {
+    "AMERICAN": "AAL", "DELTA": "DAL", "UNITED": "UAL", "SOUTHWEST": "SWA",
+    "FRONTIER": "FFT", "JETBLUE": "JBU", "SPIRIT": "NKS", "ALASKA": "ASA",
+    "ENVOY": "ENY", "REPUBLIC": "RPA", "SKYWEST": "SKW", "ENDEAVOR": "EDV",
+    "ALLEGIANT": "AAY", "HAWAIIAN": "HAL",
+}
+
+# An airline word followed (within a short run of digits/punctuation --
+# Whisper renders a flight number as anything from "2214" to "22, 14" to
+# "22 14") by 2-5 digit groups. Built and tuned against REAL transcript
+# output captured during this feature's own live testing, not assumed:
+# confirmed to correctly parse "DELTA 2327," -> DAL2327 and "SOUTHWEST
+# 14, 37," -> SWA1437 from real MYR audio.
+_CALLSIGN_RE = {
+    name: re.compile(re.escape(name) + r"[,.]?\s+((?:\d[,.\s]*){2,5})")
+    for name in AIRLINE_ICAO
+}
+
+
+def match_callsign(text, real_idents):
+    """The first real, currently-tracked aircraft ident this transcript
+    text names by airline+flight-number, or None.
+
+    `real_idents` must be the CALLER's actual current aircraft list (e.g.
+    FlightEngine's `flights.FEED.get()` idents) -- this function invents
+    nothing and trusts nothing beyond an exact string match against that
+    real list. Only the FIRST match is returned; a transcript naming
+    multiple real aircraft is rare and "highlight the first one found" is
+    a reasonable, honest simplification rather than a scored ranking this
+    feature does not need yet.
+    """
+    if not text or not real_idents:
+        return None
+    idents = set(real_idents)
+    for name, code in AIRLINE_ICAO.items():
+        for m in _CALLSIGN_RE[name].finditer(text):
+            digits = re.sub(r"\D", "", m.group(1))
+            if not digits:
+                continue
+            candidate = code + digits
+            if candidate in idents:
+                return candidate
+    return None

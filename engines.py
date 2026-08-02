@@ -5421,6 +5421,8 @@ class FlightEngine(Browsable):
     SWEEP_DEG_PER_TICK = 3.0  # ~6s per full rotation at tick_rate 0.05
     ATC = (255, 170, 60)      # warm amber, distinct from PLANE blue / ROUTE yellow -- reads as "radio"
     ATC_PAGE_LINES = 7        # lines per page -- see _frame_atc_log()'s y-budget comment
+    ATC_MATCH = (80, 235, 130)  # bright green -- a confirmed real-ident match, visually unmistakable
+                                 # from the general-log amber (never the same color as "just data")
     ATC_PAGE_TICKS = 90       # ~4.5s per page, long enough to actually read one before it turns
 
     def reset(self):
@@ -5445,6 +5447,11 @@ class FlightEngine(Browsable):
         self.atc_page = 0
         self.atc_hold = 0
         self._atc_page_ts = None
+        # PHASE 3 -- confidence-gated real-ident match for the current
+        # entry, or None. NEVER a silent filter: the general log above
+        # always shows every real transmission regardless of this value,
+        # this only controls whether an EXTRA highlight is drawn on top.
+        self.atc_match_ident = None
         # Distinguishes "auto-cycle spotlighted this aircraft" from "the
         # user pressed rotate to select it" -- without this, the existing
         # spotlight rotation (scope -> detail -> next aircraft -> ... ->
@@ -5525,20 +5532,53 @@ class FlightEngine(Browsable):
         # is fetched every tick same as every other feed here, not
         # specially gated to when the log view is showing.
         self.atc_entries = atc.FEED.get()
-        # Recompute pages ONLY when the top entry actually changed (by
+        # Recompute pages when the top entry actually changed (by
         # timestamp, the real identity of a transmission) -- not every
         # tick, and not merely because the list was re-fetched with the
         # same content. A fresh transmission always starts back at page 1
         # rather than wherever the cursor happened to be sitting.
         top_ts = self.atc_entries[0].get("ts") if self.atc_entries else None
-        if top_ts != self._atc_page_ts:
+        entry_changed = top_ts != self._atc_page_ts
+        if entry_changed:
             self._atc_page_ts = top_ts
             self.atc_page = 0
             self.atc_hold = 0
-            text = self.atc_entries[0].get("text", "") if self.atc_entries else ""
+            self.atc_match_ident = None     # fresh entry: reset, retried below
+
+        text = self.atc_entries[0].get("text", "") if self.atc_entries else ""
+        # PHASE 3 -- confidence-gated callsign match against the REAL
+        # currently-tracked aircraft. Airline+flight-number only, exact
+        # match required -- see atc.match_callsign()'s own docstring for
+        # why GA tail numbers are never attempted.
+        #
+        # RETRIED EVERY TICK WHILE UNMATCHED, not gated to "entry
+        # changed" alone -- a REAL bug, found by checking against real
+        # live data rather than trusting the synthetic test that passed:
+        # flights.FEED's background thread may not have completed its
+        # first fetch yet on the exact tick a transmission arrives, so
+        # matching only once at entry-change time silently missed a real,
+        # correct match (SOUTHWEST 1437 -> SWA1437) purely because the
+        # aircraft list was still empty at that specific instant. Once
+        # matched, this stops re-trying (no wasted work); if it never
+        # matches, the retry is one cheap regex pass per tick against a
+        # short string, negligible next to the 50ms frame budget.
+        if self.atc_entries and self.atc_match_ident is None:
+            real_idents = [ac.get("ident") for ac in (self.data.get("aircraft") or [])]
+            new_match = atc.match_callsign(text, real_idents)
+            if new_match:
+                self.atc_match_ident = new_match
+                entry_changed = True   # force a page recompute: the match tag now reserves a line
+
+        if entry_changed:
+            # A match costs one line of page budget (ATC_PAGE_LINES - 1)
+            # so the tag never competes with the transcript text itself
+            # for room -- recomputed here too so a match discovered on a
+            # LATER tick (see above) still gets its line reserved rather
+            # than overlapping the first line of already-paginated text.
+            page_lines = self.ATC_PAGE_LINES - 1 if self.atc_match_ident else self.ATC_PAGE_LINES
             all_lines = wrap_text(text, WIDTH - 4, max_lines=None)
-            self.atc_pages = [all_lines[i:i + self.ATC_PAGE_LINES]
-                              for i in range(0, len(all_lines), self.ATC_PAGE_LINES)] or [[]]
+            self.atc_pages = [all_lines[i:i + page_lines]
+                              for i in range(0, len(all_lines), page_lines)] or [[]]
         # Auto-advance through pages while the log is actually on screen,
         # so a long real transmission is GUARANTEED to be seen in full
         # rather than permanently stuck on page 1 -- this is the "no
@@ -5661,8 +5701,17 @@ class FlightEngine(Browsable):
             x, y = scope_xy(brg, frac)
             col = self._alt_color(ac.get("alt_ft"))
             sel = (i == self.cur % max(1, len(aircraft)))
-            draw_scope_target(buf, x, y, (255, 255, 255) if sel else col,
-                              glow=scope_glow(brg, self.sweep), big=sel)
+            # PHASE 3 reciprocal touch: the aircraft a real ATC
+            # transmission was just confidence-matched to gets the same
+            # bright-green treatment on the scope, so the correlation is
+            # visible from either direction -- picking the aircraft shows
+            # the transmission (ATC LOG view), and the transmission shows
+            # the aircraft (here). Still never a filter: every aircraft
+            # keeps drawing regardless of match status.
+            matched = ac.get("ident") and ac["ident"] == self.atc_match_ident
+            mark_col = self.ATC_MATCH if matched else ((255, 255, 255) if sel else col)
+            draw_scope_target(buf, x, y, mark_col,
+                              glow=scope_glow(brg, self.sweep), big=(sel or matched))
 
         draw_scope_home(buf)
         # Tried an alternating text legend ("<>=HOME +=MYR") same session,
@@ -5830,11 +5879,24 @@ class FlightEngine(Browsable):
             caption = f"LAST: {self._fmt_ago(age)}"
         draw_text_centered(buf, 10, fit_text(caption, WIDTH - 4), self.ATC)
 
-        # 7 lines at y=17..53 (6px pitch) leaves y=59 clear, the real
-        # HEIGHT-5 boundary a 5px glyph must start at or before.
+        y = 17
+        if self.atc_match_ident:
+            # PHASE 3: a confidence-gated match, visually UNMISTAKABLE
+            # (bright green, distinct from the general-log amber) so it
+            # reads as "confirmed", never blended into the ordinary text.
+            # Costs exactly the one line of page budget tick() already
+            # reserved for it (ATC_PAGE_LINES - 1) -- never silently
+            # eats into the transcript text's own room.
+            draw_text_centered(buf, y, fit_text(f"MATCH: {self.atc_match_ident}", WIDTH - 4),
+                               self.ATC_MATCH)
+            y += 6
+
+        # 6-7 lines (depending on whether the match row above is showing)
+        # leaves y=59 clear, the real HEIGHT-5 boundary a 5px glyph must
+        # start at or before.
         page = self.atc_pages[self.atc_page] if self.atc_pages else []
         for i, ln in enumerate(page):
-            draw_text3x5(buf, max(2, (WIDTH - text_w(ln)) // 2), 17 + i * 6, ln, self.INK)
+            draw_text3x5(buf, max(2, (WIDTH - text_w(ln)) // 2), y + i * 6, ln, self.INK)
         return bytes(buf)
 
     def frame(self):
