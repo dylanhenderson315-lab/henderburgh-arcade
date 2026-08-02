@@ -6535,6 +6535,70 @@ class SportsEngine(Browsable):
 
     SPORT_DETAIL_RENDERERS["baseball"] = _render_baseball_detail
 
+    def _render_soccer_detail(self, buf, ev):
+        """Soccer's EXPANDED view. The main row already shows form and the
+        real ESPN-formatted clock -- the incremental value here is the
+        full RECORD (with points, which the compact row has no room for:
+        "7-5-5, 26 PTS" is 14 characters), plus venue/broadcast/series and
+        the shootout treatment at full size. Same y-cursor discipline as
+        baseball's detail view, after that one proved fixed offsets don't
+        survive real content here either.
+        """
+        accent = self._sport_accent(ev)
+        draw_event_frame(buf, 1.0 if ev["live"] else 0.35, accent, accent)
+
+        tag = self._state_tag(ev)
+        head = ev["league_name"] or "SOCCER"
+        if tag:
+            head = f"{head}  {tag}"
+        draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
+                           self.LIVE if ev["live"] else color_on_dark(accent), x_min=3)
+
+        comps = ev["competitors"]
+        y = 11
+        for c in comps[:2]:
+            bar = c.get("color") or self.INK_DIM
+            for by in range(10):
+                for bx in (3, 4):
+                    put_px(buf, bx, y + by, bar)
+            sc = c.get("score")
+            sc_txt = "" if sc is None else str(sc)
+            col = self.WIN if c.get("winner") else self.HERO_INK
+            avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
+            draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
+            if sc_txt:
+                draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
+            y += 11
+            rec = c.get("record")
+            if rec:
+                draw_text3x5(buf, 8, y, fit_text(rec, WIDTH - 12), self.INK_DIM)
+            y += 6
+
+        y += 1
+        shootouts = [c.get("shootout") for c in comps[:2]]
+        if all(s is not None for s in shootouts):
+            draw_text_centered(buf, y, "PENALTIES", self.LIVE)
+            y += 7
+            pk = "-".join(str(s) for s in shootouts)
+            draw_text_centered(buf, y, pk, self.HERO_INK, scale=2)
+            y += 11
+        else:
+            clock = ev.get("clock") or ev.get("detail") or ""
+            if clock:
+                draw_text_centered(buf, y, fit_text(clock, WIDTH - 8),
+                                   self.LIVE if ev["live"] else self.INK_DIM)
+                y += 7
+
+        foot_lines = [x for x in (ev.get("series"), ev.get("venue"),
+                                  ev.get("broadcast"), ev.get("note")) if x]
+        for line in foot_lines:
+            if y > HEIGHT - 5:
+                break
+            draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.INK_DIM, x_min=3)
+            y += 7
+
+    SPORT_DETAIL_RENDERERS["soccer"] = _render_soccer_detail
+
     def _frame_for_view(self):
         if self.detail is not None:
             ev = self._current_event()
