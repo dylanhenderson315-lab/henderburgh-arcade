@@ -435,6 +435,15 @@ change cannot silently break the match the way a string comparison could.
 **`ambient_weight()` now considers the best pass across the WHOLE list**,
 not the ISS alone — the ISS being invisible for days must not suppress
 real dwell time for a genuinely bright pass from something else.
+**Confirmed against real data 2026-08-02, and it changes real behaviour
+today**: with the ISS genuinely invisible right now, the OLD logic (ISS
+quality only) would return the 1.0 default weight → ~400 ticks (~20s)
+dwell. The new logic correctly credits the best available non-ISS pass
+(rank 3 in the live catalogue) → weight 2.5 → clamped to the 900-tick
+ceiling (~45s). Verified end-to-end through `AmbientEngine._dwell_for()`
+with the real satellite sub-engine, not just the weight function in
+isolation — `has_content()` true, in `SEQUENCE`, dwell computation
+matches the manual formula exactly.
 
 **`SatelliteEngine` is now a real `Browsable` subclass** (tap-to-step,
 hold-to-accelerate through the pass list) instead of hand-rolled
