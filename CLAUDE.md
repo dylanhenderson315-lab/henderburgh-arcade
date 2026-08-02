@@ -1628,19 +1628,22 @@ per-sport renderer sections above, the satellite section, the two-audits
 section) rather than duplicated into an ever-growing single list here.
 Check those sections, not just this one, for the full picture.
 
-### "Content exists" and "the render path reaches it" are two different claims — a standing risk class, not a one-off
+### "One system doesn't know about a state another just entered" — a standing risk class, not a one-off
 
 Same weight as the glyph-drop pattern in `paneltext.py`'s tally: this has
-now failed **three separate times**, independently, in three different
+now failed **four separate times**, independently, in four different
 subsystems. It deserves the same "assume it will happen again, test for
-it specifically" treatment rather than being treated as three unrelated
-bugs that happened to rhyme.
+it specifically" treatment rather than being treated as four unrelated
+bugs that happened to rhyme. (Named more broadly than the original
+"has_content() vs render path" framing after instance 4 turned out to be
+the same root cause one layer further down — not a capability check at
+all, but two pieces of *runtime* state.)
 
-The shape every time: something correctly determines that real content
-exists (`has_content()`, a config check, a capability check) — but a
-SECOND, separately-maintained piece of state decides what actually gets
-drawn or offered, and nothing keeps the two in sync. The first piece says
-yes; the second was never told.
+The shape every time: something correctly determines a fact (real content
+exists, a user just made a deliberate choice) — but a SECOND,
+separately-maintained piece of state decides what actually happens next,
+and nothing keeps the two in sync. The first piece is right every time;
+the second was never told.
 
 1. **The pinned-golfer view** (2026-08-01). `tick()` force-set `view = 1`
    whenever the configured leagues had any game — a leftover contested-slot
@@ -1656,32 +1659,48 @@ yes; the second was never told.
    left/right only and up/down — a real, working binding — was completely
    undiscoverable. Caught by manual testing in a real browser, counting
    actual outbound input requests, not by reading the legend code.
-3. **The satellite dome's `has_content()`** (2026-08-02, this session).
-   Fixing `has_content()` to count real objects visible right now — not just
+3. **The satellite dome's `has_content()`** (2026-08-02). Fixing
+   `has_content()` to count real objects visible right now — not just
    queued passes — was step one. Step two, found only by actually rendering
    that exact scenario: `tick()`'s view stayed pinned to `VIEW_PASSES`, which
    has nothing to draw for an empty pass list, so the mode would have
    reported real content to `AmbientEngine` and then shown "NO VISIBLE
    PASSES" the moment it was selected. `has_content()` was completely
    correct and the bug was invisible from reading it.
+4. **Flights' auto-cycle vs. a manual selection** (2026-08-02, same
+   session, building the fix for #3's own sibling feature). The pre-existing
+   spotlight rotation (scope → detail → next aircraft → … → scope) had no
+   way to know a human had just pressed `rotate` to open ONE specific
+   aircraft — it would have silently walked the view away a few seconds
+   later on its normal timer, the exact "browsing while expanded stays
+   expanded" rule sports had already had to learn. Fixed with an explicit
+   `_auto_detail` flag distinguishing "the timer put us here" from "a person
+   did". Caught by design review before it ever shipped, not by rendering —
+   the first instance of this class caught **before** going live rather
+   than after, because the pattern was already named and being watched for.
 
-**The common root**: a boolean or a list computed in one place (`has_content()`,
-a UI's mode registry, a view-selection flag) that something else was
-supposed to keep synchronized with, but nothing enforces the sync — so it
-holds by construction until the day a new feature changes one side and not
-the other. Same failure shape as the glyph-drop bug (a fold applied in one
-place, trusted everywhere, missed the one place it wasn't), just one layer
-up: a fact known in one place, assumed everywhere, missed the one place the
-render path forgot to check it.
+**The common root**: a fact computed or decided in one place (`has_content()`,
+a UI's mode registry, a view-selection flag, an auto-advance timer) that
+something else was supposed to stay synchronized with, but nothing enforces
+the sync — so it holds by construction until the day a new feature changes
+one side and not the other. Same failure shape as the glyph-drop bug (a fold
+applied in one place, trusted everywhere, missed the one place it wasn't),
+just one layer up: a fact known in one place, assumed everywhere, missed the
+one place that needed to check it.
 
 **What this means going forward**: whenever a change touches `has_content()`,
-a mode's view-selection logic, or anything that gates what a UI offers based
-on a capability check — **render or exercise the specific scenario the
-change claims to enable, end to end, not just the function that reports it
-truthfully.** The lesson from all three instances is identical: the
-function that says "yes, there is content" was correct every single time.
-The bug was always one hop further down, in whatever decides what to
-actually show once that yes has been given.
+a mode's view-selection logic, an auto-advance/timer interacting with a
+manual action, or anything that gates what happens next based on a fact
+decided elsewhere — **render or exercise the specific scenario the change
+claims to enable, end to end, not just the function that reports the fact
+truthfully.** Instance 4 shows this can now be caught at design time simply
+by asking "does anything else in this engine act on a timer, and would it
+know this state just changed?" — worth asking explicitly on every new
+view/mode-selection feature, not just discovered by accident.
+**`render_audit.py`'s step-loop now drives `input("rotate")`/`input("drop")`
+at every browse position automatically** (added 2026-08-02, after instance
+4's sibling bug slipped through a clean run) — see that tool's own
+docstring for the proof it actually closes the gap, not just claims to.
 
 ### The two audits — run BOTH; they catch different things
 

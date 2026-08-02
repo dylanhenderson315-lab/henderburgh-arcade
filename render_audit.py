@@ -38,6 +38,22 @@ FOUR CLASSES OF DAMAGE ARE CHECKED:
             name), which is exactly how the MMA name/record and the
             tennis venue/record overlaps happened.
 
+SELECT-TO-EXPAND IS NOW DRIVEN, NOT JUST STEPPED (2026-08-02). The
+per-step loop used to only step left/right and snap whatever was
+already on screen -- it never called input("rotate")/input("drop"), so
+any mode's expanded/detail view got ZERO automated coverage unless a
+human happened to drive it by hand. That is exactly how a real
+collision (a flights detail-card layout bug: an inline aircraft-type
+string centred across the wrong span, only visible for certain
+left/right stat widths) passed a clean render_audit run and was only
+found by manually pressing rotate against every real aircraft. Proven
+closed, not just assumed: reintroducing that exact bug and re-running
+this tool with no manual driving reproduces the failure automatically
+(`COLLISION step 2 rotate: '37MI NW' overlaps 'C414'`). `rotate` is
+this hardware's real select button (same convention SportsEngine's own
+select-to-expand documents), so this now runs unconditionally on every
+`_step`-based mode in the sweep -- see drive()'s per-step loop.
+
 Marquees legitimately draw partially off-panel at both edges to loop
 seamlessly, so draws flagged by a renderer known to marquee are reported
 but not failed -- see MARQUEE_OK.
@@ -213,6 +229,32 @@ def drive(mode, audit, ticks=60, settle=0.25):
                     break
             eng.tick()
             snap("step %d" % i)
+            # SELECT-TO-EXPAND, driven through the REAL input() dispatch --
+            # not a poke at whatever internal attribute happens to hold the
+            # view, at EVERY step position, not just wherever the cursor
+            # happened to land last. This is the gap that let a real bug
+            # through clean: the old "internal view cycles" loop below sets
+            # eng.view directly, which only ever exercised the render for
+            # the LAST position this loop left the cursor at -- so a
+            # flights layout bug that only showed up for one specific
+            # aircraft (P46T, mid-list) rendered clean here right up until
+            # someone manually drove input('rotate') across every real
+            # aircraft by hand. `rotate` is the select button on this
+            # hardware (same convention documented in SportsEngine's
+            # select-to-expand and now FlightEngine's); calling it on a
+            # mode with no such concept is harmless (it becomes a no-op or
+            # a cycling-pause toggle, exercised safely inside try/except
+            # like every other probe here) so this runs unconditionally
+            # rather than needing a per-mode allowlist.
+            if hasattr(eng, "input"):
+                try:
+                    eng.input("rotate")
+                    snap("step %d rotate" % i)
+                    eng.input("drop")
+                    snap("step %d rotate-back" % i)
+                except Exception as e:             # noqa: BLE001 - report, don't abort
+                    print("    !! step %d rotate/drop raised %s: %s"
+                          % (i, type(e).__name__, e))
 
     # Internal view cycles (satellite/weather/sports pinned, etc).
     for v in range(4):
