@@ -292,9 +292,36 @@ appends them to the menu automatically.
   actually see. The ISS keeps its badge tint and a larger mark
   regardless.
 
-  **Controls**: `up`/`down` toggles scope ↔ detail in both modes. Both
-  engines are `VERTICAL_BROWSE = False`, so `Browsable._axis()` leaves
-  up/down unclaimed and free to mean this — no new input plumbing.
+  **Controls — the two modes now use DIFFERENT bindings, noted honestly
+  rather than glossed over**:
+  - **Flights** (updated 2026-08-02): `rotate` — the hardware's actual
+    select button, same convention `SportsEngine`'s select-to-expand
+    already documented — opens the aircraft currently under the
+    left/right browse cursor into the full detail card; `drop` closes
+    back to the scope, or toggles auto-advance when nothing is expanded.
+    Replaced the original `up`/`down` toggle below, which flipped views
+    with no connection to which aircraft was highlighted — the whole
+    point of "select this ONE" is lost if the binding can't express which
+    one. **Auto-advance now suspends while a detail view was reached by
+    manual select** (`self._auto_detail` flag), not just by the periodic
+    spotlight rotation — without this, the existing auto-cycle would
+    silently walk the view away from an aircraft someone deliberately
+    opened a few seconds later, the identical "browsing while expanded
+    stays expanded" rule sports already follows.
+  - **Satellite**: still `up`/`down` toggles scope ↔ detail (unchanged).
+    Both engines are `VERTICAL_BROWSE = False`, so `Browsable._axis()`
+    leaves up/down unclaimed and free to mean this — no new input
+    plumbing was needed for either binding.
+  - **Real pre-existing bug found and fixed while exercising the new
+    flights binding** with `render_audit.py`'s collision detector driven
+    across every real aircraft (a check the mode's normal step-loop never
+    exercises, since it never calls `input("rotate")`): the inline
+    aircraft-type text on the detail card's stats row was centred across
+    the FULL PANEL WIDTH while the fit-check gating it validated against
+    the GAP between the two side stats — a real collision (`P46T` vs
+    `"24MI NE"`) passed the fit check and still visually overlapped,
+    because `left="-"`/`right="24MI NE"` skews the true gap well off
+    panel-centre. Now centred within the actual gap the check measured.
 
   **PERFORMANCE — measured before building, not assumed:**
   | workload | cost | vs 50ms frame budget |
