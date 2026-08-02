@@ -984,6 +984,41 @@ already uses — only the pinned favorite's own live game, never every game
 in a league — or it reopens the ESPN request-volume risk this project has
 already had to mitigate twice.
 
+- **soccer — done (2026-08-02).** `sports.fetch_new_soccer_goals(league,
+  event_id, seen)` polls one soccer match's `keyEvents` (the per-game
+  summary endpoint, same one `_fetch_win_prob()` already uses) and
+  returns newly-seen goals; `SportsEngine._detect_soccer_goal()` calls it
+  ONLY for the pinned favorite's own game and ONLY while `state == "in"`
+  — never for every soccer match in the universal feed. A goal is any
+  keyEvent with `scoringPlay: True`, not a `type.text` whitelist —
+  verified live against a real 2026-08-02 MLS/NWSL slate (8 real
+  matches, 30+ real goals, zero false positives among `scoringPlay=True`
+  entries); ESPN's own `type.text` varies with HOW it was scored, real
+  values seen: `"Goal"`, `"Goal - Header"`, `"Goal - Volley"`,
+  `"Goal - Free-kick"`, `"Penalty - Scored"`, `"Own Goal"` — a whitelist
+  would need updating for every finishing variant ESPN adds, `scoringPlay`
+  doesn't. Each `keyEvent` DOES carry a stable string `id` (confirmed
+  live, unlike MLB's `plays`), used directly as the per-game dedupe key
+  — same per-game "seen" idiom `GameDayEngine._seen_done` uses for MMA
+  finishes: adopt whatever's already there on the first read for a given
+  game, don't replay it, then only report what's genuinely new; the seen
+  set resets whenever the watched `event_id` changes. Text is folded with
+  `paneltext.panel_text()` inside `sports.py` at the I/O boundary, not in
+  `engines.py`. Verified against real data end-to-end, not synthetic: ran
+  `fetch_new_soccer_goals("MLS_TEST", "761697", seen)` (a test-only
+  `LEAGUE_PATHS` entry pointed at `soccer/usa.1`) against the real CF
+  Montreal 2–2 New England Revolution match already used to prove the
+  shared infrastructure — it correctly returned exactly the 4 real goals
+  (Carles Gil's penalty, Dor Turgeman, Brayan Vera, Prince Owusu's
+  header) in order, and a second call against the same `seen` set
+  correctly returned zero (dedupe holds). `render_audit.py sports` and
+  `fold_audit.py` both re-run clean after this change (0 modes failed, 0
+  feeds not folding). Not yet fired against a real live pinned-favorite
+  soccer game on the actual panel — that needs a live MLS/EPL game with
+  the owner's team pinned and live, which wasn't available at build
+  time; the parsing/dedupe/scope logic above is what's verified, the
+  full on-panel celebration trigger is the next thing to confirm live.
+
 **MLB home run — done (2026-08-02).** First real detector plugged into
 the seam, `sports._fetch_home_run_plays(league, event_id)` +
 `SportsEngine._detect_mlb_home_run()` (registered as
