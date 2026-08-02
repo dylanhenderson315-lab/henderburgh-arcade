@@ -14,7 +14,7 @@ has, and is the reason the ISS still gets a dedicated data slot in the
 unified sky view (see engines.SatelliteEngine).
 
 PASS PREDICTION USED TO LIVE HERE TOO, against iss-api.polluxlabs.io. It
-was retired 2026-08-02 when the satellite modes were unified: skypass.py's
+was retired 2026-08-01 when the satellite modes were unified: skypass.py's
 CelesTrak `visual` catalogue already includes the ISS (it is genuinely one
 of the ~157 naked-eye-visible objects tracked there), and its SGP4-based
 predictions were cross-validated against polluxlabs before the cut --

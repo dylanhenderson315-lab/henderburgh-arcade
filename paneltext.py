@@ -21,12 +21,25 @@ The running tally, all real, all caught by rendering rather than review:
     8. tennis    -- "(" and ")" dropped, so "7-6(7-5)" became "7-67-5"
     9. golf      -- "Rasmus Hojgaard" drew as "HJGAARD" while he led a
                     live PGA tournament
+   10. news      -- a curly apostrophe survived a bare .upper() and was
+                    dropped from a real RSS headline
 
 Number 9 is the reason this file exists rather than another local fix.
 mma.py had a correct fold, but it was a *private* one, so sports.py's
 universal feed -- written later -- did a plain `.upper()` and reintroduced
 the identical bug on a different feed. A per-module fold is not a fix; it
 is a fix waiting to be missed by the next module.
+
+Number 10 is why a per-module fold STILL isn't enough on its own: news.py,
+blog.py, flights.py and weather.py were all still on bare `.upper()` right
+up until it broke a real headline -- checking fold_audit.py (below) is
+what actually proves a boundary is folded; a live check that happens to
+see clean ASCII data proves nothing about the code.
+
+fold_audit.py (see CLAUDE.md) exists because of these two: it replays each
+feed's real payload with known-undrawable characters injected, so the NEXT
+unfolded boundary is caught before it ships a numbered instance rather than
+after.
 
 **Every feed module must pass externally-sourced display strings through
 `panel_text()` at its I/O boundary.** Not in the engine: the engine should

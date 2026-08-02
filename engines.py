@@ -4567,7 +4567,7 @@ class SatelliteEngine(Browsable):
     """Visible satellite passes -- the ISS and every other bright object,
     in ONE unified system.
 
-    UNIFIED 2026-08-02, replacing a three-view design (ISS PASS, ISS LIVE,
+    UNIFIED 2026-08-01, replacing a three-view design (ISS PASS, ISS LIVE,
     SKY) that had grown into two products sharing one engine rather than
     one coherent product. The tell: SKY's live-pass arc (real rise/peak
     azimuth, real progress along the pass) was already better, more
@@ -4688,7 +4688,7 @@ class SatelliteEngine(Browsable):
         # than list index, since the list can be recomputed mid-pass.
         #
         # When MORE THAN ONE pass goes overhead in the same tick -- real,
-        # not hypothetical: caught live 2026-08-02, OAO 3 (peak 75.8 deg)
+        # not hypothetical: caught live 2026-08-01, OAO 3 (peak 75.8 deg)
         # and SEASAT 1 (peak 19.8 deg) both rose in the same tick -- jump
         # to whichever is the BETTER pass, not whichever the loop happens
         # to see last. "Last in list order" is arbitrary; a dramatically

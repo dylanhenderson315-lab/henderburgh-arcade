@@ -1,7 +1,7 @@
 """
 skypass.py -- visible passes of ANY bright satellite, not just the ISS.
 
-This is the ONLY pass predictor in the project as of 2026-08-02 -- it
+This is the ONLY pass predictor in the project as of 2026-08-01 -- it
 covers the ISS too. satellite.py used to run a second, ISS-only pass
 predictor against polluxlabs; that was retired once this module's SGP4
 predictions were cross-validated against it (see below) and found to

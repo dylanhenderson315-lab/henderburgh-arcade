@@ -12,7 +12,8 @@ file.
 A 64×64 LED matrix "arcade console" built on an Apollo M-1 WLED-MM panel
 (HUB75, ESP32-S3), currently driven by a Mac mini over the network. It
 runs 14 classic games, live data "modes" (clock/dashboard, stock ticker,
-ISS tracker, flight tracker, sports scoreboard, news headline ticker,
+a unified satellite tracker for the ISS and every other visible bright
+satellite, flight tracker, sports scoreboard, news headline ticker,
 weather + severe alerts, site guestbook, and an `ambient` rotation tying
 them together), a `gameday` event-takeover mode,
 video/screen mirroring, and WLED's own ambient lighting effects — all
@@ -117,12 +118,14 @@ in-file software generators are dead code for any real display path,
 kept only as offline experiment helpers.
 
 **ALL external display text goes through `paneltext.panel_text()`** — see
-that module's docstring for the full nine-instance tally of this bug. The
+that module's docstring for the full ten-instance tally of this bug (plus
+why a per-module fold still wasn't enough — that's instance 10, news). The
 fold used to live privately inside `mma.py`, which is exactly how
 `sports.py`'s universal feed reintroduced it later (a live PGA leader,
 "Hojgaard", rendered as "HJGAARD"). **A per-module fold is not a fix; it
 is a fix waiting to be missed by the next module.** Unsupported characters
-become a space rather than vanishing, so a loss is visible.
+become a space rather than vanishing, so a loss is visible. **Enforced by
+`fold_audit.py`, not just this rule** — see the audits section.
 
 **The 3×5 font (`_FONT3x5`/`draw_text3x5` in `engines.py`) is
 uppercase-only** (54 glyphs: `A-Z`, `0-9`, space and ``!$%&'()+,-./:<>?@``)
@@ -162,7 +165,7 @@ appends them to the menu automatically.
 - **ticker** (`market.py`/`TickerEngine`) — crypto (CoinGecko) + stocks
   (Yahoo Finance v8 chart), config-driven watchlist.
 - **satellite** (`satellite.py` + `skypass.py` / `SatelliteEngine`) —
-  **UNIFIED 2026-08-02**, see the dedicated section below for the full
+  **UNIFIED 2026-08-01**, see the dedicated section below for the full
   before/after. Was three views (ISS PASS / ISS LIVE / SKY) sharing an
   engine but not a design; now two (UPCOMING / OVERHEAD-NOW) over ONE
   pass list that includes the ISS as an entry. Owns
@@ -178,7 +181,7 @@ appends them to the menu automatically.
   "what kind of traffic is this" signal on real ATC displays).
 
   **Flight phase — CLIMB / DESCEND / CRUISE** (`flights._phase()`,
-  2026-08-02). Verified against real ORD traffic (MYR had zero aircraft
+  2026-08-01). Verified against real ORD traffic (MYR had zero aircraft
   in range at build time; ORD confirmed the payload shape and value
   ranges, the classification applies wherever aircraft are tracked).
   - `baro_rate`/`geom_rate`: **never both populated on the same real
@@ -206,7 +209,7 @@ appends them to the menu automatically.
     clear of the plane icon's rotation footprint at every heading.
     Nothing drawn for CRUISE or `None` — same "no badge for the mundane
     case" rule the notable tag already follows.
-  - **Partial live check 2026-08-02**: one real aircraft (VIR74W,
+  - **Partial live check 2026-08-01**: one real aircraft (VIR74W,
     39,000ft) appeared near MYR at session start — correctly classified
     CRUISE (altitude alone, per the FAA floor rule) with no arrow drawn,
     confirmed on the real panel (score=1, zero errors). Still an honest
@@ -373,7 +376,7 @@ so ticking only the visible one would make every mode come up cold, get
 skipped by `has_content()`, and collapse the rotation. It also leaves a
 mode immediately if it goes empty mid-dwell.
 
-**Satellite modes — UNIFIED 2026-08-02** (`satellite.py` + `skypass.py` /
+**Satellite modes — UNIFIED 2026-08-01** (`satellite.py` + `skypass.py` /
 `SatelliteEngine`). Was three views built over several sessions (ISS PASS,
 ISS LIVE, SKY — SKY added 2026-08-01 as a third, additive view alongside
 the two ISS ones). **They shared an engine but not a design**, and were
@@ -435,7 +438,7 @@ change cannot silently break the match the way a string comparison could.
 **`ambient_weight()` now considers the best pass across the WHOLE list**,
 not the ISS alone — the ISS being invisible for days must not suppress
 real dwell time for a genuinely bright pass from something else.
-**Confirmed against real data 2026-08-02, and it changes real behaviour
+**Confirmed against real data 2026-08-01, and it changes real behaviour
 today**: with the ISS genuinely invisible right now, the OLD logic (ISS
 quality only) would return the 1.0 default weight → ~400 ticks (~20s)
 dwell. The new logic correctly credits the best available non-ISS pass
@@ -467,7 +470,7 @@ automatically with no special-casing needed.
   ("TERRA" overlapped "1H 50M"). Fixed with a y-cursor. Also widened the
   name-fit budget from `WIDTH-6` to `WIDTH-4` — the tighter one truncated
   exactly-15-character names like "SPACEMOBILE-001" for no real reason.
-- **OVERHEAD-NOW verified live 2026-08-02** — a real pass (multiple
+- **OVERHEAD-NOW verified live 2026-08-01** — a real pass (multiple
   objects overhead simultaneously around 23:01 local) was caught at the
   start of the next session. Confirmed programmatically, not by eye: the
   arc marker's x position swept monotonically 19->56 over 43 real
@@ -885,7 +888,7 @@ question is "where is MY player", not "what is the score".
   on the panel — only an end-to-end pixel match against the real panel
   caught it.
 
-### Per-sport renderers (IN PROGRESS — started 2026-08-01)
+### Per-sport MAIN renderers (IN PROGRESS — started 2026-08-01)
 
 **Why**: one generic renderer had to satisfy every sport at once, so every
 layout decision was made for the WORST CASE across seven of them. The tell
@@ -898,17 +901,59 @@ quietly flattened into two rows of `ABBREV + score`.
 `(self, buf, ev)` that draws the WHOLE frame including its own header and
 returns None. The caller owns blank/fill. **Anything unclaimed falls back
 to `_frame_universal_generic()`, unchanged** — adding a renderer is purely
-additive and cannot regress another sport.
+additive and cannot regress another sport. **This is a separate dispatch
+table from `SPORT_DETAIL_RENDERERS` below** — a sport can have a main
+renderer, a detail renderer, both, or neither; don't conflate the two
+when adding one.
 
 | sport | status |
 |---|---|
 | baseball | **done** — diamond/outs/count/half-inning on the main row |
 | mma | **done** — weight class primary, records per fighter, card position |
 | football | not started — **NFL/NCAAF are off-season, no live data to verify against** |
-| basketball | not started — NBA off-season; verify against **WNBA**. No live WNBA game as of 2026-08-01 evening (both today's games already finished) |
+| basketball | not started — NBA off-season; verify against **WNBA**. Still no live WNBA game as of 2026-08-01 (checked again — both games each day so far have already finished by the time this was checked) |
 | soccer | **done** — form strings, ESPN-formatted clock, penalty shootouts (verified live). Layout uses a y-cursor after the audit caught the divider/clock overlapping the second team |
-| tennis | not started — no live match as of 2026-08-01 evening. **Confirmed real**: header events carry `linescores`, one entry per SET with `value`/`displayValue`/`period`/`winner` (checked against a real finished match, J. Pegula d. D. Shnaider 7-5 6-4) — this is the field the set-by-set grid needs, but it has not been rendered against a LIVE match, only a finished one glimpsed while checking the shape |
+| tennis | not started — still no live match as of 2026-08-01. **Confirmed real**: header events carry `linescores`, one entry per SET with `value`/`displayValue`/`period`/`winner` (checked against a real finished match, J. Pegula d. D. Shnaider 7-5 6-4) — this is the field the set-by-set grid needs, but it has not been rendered against a LIVE match, only a finished one glimpsed while checking the shape |
 | golf | **done** — 6-row leaderboard, movement arrows (sign verified: negative = climbed the leaderboard) |
+
+### Per-sport EXPANDED-DETAIL renderers (started 2026-08-01)
+
+**Why, and why it's a SEPARATE follow-up rather than part of the main-
+renderer work above**: select-to-expand (`rotate`) still used ONE generic
+detail view for every sport, and it went from "fine" to "a visible
+inconsistency" the moment the main renderers above shipped — for baseball
+specifically, the generic detail view showed LESS live state (bases/outs,
+no count) than baseball's own compact main row already did, which is
+backwards for a view whose whole point is "more detail, not less".
+
+**Contract**: `SportsEngine.SPORT_DETAIL_RENDERERS`, same shape as
+`SPORT_RENDERERS` one level deeper — a sport claims its own expanded
+renderer or falls back to `_frame_event_detail_generic()`. Verified as a
+byte-identical no-op across all 45 live events before anything was added,
+same discipline as the main-renderer seam.
+
+| sport | status |
+|---|---|
+| baseball | **done** — same diamond/outs/count/arrow language as the main row, plus room the main row doesn't have: both teams' full records, series status, venue, broadcast |
+| mma / soccer / golf / others | not started — main renderers exist for these but their detail views still use the generic fallback |
+
+**Two real bugs found building baseball's detail view, both from
+verification, neither visible by eye:**
+- The footer (series/venue/broadcast) never appeared on ANY live game.
+  Not because anything overflowed — the cursor advanced by more (+12)
+  than the live-state row actually draws (~+6-7), pushing y past the
+  footer guard on every single live game. Found by hand-deriving the
+  y-budget, since `render_audit.py` at the time had no way to see it (see
+  below).
+- The guard itself was off by one: `HEIGHT-6` rejected a legal `y=59` for
+  a 5px glyph (the true bound is `HEIGHT-5`).
+
+**This is what led to instrumenting `put_px` in `render_audit.py`** — see
+that section. Every non-text graphical primitive (diamonds, outs pips,
+trend arrows, arcs, event-frame borders) goes through `put_px`, which is
+bounds-checked and silently drops out-of-range writes, the identical
+failure shape as a dropped glyph but on a part of the tool that had never
+been watching for it.
 
 **Baseball payload facts** (verified, do not re-derive):
 - `onFirst`/`onSecond`/`onThird` are **athlete IDs, not booleans** (0 =
@@ -1036,18 +1081,27 @@ production device this multiplies by unit count; see `PRODUCTION.md`.
 5. **`@` was silently dropped from the sports tape** — fifth instance of
    the uppercase-only-font bug class. `"AWAY 3 @ HOME 5"` rendered as
    `"AWAY 3  HOME 5"`, losing the home/away distinction.
-6b. **Tennis tiebreak brackets were silently dropped** — the EIGHTH
-   instance. `"7-6(7-5)"` rendered as `"7-67-5"`, a different and
-   plausible-looking score. `(` and `)` added to `_FONT3x5`.
 6. **`&` was silently dropped from NFL down-and-distance** — the SEVENTH
    instance, and it had already shipped. ESPN's `downDistanceText` is
    literally `"3RD & 7"`, so the sports mode rendered `"3RD  7"`. The glyph
    is now in `_FONT3x5`; the data was correct and the font was short.
    Found while building GAME DAY's team view, which reuses the same
    `situation_line()`.
-7. **GAME DAY's stats view had overlapping text** — the "FIGHT STATS"
+7. **Tennis tiebreak brackets were silently dropped** — the EIGHTH
+   instance. `"7-6(7-5)"` rendered as `"7-67-5"`, a different and
+   plausible-looking score. `(` and `)` added to `_FONT3x5`.
+8. **GAME DAY's stats view had overlapping text** — the "FIGHT STATS"
    kicker occupies rows 6-10 and the fighter names were drawn at y=8.
    Invisible to a code read; caught by rendering the frame and looking.
+
+**This list stops being maintained here at instance 8.** Instances 9
+(golf/Hojgaard) and 10 (news) are in `paneltext.py`'s own tally, and
+every bug found since — the soccer divider/clock collision, golf's name
+truncation, baseball's footer/cursor-budget bug, the satellite
+simultaneous-overhead tie-break — is recorded where it was fixed (the
+per-sport renderer sections above, the satellite section, the two-audits
+section) rather than duplicated into an ever-growing single list here.
+Check those sections, not just this one, for the full picture.
 
 ### The two audits — run BOTH; they catch different things
 
@@ -1071,7 +1125,8 @@ of testing the fold.
 passed a live check hours earlier *because that day's data was ASCII*:
 sports' per-league `record`/`score`/`display_clock`, mma's `clock`, and a
 news boundary that lived in the caller rather than in the function that
-looked like the boundary.
+looked like the boundary. Extended 2026-08-01 to cover `skypass.py`'s
+TLE-name fold, added when the satellite modes were unified.
 
 **The lesson worth keeping: "I checked it live and it was clean" is not
 evidence a field is folded.** It is only evidence about today's data.
@@ -1088,8 +1143,10 @@ boundary is somewhere else.
     .venv/bin/python render_audit.py --strict   # fail on truncation too
 
 Makes permanent the instrumentation that caught every one of the ten glyph
-bugs. Checks four things: **DROPPED** (no glyph), **OVERFLOW** (leaves the
-panel), **TRUNCATED** (reported, not failed — abbreviating a headline is
+bugs. Checks five things: **DROPPED** (no glyph), **OVERFLOW** (a
+`draw_text3x5` box leaves the panel), **CLIPPED** (a non-text graphical
+primitive — `put_px` directly — leaves the panel; see below),
+**TRUNCATED** (reported, not failed — abbreviating a headline is
 legitimate), **COLLISION** (two text draws sharing pixels).
 
 **It found three real bugs on its first run**, all in code shipped hours
@@ -1098,14 +1155,35 @@ team's score row, a golf name budget cutting "E. HENSELEIT" to "HENSEL",
 and the tenth glyph instance (news dropping a curly quote, which is what
 exposed that four feeds had never been migrated to `paneltext`).
 
+**CLIPPED was added 2026-08-01**, and it closes a real blind spot: every
+non-text graphical primitive (`draw_diamond`, `draw_outs`,
+`draw_trend_arrow`, the pass arc, `draw_event_frame`'s border) goes
+through `put_px`, which is bounds-checked and SILENTLY drops an
+out-of-range write — the identical failure shape as a dropped glyph, on a
+part of the renderer the tool had never been watching. Found while
+building baseball's expanded detail view (see that section) — the real
+bug there turned out NOT to be clipping (CLIPPED correctly reported none),
+but the investigation is what exposed the gap in the tool itself.
+
+**`drive()` was also extended 2026-08-01 to exercise select-to-expand**
+(`eng.detail = ...`) for every event, not just the ticker row — it
+previously never set `.detail` at all, so a per-sport expanded-detail
+renderer could ship with a real bug and a clean audit run would say
+nothing about it.
+
 Marquee modes legitimately draw off-edge to loop seamlessly and are
 exempted via `MARQUEE_OK` — `ambient` is in that set because it composes
-real instances of the marquee modes.
+real instances of the marquee modes. The same exemption applies to
+CLIPPED, for the same reason.
 
 **COLLISION is the check worth caring about most.** Fixed row offsets are
 correct until content varies — a longer record, a form line, a team with a
 longer name — and then two elements silently overlap. Prefer a **y-cursor**
-over fixed offsets in any renderer whose content varies.
+over fixed offsets in any renderer whose content varies. **CLIPPED is the
+same lesson one level down**: a cursor that advances by MORE than its
+content actually draws doesn't clip anything itself, but it starves
+whatever comes after it of room that was never really needed — check the
+real ink extent of a glyph, not a guessed advance amount.
 
 ### Methods worth reusing (each found something review didn't)
 - **Instrument `draw_text3x5` itself** to log any character absent from

@@ -88,7 +88,7 @@ LOW_NEAR_NM = 12
 
 # ---- flight phase -------------------------------------------------------
 # What's it actually DOING, not just where it is. Verified against real
-# live traffic near ORD on 2026-08-02 (MYR itself had zero traffic in
+# live traffic near ORD on 2026-08-01 (MYR itself had zero traffic in
 # range at the time -- ORD was used purely to confirm the payload shape
 # and real-world value ranges; the classification logic applies wherever
 # aircraft are tracked):
