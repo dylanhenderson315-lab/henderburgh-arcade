@@ -6599,6 +6599,51 @@ class SportsEngine(Browsable):
 
     SPORT_DETAIL_RENDERERS["soccer"] = _render_soccer_detail
 
+    def _render_golf_detail(self, buf, ev):
+        """Golf's EXPANDED view. The main ticker row already fits a solid
+        6-row leaderboard with movement arrows -- more rows here is not
+        the incremental value (a 64px panel cannot show meaningfully more
+        of a 25-deep field either way). What it genuinely lacks room for:
+        the full tournament NAME (the compact row only gets a short_name
+        that can truncate), round status, venue and broadcast. Same
+        "context the main view has no room for" pattern as baseball and
+        soccer's detail views, not "more of the same list".
+        """
+        accent = self._sport_accent(ev)
+        draw_event_frame(buf, 0.6 if ev["live"] else 0.3, accent, accent)
+
+        name = ev.get("name") or ev.get("league_name") or "GOLF"
+        scale = 2 if text_w(name, 2) <= WIDTH - 8 else 1
+        draw_text_centered(buf, 6, fit_text(name, WIDTH - 8, scale),
+                           color_on_dark(accent), scale=scale, x_min=3)
+        y = 6 + 5 * scale + 2
+        detail = ev.get("detail") or ""
+        if detail:
+            draw_text_centered(buf, y, fit_text(detail, WIDTH - 8), self.INK_DIM, x_min=3)
+            y += 7
+
+        comps = ev["competitors"]
+        rows = min(6, max(1, (HEIGHT - 5 - y - 8) // 6))
+        for i, c in enumerate(comps[:rows]):
+            pos_txt = str(c.get("place") or i + 1)
+            draw_text3x5(buf, 2, y, fit_text(pos_txt, 12), self.INK_DIM)
+            self._draw_movement(buf, 14, y, c.get("movement"), self.WIN, self.LOSE)
+            sc = c.get("score") or "-"
+            name_w = (WIDTH - 2 - text_w(sc)) - 19 - 2
+            draw_text3x5(buf, 19, y, fit_person(c.get("abbr"), name_w), self.HERO_INK)
+            draw_text3x5(buf, WIDTH - 2 - text_w(sc), y,
+                         sc, self.WIN if str(sc).startswith("-") else self.INK)
+            y += 6
+
+        foot_lines = [x for x in (ev.get("venue"), ev.get("broadcast")) if x]
+        for line in foot_lines:
+            if y > HEIGHT - 5:
+                break
+            draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.INK_DIM, x_min=3)
+            y += 7
+
+    SPORT_DETAIL_RENDERERS["golf"] = _render_golf_detail
+
     def _frame_for_view(self):
         if self.detail is not None:
             ev = self._current_event()
