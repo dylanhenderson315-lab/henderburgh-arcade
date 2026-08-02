@@ -456,12 +456,23 @@ automatically with no special-casing needed.
   ("TERRA" overlapped "1H 50M"). Fixed with a y-cursor. Also widened the
   name-fit budget from `WIDTH-6` to `WIDTH-4` — the tighter one truncated
   exactly-15-character names like "SPACEMOBILE-001" for no real reason.
-- **Honest gap**: OVERHEAD-NOW was verified structurally (real payload
-  shapes, synthetic timing to force the state) but not yet against a live
-  pass — none fell in the window during the session it was built. The
-  per-object arc and the ISS speed slot both still need one real pass to
-  move from "structurally correct" to "verified", same bar as everywhere
-  else here. Check for a pass window early in the next session.
+- **OVERHEAD-NOW verified live 2026-08-02** — a real pass (multiple
+  objects overhead simultaneously around 23:01 local) was caught at the
+  start of the next session. Confirmed programmatically, not by eye: the
+  arc marker's x position swept monotonically 19->56 over 43 real
+  seconds while y dipped toward the horizon as the pass ended, then the
+  view correctly transitioned back to UPCOMING within the next poll once
+  the pass genuinely ended. Real orbital timing driving real on-panel
+  motion, not a loop or a static frame.
+- **Real finding from that same capture, not yet fixed**: two objects
+  (OAO 3, peak 75.8°, and SEASAT 1, peak 19.8°) went overhead in the same
+  tick. The "newly overhead -> jump cursor" logic in `tick()` iterates
+  the pass list and keeps whichever match it finds LAST, which is
+  arbitrary tie-breaking, not a deliberate choice -- the lower, less
+  impressive pass could win over a dramatically better one purely by
+  list order. Worth a small fix: prefer the higher `quality_rank` (or
+  peak elevation) when multiple passes become overhead in the same tick,
+  rather than "whichever the loop saw last".
 
 **Global severe-weather takeover** — an Extreme/Severe NWS alert
 preempts **any** mode (game, video, mirror, anything), not just weather.

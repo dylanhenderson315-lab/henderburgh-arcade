@@ -4686,13 +4686,28 @@ class SatelliteEngine(Browsable):
         # same idiom as a golf notable move or a GAME DAY finish: the
         # moment is the content. Identified by (norad_id, rise) rather
         # than list index, since the list can be recomputed mid-pass.
+        #
+        # When MORE THAN ONE pass goes overhead in the same tick -- real,
+        # not hypothetical: caught live 2026-08-02, OAO 3 (peak 75.8 deg)
+        # and SEASAT 1 (peak 19.8 deg) both rose in the same tick -- jump
+        # to whichever is the BETTER pass, not whichever the loop happens
+        # to see last. "Last in list order" is arbitrary; a dramatically
+        # better pass losing to a mediocre one purely by iteration order
+        # would be a silent quality regression at the exact moment the
+        # mode is supposed to be showing the best of what's happening.
         now_overhead = set()
+        best_new = None            # (rank, peak_el, index) among newly-overhead
         for i, p in enumerate(ps):
             key = (p.get("norad_id"), p["rise"])
             if self._is_overhead(p):
                 now_overhead.add(key)
                 if key not in self._overhead_ids:
-                    self.cur = i          # NEWLY overhead: jump to it
+                    rank = skypass.quality_rank(p)[1]
+                    cand = (rank, p["peak_el"], i)
+                    if best_new is None or cand[:2] > best_new[:2]:
+                        best_new = cand
+        if best_new is not None:
+            self.cur = best_new[2]
         self._overhead_ids = now_overhead
 
         if self.cycling and self.browse.auto_ok and ps:
