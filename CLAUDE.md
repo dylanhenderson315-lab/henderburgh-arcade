@@ -410,11 +410,70 @@ appends them to the menu automatically.
     "background writes, engine reads a snapshot" shape, just with a file
     standing in for an in-memory `FEED` object because the writer is a
     separate process.
-  - **NOT YET BUILT**: the rolling in-engine log store/eviction and the
-    "ATC LOG" scope view itself (phase 2), and the airline-callsign
-    matching layer (phase 3, confidence-gated, general-log-always-the-
-    default per the feasibility research's own finding that GA tail
-    numbers cannot be reliably matched from ASR text).
+  - **PHASE 2 — done and live-verified 2026-08-02.** `atc.AtcLogFeed`
+    reads the worker's log with the same shape every other `FEED` in this
+    project uses. `FlightEngine` gained a THIRD view (`rotate` now cycles
+    SCOPE → DETAIL → ATC LOG → SCOPE, not a two-state toggle), showing the
+    GENERAL airport log — deliberately not filtered to the selected
+    aircraft, since per-aircraft correlation is phase 3 and, per the
+    feasibility research's own finding, will only ever be a
+    confidence-gated highlight, never a silent filter.
+    - **"NO CUTOFFS, EVERYTHING MUST BE SEEN" — real requirement, not a
+      nicety.** A real transmission runs 100-400+ characters (one real
+      MYR transmission wrapped to 30 lines). `self.atc_pages` holds
+      EVERY page for the current entry (recomputed only when the entry's
+      timestamp actually changes), `tick()` auto-advances a page every
+      ~4.5s, and left/right overrides manually with wraparound — all
+      three verified directly (not just by rendering once), including
+      that a fresh transmission always resets to page 1 rather than
+      wherever the cursor was.
+    - **"LAST: Xm Ys" vs "Xs AGO"** distinguishes a stale last-known
+      transmission from a live one — never a blank screen just because
+      the frequency went quiet, matching "show the last one, be honest
+      about when" exactly as asked.
+    - **THIS PROJECT'S #1 DOCUMENTED BUG CLASS, shipped again in code
+      written this same session.** Whisper's raw output is natural
+      mixed-case English; the 3×5 font is uppercase-only. Unfolded, "A
+      bunch of them" rendered as literally just "A" — every lowercase
+      letter silently dropped, found by looking at an actual rendered
+      frame. Fixed by folding through `paneltext.panel_text()` at the
+      WRITE boundary (`atc_transcribe.fold_transcript()`, extracted as a
+      pure function specifically so it needs no live model to test).
+      Given this project's own history with this exact bug class, added
+      **permanent `fold_audit.py` coverage** for it too — verified the
+      coverage would have caught the original bug by running it against
+      the unfixed code first, not just added and trusted.
+    - **A second real bug, ALSO found by rendering, not assumed clean**:
+      the original `"LAST TX Xm Ys AGO"` caption (19 chars, 75px) overran
+      the 60px budget and silently dropped `"AGO"`. Shortened to
+      `"LAST: Xm Ys"` (13 chars, 51px real margin).
+    - **A THIRD real bug, found ONLY by watching the live panel over
+      several real minutes — the kind of bug no standalone test could
+      have caught.** `AtcLogFeed.get()`'s 2s re-read throttle compared
+      "now" against a single `_last_read` timestamp that `get()` itself
+      bumped on EVERY call. On an engine ticking every 0.05s, `get()` is
+      called every 0.05s too, so the elapsed time being checked could
+      never accumulate past ~0.05s — the comparison timestamp was reset
+      by the very call checking it. `_refresh()` never ran again after
+      the very first read. The live panel showed the SAME first-ever log
+      entry for 14+ real minutes while the file kept growing underneath
+      it, invisible to every earlier standalone test (a short-lived
+      script calling `get()` only a few times, seconds apart, never
+      exercises the rapid-call pattern that exposes this). Fixed the way
+      `flights.FlightFeed` already does it correctly: a SEPARATE
+      `_last_refresh_try`, touched only by the refresh path, never by the
+      read path. Verified two ways: a direct simulation of the exact real
+      tick rate against a file that changes mid-run, AND a real ~10-
+      minute live-panel session confirming the caption tracked the
+      genuinely latest transmission throughout, not just once.
+    - **render_audit.py's flights coverage jumped from 13 to 29 frames**
+      after this — confirms the rotate-driven step-loop (added last
+      session) now also exercises all THREE view states across every
+      real aircraft automatically, not just two.
+  - **NOT YET BUILT**: the airline-callsign matching layer (phase 3,
+    confidence-gated, general-log-always-the-default per the feasibility
+    research's own finding that GA tail numbers cannot be reliably
+    matched from ASR text).
 
   **PERFORMANCE — measured before building, not assumed:**
   | workload | cost | vs 50ms frame budget |
