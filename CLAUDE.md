@@ -984,6 +984,106 @@ already uses — only the pinned favorite's own live game, never every game
 in a league — or it reopens the ESPN request-volume risk this project has
 already had to mitigate twice.
 
+**MLB home run — done (2026-08-02).** First real detector plugged into
+the seam, `sports._fetch_home_run_plays(league, event_id)` +
+`SportsEngine._detect_mlb_home_run()` (registered as
+`BIG_MOMENT_DETECTORS["mlb_hr"]`).
+
+- **Scope matches `_fetch_win_prob()` exactly**: only fetched when
+  `self.data["favorite"]["league"] == "MLB"` and
+  `self.data["favorite_game"]["state"] == "in"` — never polled for the
+  whole universal feed or any non-favorite game. Reuses the same
+  per-game `summary?event=ID` endpoint `_fetch_win_prob()` already calls
+  (no new endpoint), so this adds zero request volume beyond what a live
+  favorite game already costs when win probability is showing.
+- **Payload facts, confirmed live** (not assumed): each scoring play
+  carries `scoringPlay: bool` and `alternativeType.text`; a real home run
+  reads the literal string `"Home Run"` (e.g. `"Sanoja homered to left
+  (377 feet), Stowers scored."`). Other real scoring plays seen the same
+  day — `"Single"`, `"Double"`, `"Sacrifice Fly"` — are correctly
+  excluded; only `"Home Run"` fires the celebration.
+- **Folding happens in `sports.py`, not `engines.py`** — same discipline
+  as every other feed: `_fetch_home_run_plays()` runs
+  `paneltext.panel_text()` on the play text before returning it, and
+  `engines.py` never calls `panel_text()` directly (confirmed by grep —
+  it has no `paneltext` import at all).
+- **Seen-play tracking is `SportsEngine._seen_home_runs`**, same one-shot
+  idiom as `GameDayEngine._seen_done` for MMA finishes: `None` until the
+  first read, which *adopts* the current set of home-run play ids without
+  firing (a game already 3 home runs deep when the mode opens must not
+  replay them), then only ids not already in the set are new.
+- **Text**: line1 = `"{AWAY} {away_score}, {HOME} {home_score}"` built
+  from already-folded team abbreviations and int scores (both ASCII-safe,
+  no fold needed at the join site); line2 = the real ESPN play text
+  (already folded, e.g. `"TAYLOR HOMERED TO LEFT (410 FEET), SEMIEN
+  SCORED."`), left to `draw_celebration()`'s own `fit_text()` if it runs
+  long rather than hand-truncated here. Color = the home team's real
+  ESPN color (`fg["home"]["color"]`), falling back to away, then the
+  shared neutral gold.
+- **Verified against real data, not synthesized**: `_fetch_home_run_plays`
+  run directly against 12 real finished 2026-08-01 MLB games (MIA@NYM,
+  MIN@SEA, PIT@CIN, TEX@HOU, ARI@CLE, WSH@ATL, NYY@CHC, KC@COL, SF@SD,
+  BOS@LAD, MIL@LAA, DET@ATH) — found 35 real home runs total, all
+  correctly filtered from the surrounding non-HR scoring plays (singles,
+  doubles, sac flies) and all folded clean. Then `SportsEngine` was
+  constructed directly (no `arcade_server`, no panel) with
+  `favorite_game` pointed at MIA@NYM (`event_id` `401816349`,
+  `state: "in"`) and driven through three ticks: first tick adopts the 3
+  existing home runs as baseline with no fire; second tick (unchanged
+  data) does not re-fire; a simulated new home run (one id removed from
+  `_seen_home_runs`) fires exactly once with the real folded play text
+  and a correct score line, and popping a second time returns `None`
+  (no double-fire). `render_audit.py sports` and `fold_audit.py` both
+  clean (0 failed / 0 not-folding) after this change.
+- **No live game to verify against at build time** — today's slate
+  (2026-08-02) was still all `pre` when this was built, so the one-shot
+  logic above was proven against real finished-game data plus a
+  hand-driven engine, not a genuinely live favorite game. Worth a real
+  end-to-end check next time a favorite MLB game is actually live.
+
+**Golf — done (2026-08-02).** The smallest of the five: `golfer_move()`
+already runs in the feed and `tick()` already reads its result into
+`self.golf_move` every poll, right next to `golf_pulse.note()` which
+drives the existing quiet flash. `_detect_golf_big_moment()` (registered
+as `BIG_MOMENT_DETECTORS["golf_move"]`) reads that same field — no new
+ESPN parsing, no new polling.
+
+- **Judgment call: only EAGLE/BIRDIE/LEAD fire the big celebration.**
+  `golfer_move()` can also return BOGEY or LOST LEAD, and both are
+  deliberately excluded — a full-panel celebratory burst over a bogey or
+  a lost lead would be tonally backwards (there's nothing to celebrate),
+  and the existing `Pulse` flash already surfaces those two
+  appropriately without implying good news. Same "no badge for the
+  negative/mundane case" reasoning already used elsewhere (flight phase
+  CRUISE, routine golf holes not flashing at all).
+- **One-shot firing uses its own tracking variable**
+  (`self._last_golf_big_moment`), not `golf_pulse` itself — `golf_pulse`
+  is a `Pulse` instance whose `.t`/`.on` timing already belongs to the
+  quiet flash; re-keying it here for a second purpose would make the two
+  features silently fight over the same flash clock. The idiom (compare
+  against the last-seen value, act only on a real change) is copied from
+  `golf_pulse.note()` one line above it in `tick()`, just with an
+  independent piece of state. This matters because `GOLF_MOVE_TTL` (20s
+  in `sports.py`) means the same move value is read from the feed for
+  many ticks in a row — firing on every tick instead of once would leave
+  the celebration graphic stuck on screen for as long as the feed kept
+  reporting the move.
+- Text: line1 is the pinned golfer's name (`golf_pinned["abbr"]` or
+  `["full"]`, already `panel_text()`-folded upstream — confirmed via
+  `_frame_golf_pinned()`, which draws it unfolded a second time), line2
+  is the move kind plus current score-to-par (e.g. `"EAGLE -10"`).
+- Color: neutral warm gold `(255, 200, 40)` — golf has no team color,
+  same fallback `draw_celebration()`'s own docstring names for golf/MMA.
+- **Verified**: `render_audit.py sports` and `fold_audit.py` both clean
+  (0 failed / 0 not-folding) after this change. One-shot logic was
+  unit-tested directly (not via a fabricated live panel push) by calling
+  `_detect_golf_big_moment()` repeatedly with `self.golf_move` set to
+  every value the feed is documented to produce (`golfer_move()`'s own
+  docstring: EAGLE/BIRDIE/LEAD/BOGEY/LOST LEAD/None) — confirmed it
+  fires exactly once per new move, does not re-fire while the feed keeps
+  reporting the same move, and BOGEY/LOST LEAD never fire regardless of
+  repetition.
+
 ### Per-sport EXPANDED-DETAIL renderers (started 2026-08-01)
 
 **Why, and why it's a SEPARATE follow-up rather than part of the main-

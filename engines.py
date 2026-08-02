@@ -5441,6 +5441,10 @@ class SportsEngine(Browsable):
         self.golf_move = None
         self.golf_pulse = Pulse(ticks=30)   # longer than the standard 14: a
                                              # notable move deserves to be seen
+        self._last_golf_big_moment = None   # one-shot tracking for
+                                             # _detect_golf_big_moment, kept
+                                             # separate from golf_pulse's own
+                                             # key (see that method's docstring)
         self._init_scroll()
         self.cycling = True
         self.ticks = 0
@@ -6514,6 +6518,54 @@ class SportsEngine(Browsable):
     # project -- see sports.py for the request-volume discipline any new
     # per-game polling here must follow.
     BIG_MOMENT_DETECTORS = {}
+
+    def _detect_golf_big_moment(self):
+        """Golf's detector -- the only one of the five that needs no new
+        parsing: `sports.golfer_move()` already runs inside the feed and
+        `tick()` already reads its result into `self.golf_move` every
+        poll (see tick(), and `golf_pulse.note()` right next to it, which
+        is the existing quiet flash this does NOT replace).
+
+        Judgment call, made deliberately: `golfer_move()` can return
+        EAGLE, BIRDIE, LEAD, LOST LEAD, or BOGEY. Only EAGLE/BIRDIE/LEAD
+        fire the big celebration. BOGEY and LOST LEAD are negative or
+        routine outcomes for the pinned player -- bursting a full-panel
+        celebratory graphic over a bogey or a lost lead would be tonally
+        backwards (there is nothing to celebrate), and the existing
+        `Pulse` flash already surfaces them appropriately without
+        implying "great news". This mirrors the project's existing
+        "no badge for the mundane/negative case" rule (see flight phase
+        CRUISE, or routine golf holes not flashing at all).
+
+        One-shot firing: `self.golf_move` is read from the feed and
+        stays the same value for up to GOLF_MOVE_TTL (20s in sports.py),
+        which is many ticks at ambient's fast tick rate -- so this must
+        NOT fire every tick the feed keeps reporting the same move, only
+        once when it first appears. Uses the identical idiom
+        `golf_pulse.note()` already uses one line above in tick()
+        (compare against the last-seen value, act only on a real change)
+        but with its OWN tracking variable rather than reusing
+        `golf_pulse` -- that Pulse is consumed for the quiet flash's
+        timing (`.on`/`.t`) and re-keying it here for a second purpose
+        would make the two features silently interfere with each other's
+        flash timing.
+        """
+        move = self.golf_move
+        if move == self._last_golf_big_moment:
+            return
+        self._last_golf_big_moment = move
+        if move not in ("EAGLE", "BIRDIE", "LEAD"):
+            return
+        c = self.golf_pinned or {}
+        name = c.get("abbr") or c.get("full") or "GOLFER"
+        par = c.get("score") or "-"
+        # Neutral warm gold -- golf has no team color to draw on, same
+        # choice draw_celebration()'s own docstring calls out as the
+        # fallback for a sport without one (golf, MMA).
+        color = (255, 200, 40)
+        self._set_big_moment(move, name, f"{move} {par}", color)
+
+    BIG_MOMENT_DETECTORS["golf_move"] = _detect_golf_big_moment
 
     def _detect_big_moments(self):
         for fn in self.BIG_MOMENT_DETECTORS.values():
