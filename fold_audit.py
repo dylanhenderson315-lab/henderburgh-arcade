@@ -175,6 +175,21 @@ def main():
     bad += check("skypass (TLE name fold)",
                  lambda: {"name": paneltext.panel_text(dirty)})
 
+    # atc_transcribe.fold_transcript() -- PERSONAL-RIG-ONLY (see
+    # atc.py/CLAUDE.md), but the fold boundary is real code and gets the
+    # same coverage as everything else. Added after this exact bug shipped
+    # ONCE already, in this same codebase, in this same feature: Whisper's
+    # raw output is natural mixed-case English, and unfolded "A bunch of
+    # them" rendered as literally just "A" -- caught by looking at a
+    # rendered frame, not by this audit, because this audit didn't cover
+    # it yet. It does now. Uses lowercase in the dirty string specifically
+    # (the other canaries alone wouldn't have caught THIS bug) since that
+    # was the actual failure mode, not just diacritics/punctuation.
+    import atc_transcribe
+    dirty_transcript = "a bunch of them, runway two three, " + "".join(CANARIES)
+    bad += check("atc_transcribe fold",
+                 lambda: {"text": atc_transcribe.fold_transcript(dirty_transcript)})
+
     print("\n%d feed%s NOT folding" % (bad, "" if bad == 1 else "s"))
     return 1 if bad else 0
 

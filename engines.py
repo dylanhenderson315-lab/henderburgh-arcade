@@ -25,6 +25,7 @@ import market
 import satellite
 import skypass
 import flights
+import atc
 import sports
 import news
 import weather
@@ -305,6 +306,32 @@ def fit_person(name, max_px, scale=1):
     while name and text_w(name, scale) > max_px:
         name = name[:-1]
     return name
+
+
+def wrap_text(text, max_px, max_lines=None, scale=1):
+    """Word-wrap into lines that each fit max_px, dropping whole trailing
+    words at the end if max_lines truncates -- same "abbreviate at a word
+    boundary, never mid-glyph" discipline as fit_text(), just across
+    multiple lines instead of one.
+
+    Extracted from draw_alert_frame()'s original inline wrap (which used
+    this exact loop for severe-weather event names) so the ATC log view
+    can reuse it rather than re-deriving the same logic a second time."""
+    words = str(text or "").split()
+    lines, cur = [], ""
+    for w in words:
+        trial = f"{cur} {w}".strip()
+        if text_w(trial, scale) <= max_px:
+            cur = trial
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    if max_lines is not None:
+        lines = lines[:max_lines]
+    return lines
 
 
 def draw_header(buf, title, accent, right_tag=None, stale=False):
@@ -703,22 +730,10 @@ def draw_alert_frame(alert, ticks, place="", n_alerts=1, cur_alert=0):
     # The event name is the thing that matters ("TORNADO WARNING").
     # Wrapped across up to three lines rather than truncated -- this is
     # the one view where cutting the message off could actually matter.
-    words = str(alert.get("event", "")).split()
-    lines, cur = [], ""
-    for w in words:
-        trial = f"{cur} {w}".strip()
-        if text_w(trial) <= WIDTH - 10:
-            cur = trial
-        else:
-            if cur:
-                lines.append(cur)
-            cur = w
-    if cur:
-        lines.append(cur)
+    lines = wrap_text(alert.get("event", ""), WIDTH - 10, max_lines=3)
     # Vertically centre the wrapped block between the severity label and
     # the footer, so a 1-line event doesn't sit in the top third with dead
     # space under it and a 3-line one still fits.
-    lines = lines[:3]
     band_top, band_bot = 15, HEIGHT - 12
     block_h = len(lines) * 8 - 2
     y0 = band_top + max(0, ((band_bot - band_top) - block_h) // 2)
@@ -5389,16 +5404,24 @@ class FlightEngine(Browsable):
         self.score = 0
         self.reset()
 
-    # Two views: the RADAR SCOPE (everything at once, spatial) and the
-    # DETAIL card (one aircraft, everything known about it). Deliberately
-    # a two-tier pattern rather than one crowded screen -- at 64px there
-    # is no room to label blips on the scope itself, so the scope answers
-    # "what is around me and where", and the card answers "what is that
-    # one". Same split the sports mode already uses (ticker row -> expand).
+    # THREE views: the RADAR SCOPE (everything at once, spatial), the
+    # DETAIL card (one aircraft, everything known about it), and the ATC
+    # LOG (real transmissions, general-airport by default -- see
+    # atc.py/CLAUDE.md; PERSONAL-RIG-ONLY). Deliberately a graduated
+    # drill-down rather than one crowded screen -- at 64px there is no
+    # room to label blips on the scope itself, so the scope answers "what
+    # is around me and where", the card answers "what is that one", and
+    # the log answers "what is actually being said right now". Same split
+    # the sports mode already uses (ticker row -> expand), one level
+    # deeper.
     VIEW_SCOPE = 0
     VIEW_DETAIL = 1
+    VIEW_ATC_LOG = 2
     SCOPE_TICKS = 260         # ~13s on the scope before walking the cards
     SWEEP_DEG_PER_TICK = 3.0  # ~6s per full rotation at tick_rate 0.05
+    ATC = (255, 170, 60)      # warm amber, distinct from PLANE blue / ROUTE yellow -- reads as "radio"
+    ATC_PAGE_LINES = 7        # lines per page -- see _frame_atc_log()'s y-budget comment
+    ATC_PAGE_TICKS = 90       # ~4.5s per page, long enough to actually read one before it turns
 
     def reset(self):
         self.data = {"aircraft": [], "age": None, "home_label": "HOME",
@@ -5411,6 +5434,17 @@ class FlightEngine(Browsable):
         self.view = self.VIEW_SCOPE
         self.sweep = 0.0
         self.airport = None
+        self.atc_entries = []
+        # ATC log PAGINATION -- a real transmission runs well past what
+        # 7 lines can hold (confirmed up to 250+ real characters), and
+        # nothing may ever be silently cut off. self.atc_pages holds
+        # EVERY page for the current entry (recomputed only when the
+        # entry actually changes, not every frame); atc_page cycles
+        # through them automatically and can also be stepped manually.
+        self.atc_pages = [[]]
+        self.atc_page = 0
+        self.atc_hold = 0
+        self._atc_page_ts = None
         # Distinguishes "auto-cycle spotlighted this aircraft" from "the
         # user pressed rotate to select it" -- without this, the existing
         # spotlight rotation (scope -> detail -> next aircraft -> ... ->
@@ -5429,6 +5463,18 @@ class FlightEngine(Browsable):
         return bool(self.data.get("configured")) and bool(self.data.get("aircraft"))
 
     def _step(self, direction):
+        # Context-sensitive: left/right browses AIRCRAFT on the scope/
+        # detail views (unchanged), but PAGES through the transcript
+        # while the ATC log is open -- aircraft selection has no meaning
+        # there, and manual paging is the override on top of the
+        # guaranteed auto-advance in tick(). Resets atc_hold so a manual
+        # flip buys a fresh full read window rather than turning again
+        # almost immediately.
+        if self.view == self.VIEW_ATC_LOG:
+            if len(self.atc_pages) > 1:
+                self.atc_page = (self.atc_page + direction) % len(self.atc_pages)
+                self.atc_hold = 0
+            return
         n = len(self.data.get("aircraft") or [])
         if n:
             self.cur = (self.cur + direction) % n
@@ -5439,19 +5485,24 @@ class FlightEngine(Browsable):
             return
         # SELECT-TO-EXPAND, same convention SportsEngine already uses --
         # `rotate` IS the select button on this hardware (the phone
-        # remote's centre action), so on the scope it opens the aircraft
-        # currently under the cursor (left/right already moves that
-        # cursor in both views) into the full detail card, and collapses
-        # back out of it. `drop` is the second way back, and still
-        # toggles auto-advance when nothing is expanded -- identical
-        # split to sports, not a new idiom invented for this mode.
+        # remote's centre action). On the scope, left/right already moves
+        # the browse cursor over an aircraft; rotate now walks FORWARD
+        # through a graduated drill-down (SCOPE -> DETAIL card for the
+        # selected aircraft -> ATC LOG -> back to SCOPE) rather than a
+        # simple two-state toggle, since a third real view exists now.
+        # `drop` is the fast way back to the overview from EITHER deeper
+        # view, and still toggles auto-advance when already on the scope
+        # -- identical split to sports, not a new idiom invented here.
         if cmd == "rotate":
-            self.view = (self.VIEW_SCOPE if self.view == self.VIEW_DETAIL
-                         else self.VIEW_DETAIL)
+            self.view = {
+                self.VIEW_SCOPE: self.VIEW_DETAIL,
+                self.VIEW_DETAIL: self.VIEW_ATC_LOG,
+                self.VIEW_ATC_LOG: self.VIEW_SCOPE,
+            }[self.view]
             self._auto_detail = False    # manual either way -- see reset()
             self.hold = 0
         elif cmd == "drop":
-            if self.view == self.VIEW_DETAIL:
+            if self.view != self.VIEW_SCOPE:
                 self.view = self.VIEW_SCOPE
                 self._auto_detail = False
             else:
@@ -5467,6 +5518,36 @@ class FlightEngine(Browsable):
         self._scroll_tick()
         self.data = flights.FEED.get()
         self.airport = flights.load_airport()
+        # PERSONAL-RIG-ONLY (see atc.py/CLAUDE.md). atc.FEED degrades
+        # honestly to an empty list if the worker process has never run
+        # or mlx-whisper isn't installed -- reading it costs nothing
+        # (AtcLogFeed caches and only re-parses the file every 2s) so it
+        # is fetched every tick same as every other feed here, not
+        # specially gated to when the log view is showing.
+        self.atc_entries = atc.FEED.get()
+        # Recompute pages ONLY when the top entry actually changed (by
+        # timestamp, the real identity of a transmission) -- not every
+        # tick, and not merely because the list was re-fetched with the
+        # same content. A fresh transmission always starts back at page 1
+        # rather than wherever the cursor happened to be sitting.
+        top_ts = self.atc_entries[0].get("ts") if self.atc_entries else None
+        if top_ts != self._atc_page_ts:
+            self._atc_page_ts = top_ts
+            self.atc_page = 0
+            self.atc_hold = 0
+            text = self.atc_entries[0].get("text", "") if self.atc_entries else ""
+            all_lines = wrap_text(text, WIDTH - 4, max_lines=None)
+            self.atc_pages = [all_lines[i:i + self.ATC_PAGE_LINES]
+                              for i in range(0, len(all_lines), self.ATC_PAGE_LINES)] or [[]]
+        # Auto-advance through pages while the log is actually on screen,
+        # so a long real transmission is GUARANTEED to be seen in full
+        # rather than permanently stuck on page 1 -- this is the "no
+        # cutoffs, everything must be seen" requirement, not a nicety.
+        if self.view == self.VIEW_ATC_LOG and len(self.atc_pages) > 1:
+            self.atc_hold += 1
+            if self.atc_hold >= self.ATC_PAGE_TICKS:
+                self.atc_hold = 0
+                self.atc_page = (self.atc_page + 1) % len(self.atc_pages)
         ac_list = self.data.get("aircraft") or []
         # Flash on the NEAREST aircraft changing -- that is the "something
         # new is overhead" moment, not merely the list reordering.
@@ -5673,6 +5754,89 @@ class FlightEngine(Browsable):
             draw_text3x5(buf, (WIDTH - (4 * len(sub) - 1)) // 2, 36, sub, self.INK_DIM)
         return bytes(buf)
 
+    ATC_LOG_RECENT_SECONDS = 60   # below this, reads as "just happened"; at/above, as "the last one heard"
+
+    @staticmethod
+    def _fmt_ago(secs):
+        """'14S', '3M 22S', '1H 05M' -- how long ago, not a countdown, so
+        this is deliberately a different shape from SatelliteEngine's
+        _fmt_countdown (which counts DOWN to a future rise) even though
+        the digit math is the same; the direction is the whole point of
+        the label and conflating the two would read backwards."""
+        secs = max(0, int(secs))
+        h, rem = divmod(secs, 3600)
+        m, s = divmod(rem, 60)
+        if h:
+            return f"{h}H {m:02d}M"
+        if m:
+            return f"{m}M {s:02d}S"
+        return f"{s}S"
+
+    def _frame_atc_log(self):
+        """GENERAL airport ATC log -- see atc.py/CLAUDE.md, PERSONAL-RIG-
+        ONLY. Deliberately the GENERAL feed, not filtered to the selected
+        aircraft: per-aircraft callsign correlation is phase 3 and, per
+        the feasibility research's own finding, will only ever be a
+        confidence-gated HIGHLIGHT on top of this general log, never a
+        silent filter that could misattribute a transmission to the
+        wrong aircraft. Until that lands, showing every real transmission
+        is the honest default, not a placeholder.
+
+        PAGINATED, NEVER TRUNCATED. A real transmission runs 100-250+
+        characters (confirmed against real MYR audio), which does not fit
+        7 lines -- explicit requirement: nothing may ever be silently cut
+        off. self.atc_pages (computed once per entry in tick(), not here)
+        holds every page; tick() auto-advances through them and _step()
+        lets left/right override manually. This method only draws the
+        CURRENT page plus a "Pi/N" indicator when there is more than one,
+        so it is always visible that more content exists and is coming.
+        """
+        buf = blank()
+        fill(buf, self.BG)
+
+        if not self.atc_entries:
+            # Never invents a transmission. Whether this is because the
+            # worker process isn't running, mlx-whisper isn't installed,
+            # or the frequency has genuinely been quiet for the whole
+            # LOG_MAX_AGE_SECONDS window -- all three collapse to the
+            # same honest "nothing to show" rather than three different
+            # guesses about which one it is.
+            draw_header(buf, "ATC LOG", self.ATC)
+            draw_text_centered(buf, 28, "NO ATC DATA", self.INK_DIM)
+            draw_text_centered(buf, 36, "YET", self.INK_DIM)
+            return bytes(buf)
+
+        n_pages = len(self.atc_pages)
+        page_tag = f"P{self.atc_page + 1}/{n_pages}" if n_pages > 1 else None
+        draw_header(buf, "ATC LOG", self.ATC, right_tag=page_tag)
+
+        entry = self.atc_entries[0]           # newest first, see atc.AtcLogFeed
+        age = max(0.0, time.time() - entry.get("ts", 0))
+        # "14S AGO" reads as live and current; past ATC_LOG_RECENT_SECONDS
+        # it switches to "LAST: Xm Ys" so a five-minute-old transmission
+        # is never mistaken for something that just happened -- exactly
+        # the "show the last one, but be honest about when" behaviour
+        # asked for, not a blank screen the moment the frequency goes
+        # quiet. "LAST TX ... AGO" (the original wording) was a REAL
+        # truncation caught by render_audit against a real aged entry --
+        # at up to "LAST TX 4M 59S AGO" (19 chars, 75px) it overran the
+        # 60px budget and silently lost "AGO". Shortened to "LAST:" so
+        # the widest real case ("LAST: 4M 59S", 13 chars) fits with
+        # margin instead of trimming the message that was supposed to be
+        # the whole point of this label.
+        if age < self.ATC_LOG_RECENT_SECONDS:
+            caption = f"{self._fmt_ago(age)} AGO"
+        else:
+            caption = f"LAST: {self._fmt_ago(age)}"
+        draw_text_centered(buf, 10, fit_text(caption, WIDTH - 4), self.ATC)
+
+        # 7 lines at y=17..53 (6px pitch) leaves y=59 clear, the real
+        # HEIGHT-5 boundary a 5px glyph must start at or before.
+        page = self.atc_pages[self.atc_page] if self.atc_pages else []
+        for i, ln in enumerate(page):
+            draw_text3x5(buf, max(2, (WIDTH - text_w(ln)) // 2), 17 + i * 6, ln, self.INK)
+        return bytes(buf)
+
     def frame(self):
         if not self.data.get("configured"):
             buf = blank()
@@ -5685,6 +5849,8 @@ class FlightEngine(Browsable):
 
         if self.view == self.VIEW_SCOPE:
             return self._frame_scope(aircraft)
+        if self.view == self.VIEW_ATC_LOG:
+            return self._frame_atc_log()
 
         buf = blank()
         fill(buf, self.BG)

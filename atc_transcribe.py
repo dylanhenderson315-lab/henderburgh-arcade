@@ -44,6 +44,7 @@ import time
 from pathlib import Path
 
 import atc
+import paneltext
 
 ERROR_BACKOFF_BASE = 5.0
 ERROR_BACKOFF_MAX = 60.0
@@ -79,9 +80,27 @@ def _fetch_chunk(seconds):
         Path(path).unlink(missing_ok=True)
 
 
-def _transcribe(mp3_bytes):
-    """Real text, or "" for a silent/no-speech chunk -- both are
-    legitimate outcomes, only an exception is a failure.
+def fold_transcript(raw_text):
+    """The ENTIRE fold boundary, extracted as a pure function so
+    fold_audit.py can canary-test it directly WITHOUT needing mlx_whisper
+    installed or a real model loaded -- same reason flights._ident is a
+    standalone function rather than inlined into the fetch call.
+
+    FOLDED THROUGH paneltext.panel_text() HERE, AT THE I/O BOUNDARY --
+    same rule every other feed in this project follows, and the one this
+    project's own docstring tally exists to keep from being missed again.
+    Caught live, in this codebase's own newest code, in this same
+    session: Whisper's raw output is natural mixed-case English ("A
+    bunch of them...") and the panel's 3x5 font is uppercase-only --
+    unfolded, "A bunch of them" rendered as literally just "A", every
+    lowercase letter silently dropped, discovered by looking at the
+    actual rendered frame, not by reading this function. Folding here,
+    once, at the write boundary, is what lets every future reader of
+    LOG_PATH trust the text is already drawable -- the same reason
+    news._clean_title/blog._clean/flights._ident fold at their own
+    boundaries instead of leaving it to whoever renders them. This
+    instance is now also covered by fold_audit.py, not just this
+    docstring's word.
 
     Also treats a result with NO alphanumeric content as empty. Confirmed
     live: Whisper occasionally hallucinates a bare "!" or similar stray
@@ -90,14 +109,21 @@ def _transcribe(mp3_bytes):
     That is noise, not a transmission, and would otherwise clutter the
     log with meaningless entries.
     """
+    text = paneltext.panel_text(raw_text)
+    return text if any(c.isalnum() for c in text) else ""
+
+
+def _transcribe(mp3_bytes):
+    """Real text, or "" for a silent/no-speech chunk -- both are
+    legitimate outcomes, only an exception is a failure. See
+    fold_transcript() for the fold boundary itself."""
     import mlx_whisper
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
         f.write(mp3_bytes)
         path = f.name
     try:
         result = mlx_whisper.transcribe(path, path_or_hf_repo=atc.MODEL_REPO)
-        text = (result.get("text") or "").strip()
-        return text if any(c.isalnum() for c in text) else ""
+        return fold_transcript(result.get("text"))
     finally:
         Path(path).unlink(missing_ok=True)
 

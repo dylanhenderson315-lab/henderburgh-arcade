@@ -64,3 +64,83 @@ try:
     HAVE_MLX_WHISPER = True
 except ImportError:                     # degrade honestly, never guess
     HAVE_MLX_WHISPER = False
+
+
+# ---- engine-side reader (phase 2) ---------------------------------------
+import json
+import threading
+import time
+
+
+class AtcLogFeed:
+    """Reads LOG_PATH -- never writes it; only atc_transcribe.py's
+    separate process does that. Same shape as every other FEED in this
+    project (a cache, a cheap get(), never blocks the caller), except the
+    thing being polled is a local file instead of a network endpoint, so
+    there is no background thread: a stat()+parse is already fast enough
+    to do inline, throttled the same way a network feed would be.
+
+    Deliberately reads the WHOLE small file rather than tailing/seeking --
+    the file is bounded by the worker's own LOG_MAX_AGE_SECONDS trim (a
+    few KB at most), so simplicity wins over incremental-read complexity
+    that would only pay for itself at a scale this file never reaches.
+    """
+
+    REFRESH = 2.0    # seconds between re-reads -- plenty responsive for
+                      # an "N seconds ago" caption, cheap either way
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._entries = []       # newest-first
+        self._last_read = 0.0
+        self._last_mtime = None
+
+    def get(self):
+        """Every entry currently in the log, newest first. Never blocks;
+        never invents an entry -- an unreadable/missing/corrupt file is
+        an empty list, not a guess."""
+        now = time.time()
+        with self._lock:
+            due = now - self._last_read >= self.REFRESH
+        if due:
+            self._refresh()
+        with self._lock:
+            self._last_read = now
+            return list(self._entries)
+
+    def _refresh(self):
+        if not LOG_PATH.exists():
+            with self._lock:
+                self._entries = []
+                self._last_mtime = None
+            return
+        try:
+            mtime = LOG_PATH.stat().st_mtime
+        except OSError:
+            return                       # transient FS error: keep last-good, try again next cycle
+        with self._lock:
+            unchanged = mtime == self._last_mtime
+        if unchanged:
+            return
+        entries = []
+        try:
+            with LOG_PATH.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue         # one corrupt line (e.g. a torn write) must not lose the rest
+                    if isinstance(entry, dict) and "ts" in entry and "text" in entry:
+                        entries.append(entry)
+        except OSError:
+            return                       # transient FS error: keep last-good, try again next cycle
+        entries.sort(key=lambda e: e.get("ts", 0), reverse=True)
+        with self._lock:
+            self._entries = entries
+            self._last_mtime = mtime
+
+
+FEED = AtcLogFeed()
