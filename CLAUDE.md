@@ -214,6 +214,96 @@ appends them to the menu automatically.
     layout math, to avoid reopening the collision risk `render_audit.py`
     exists to catch.
 
+  **RADAR SCOPE — shared system, TWO DIFFERENT PROJECTIONS (2026-08-02).**
+  One visual language (`draw_scope_*` / `scope_xy` / `scope_glow` in
+  `engines.py`) used by BOTH the flights and satellite modes: home at
+  centre, dotted range rings, rotating sweep with a fading trail, targets
+  that brighten as the beam passes. **What is shared is the DRAWING; the
+  projection math is deliberately NOT shared**, because these answer
+  different questions and one formula would make one of them wrong:
+  - **flights — GROUND radar**: bearing + ground DISTANCE. Centre = home
+    on the ground, rim = `RADIUS_NM` (40nm) out.
+  - **satellite — SKY DOME**: bearing + ELEVATION ANGLE. Centre = zenith
+    (straight up), rim = the horizon. Standard all-sky convention, and
+    the natural full-sky generalisation of the existing single-pass arc.
+
+  **The flight scope's range scale is SQRT, and that is a measured fix,
+  not a style choice.** Against real live traffic near MYR, 6 of 9 real
+  objects (8 aircraft + the airport) landed inside a **6px radius** on a
+  linear 40nm scale — an unreadable blob at centre with the outer half of
+  the scope empty — because most interesting traffic near a home location
+  is approach traffic inside ~6nm. Sqrt puts **zero** of those 9 in that
+  blob while preserving exact distance ORDER, and the rings are labelled
+  with their **true nm values** (`10/20/40NM` on screen) so the
+  compression is stated rather than hidden. The sky dome stays **linear
+  in elevation** — the correct convention there, and it needs no such
+  correction since elevation is already bounded 0–90°.
+
+  **Targets never fade to nothing** behind the sweep (`SCOPE_TARGET_FLOOR`
+  = 0.38). The object is really up there for the whole rotation, so
+  vanishing for most of the cycle would be the display lying for the sake
+  of the effect — the sweep is decoration over continuously-known data,
+  not a sensor that only learns about a target when the beam hits it.
+
+  **Home airport marker** is config-driven (`flights.load_airport()` /
+  `save_airport()`), stored in `location_config.json` because an airport
+  is a LOCATION fact and that file is the one source of truth for where
+  the owner is. **Not auto-detected**: resolving "nearest airport" needs a
+  12MB airport database to answer a question the owner answers once, same
+  config-driven pattern as the pinned golfer. Seeded with MYR's real
+  coordinates (33.679699, −78.928299) from OurAirports (public domain);
+  verified 3.47nm at bearing 196° from the configured home, cross-checked
+  against an independent haversine calculation.
+  - **`satellite.save_location()` now PRESERVES keys it does not own** —
+    it previously rebuilt the whole document, which would have silently
+    wiped the `airport` key the first time the home pin moved. Exactly
+    the lesson `sports.save_config()` already learned about `golf_player`.
+
+  **The satellite dome is a THIRD, ADDITIVE view** — the settled
+  UPCOMING/OVERHEAD-NOW pair is untouched and still selects itself from
+  whether a pass is happening. An **actual overhead pass outranks the dome
+  and pins the view to it**: that is the go-outside moment the mode exists
+  for, and the new scope must never be able to interrupt it. `has_content()`
+  is deliberately unchanged, so the dome does not alter when the mode
+  appears in ambient. Sunlit objects render bright, shadowed ones
+  present-but-dim (above the horizon but genuinely not visible), the ISS
+  keeps its badge tint and a larger mark.
+
+  **Controls**: `up`/`down` toggles scope ↔ detail in both modes. Both
+  engines are `VERTICAL_BROWSE = False`, so `Browsable._axis()` leaves
+  up/down unclaimed and free to mean this — no new input plumbing.
+
+  **PERFORMANCE — measured before building, not assumed:**
+  | workload | cost | vs 50ms frame budget |
+  |---|---|---|
+  | `skypass.sky_now()` — all 157 objects, ONE instant | **0.32 ms** | 0.6% |
+  | scope render (rings + sweep + targets) | **0.60 ms** | 1.2% |
+  | existing `predict()` — 36h pass scan | 1488 ms | background, 15-min timer |
+
+  All 157 TLEs propagate cleanly (0 failures). **`sky_now()` and
+  `predict()` are completely different workloads and must not be confused
+  when judging whether live tracking is affordable**: `predict()` scans 36
+  hours at 30s steps (~678,000 propagations), `sky_now()` does one per
+  satellite — a 4,651× difference. Continuous all-object tracking is
+  cheap; pass prediction is what is expensive.
+  - **Cadence is decoupled from the frame rate on purpose**
+    (`SKY_NOW_REFRESH = 1.0s`, computed on the FEED's background thread,
+    never in the engine). Measured worst-case apparent motion of a real
+    visible object is **0.13 px/sec** on the 64px dome, so even a 5s
+    cadence stays sub-pixel — recomputing every frame would be 20× the
+    work for a result nobody can see. The feed loop's sleep dropped 5s → 1s
+    to match; the expensive work is gated by its own timers (`TLE_REFRESH`
+    12h, `PASS_REFRESH` 15min) so it does **not** run any more often.
+  - The sweep angle advances per-frame (one float add) so the scope stays
+    live-looking even while the underlying positions update on the slower
+    cadence.
+
+  **Verified on the real panel** by direct pixel dump of the actual sent
+  frame (not a comparison against a separately-polled instance): flights
+  scope with 8 real aircraft + the MYR marker, sky dome with 7 real
+  catalogued objects, and the up/down toggle confirmed returning to the
+  untouched UPCOMING view. Zero errors, zero loop errors in both.
+
   **Flight phase — CLIMB / DESCEND / CRUISE** (`flights._phase()`,
   2026-08-01). Verified against real ORD traffic (MYR had zero aircraft
   in range at build time; ORD confirmed the payload shape and value
