@@ -510,6 +510,85 @@ appends them to the menu automatically.
       data arrives, not just in the case where both happened to be
       ready at the same instant.
 
+  **SELECTION IDENTITY FIX + PART 2 (airport selection, per-aircraft
+  conversation), 2026-08-02.** Two related pieces of a larger radar/ATC
+  overhaul, both done and verified.
+
+  - **`FlightEngine.sel_key` replaced `self.cur` as a bare list index.**
+    `flights.FEED` re-sorts its aircraft list by notability/distance on
+    every refresh, so an index survived across ticks but the aircraft AT
+    that index did not — a real, confirmed correctness bug: a selection
+    could silently start pointing at a different real aircraft the
+    moment the list reordered underneath it. `sel_key` is a stable
+    identity (`hex`/ICAO24 preferred, `ident` fallback — new `hex` field
+    added to `flights._fetch_positions()`'s output for exactly this),
+    resolved to a position fresh every tick/step/frame via
+    `_find_by_key()`. **An aircraft leaving `RADIUS_NM` now explicitly
+    clears the selection and falls back to the scope view** rather than
+    silently re-pointing at whatever now occupies the old slot — same
+    "an honest gap beats a lie" principle as everywhere else in this
+    project. Verified with a direct simulation of a live reorder
+    (selection correctly followed the aircraft) and a selected-aircraft-
+    leaves-range case (selection cleanly drops), plus full
+    `render_audit`/`fold_audit` passes and a live panel run.
+
+  - **Speaker attribution (controller vs. pilot per transcript line) was
+    investigated and DROPPED, not built** — checked against real
+    accumulated `atc_log.jsonl` data before writing any rule, same
+    discipline as the phase 3 callsign-matching research. Finding: each
+    real 20s Whisper chunk routinely contains BOTH the controller and one
+    or more aircraft, interleaved, with real cross-talk, and Whisper
+    gives no diarization or utterance boundaries — e.g. one real captured
+    chunk reads `"ALRIGHT, LEAVING 3046 LEFT ON ALPHA, TAXI TO RAMP AND
+    SAY GATE.! 10-8-2, I'M TALKING SOUTHWEST, THEY'RE STOPPING AT
+    1-2,000..."`, a ground instruction, an aircraft readback, and a
+    second aircraft's transmission all run together in one chunk with no
+    boundary markers. A whole-chunk speaker label would misattribute
+    mixed content most of the time. **Not honestly derivable from this
+    data — flagged to the owner rather than approximated with a heuristic
+    that would be wrong more often than right.**
+
+  - **What IS honestly derivable, and what got built instead: two real
+    views over one log, keyed off identity-based selection.** Selecting
+    an aircraft and opening the log shows its "conversation" — every
+    entry in the retained log (up to `atc.LOG_MAX_AGE_SECONDS`) where
+    `atc.match_callsign()` names THAT aircraft, newest first, paginated
+    across the whole filtered set with each page carrying its OWN source
+    entry's real timestamp (so an older transmission in a multi-message
+    conversation correctly reads as older once paged to, not all
+    captioned with the newest one's age). This is real filtering of real
+    transcript chunks, not reconstructed dialogue — still whole-chunk
+    granularity, honestly so. Selecting nothing, or the airport, shows
+    the unfiltered general frequency log exactly as phase 2 built it
+    (just the single newest transmission), plus the phase 3 confidence-
+    gated match highlight — which only draws in the general view now,
+    since inside a per-aircraft filtered view the header already names
+    that aircraft and a repeated "MATCH: X" tag would be redundant.
+  - **The airport is now a real, steppable selection target**
+    (`FlightEngine.AIRPORT_KEY`, a sentinel in the same `sel_key`
+    namespace as a real aircraft's hex/ident — never collides with one),
+    appended after every aircraft in the left/right step cycle, not just
+    a marker drawn on the scope. It gets its own two-state `rotate`
+    (SCOPE ↔ ATC LOG) rather than the three-stop aircraft cycle, since it
+    has no per-aircraft DETAIL card to show. Exempted from the
+    "still in the aircraft list" selection-loss check (it's never in
+    that list by construction) but still clears if the airport itself
+    gets unconfigured out from under the selection.
+  - **A real bug found by `render_audit.py`'s existing step-loop against
+    real live aircraft + real logged transcript data together**, not by
+    inspection: `"NO TRANSMISSIONS YET"` (17 chars / 66px) overflowed the
+    64px panel by 2px the moment the step-loop's automatic
+    rotate/left-right driving happened to land on a real selected
+    aircraft with genuinely zero matching real transmissions in the
+    current log — a state that only exists once real aircraft AND a real
+    log both exist, so it could not have shown up against synthetic data
+    alone. Fixed by splitting across three short lines, matching the
+    general view's existing "NO ATC DATA / YET" pattern.
+  - **Verified**: `render_audit.py`/`fold_audit.py` both clean after
+    both pieces; live panel exercised through the real `/api/press`
+    input path (rotate ×4, left ×1) with zero errors and a real
+    non-black rendered frame confirmed via direct pixel dump.
+
   **PERFORMANCE — measured before building, not assumed:**
   | workload | cost | vs 50ms frame budget |
   |---|---|---|
