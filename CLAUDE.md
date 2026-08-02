@@ -973,6 +973,33 @@ project's "never invent" rule exists to prevent. The first real per-sport
 trigger (MLB, most likely) is what proves this live, not a synthetic
 push — verify it then, not now.
 
+**All five per-sport detectors done (2026-08-02), built in parallel then
+merged.** Real infrastructure lesson worth keeping: the parallel-agent
+worktrees turned out to share ONE physical directory rather than being
+truly isolated, discovered when the first four agents correctly refused
+to build against missing shared infrastructure that had only been
+committed locally, not yet pushed to `origin`. After pushing, all five
+correctly avoided destructive git commands and isolated their own diffs
+from each other's uncommitted work when they found it — but one commit
+(WNBA) still got silently dropped mid-chain by another agent's
+from-scratch file reconstruction technique, caught only by diffing the
+final merged state's `BIG_MOMENT_DETECTORS` registry against the full set
+of five expected keys, not by trusting any individual agent's "done and
+committed" report. Recovered with `git cherry-pick` (not a hand-applied
+patch — that approach silently dropped a different sport's code on the
+first attempt) and reconciled onto `main`. **Lesson for next time: verify
+a merged multi-agent result by checking the actual combined artifact
+(here, the dispatch dict's keys) against the expected count, not by
+summing individual completion reports.**
+
+Golf's `golf_player` is currently pinned to **Yealimi Noh** (real current
+leader, -7, Round 4 of the AIG Women's Open in progress as of this
+write-up) specifically to give the golf detector a real live game to fire
+against — Scottie Scheffler, the previous pin, wasn't in any live
+tournament. Left in place rather than reverted; the first real EAGLE/
+BIRDIE/LEAD move is what proves the full pipeline live, same as MLB/
+soccer/WNBA still need their own first live game.
+
 **Per-sport detectors, in the audited priority order (MLB → soccer →
 WNBA → golf → MMA; tennis/football blocked, no data)** — see the
 sports-coverage section above for what each sport's live payload actually
