@@ -73,14 +73,34 @@ class Audit:
         self.dropped = []
         self.overflow = []
         self.truncated = []
+        self.clipped = []
         self._orig_text = None
         self._orig_fit = None
         self._orig_person = None
+        self._orig_putpx = None
 
     def install(self):
         self._orig_text = engines.draw_text3x5
         self._orig_fit = engines.fit_text
         self._orig_person = engines.fit_person
+        self._orig_putpx = engines.put_px
+
+        def put_px(buf, x, y, color):
+            # put_px is BOUNDS-CHECKED AND SILENT -- an out-of-range write
+            # is simply dropped, no error, no visible sign anything is
+            # wrong. Every graphical primitive that isn't text (diamonds,
+            # outs pips, trend arrows, arcs, event-frame borders) goes
+            # through this, so a layout bug here is invisible to both the
+            # DROPPED/OVERFLOW checks (which only watch draw_text3x5) and
+            # to a spot check, exactly the same way a silently truncated
+            # string is. Found by hand-deriving a real overflow in the
+            # baseball detail view's y-budget (53+12=65 > 64) that had NO
+            # signal anywhere else -- this closes that blind spot.
+            if not (0 <= x < engines.WIDTH and 0 <= y < engines.HEIGHT):
+                self.clipped.append((x, y))
+            return self._orig_putpx(buf, x, y, color)
+
+        engines.put_px = put_px
 
         def draw_text3x5(buf, x, y, text, color, scale=1):
             s = str(text)
@@ -115,6 +135,7 @@ class Audit:
         engines.draw_text3x5 = self._orig_text
         engines.fit_text = self._orig_fit
         engines.fit_person = self._orig_person
+        engines.put_px = self._orig_putpx
 
     def reset_frame(self):
         self.draws = []
@@ -166,9 +187,19 @@ def drive(mode, audit, ticks=60, settle=0.25):
     # Walk every browsable position on both axes.
     n = len(getattr(eng, "universal", None) or [])
     if n:
+        has_detail = hasattr(eng, "detail")
         for i in range(min(n, 60)):
             eng.ucur = i
             snap("event %d" % i)
+            if has_detail:
+                # select-to-expand: this state was previously UNEXERCISED
+                # by this tool entirely (no snap ever set .detail), which
+                # is exactly the kind of gap this tool exists to close --
+                # a per-sport expanded-detail renderer could ship with a
+                # real bug and a clean audit run would say nothing.
+                eng.detail = eng.universal[i]["id"]
+                snap("event %d detail" % i)
+                eng.detail = None
         if getattr(eng, "browse_v", None) is not None:
             for i in range(len(eng._league_order())):
                 eng._step_v(1)
@@ -210,21 +241,23 @@ def main(argv):
             audit.dropped = []
             audit.overflow = []
             audit.truncated = []
+            audit.clipped = []
             frames, collisions = drive(mode, audit)
 
             dropped = sorted(set(audit.dropped))
             overflow = sorted({o for o in audit.overflow})
             trunc = sorted(set(audit.truncated))
+            clipped = sorted(set(audit.clipped))
             marquee = mode in MARQUEE_OK
 
             status = "ok"
-            if dropped or collisions or (overflow and not marquee):
+            if dropped or collisions or (overflow and not marquee) or (clipped and not marquee):
                 status = "FAIL"
                 bad += 1
             elif trunc and strict:
                 status = "FAIL"
                 bad += 1
-            elif trunc or overflow:
+            elif trunc or overflow or clipped:
                 status = "warn"
 
             print("%-10s %-5s %3d frames" % (mode, status, frames))
@@ -235,6 +268,16 @@ def main(argv):
                 for o in overflow[:6]:
                     print("    OVERFLOW  %r at x=%s y=%s w=%s scale=%s%s"
                           % (o[0], o[1], o[2], o[3], o[4], note))
+            if clipped:
+                # Non-text graphics (diamonds, outs, trend arrows, arcs,
+                # event-frame borders) silently losing pixels off-panel --
+                # put_px drops out-of-range writes with no error. Capped
+                # at 6 since a genuine layout bug clips many pixels at
+                # once; the count matters more than the full list.
+                note = "  (marquee, expected)" if marquee else ""
+                for x, y in clipped[:6]:
+                    print("    CLIPPED   pixel at x=%s y=%s (%d total)%s"
+                          % (x, y, len(clipped), note))
             for label, a, b in collisions[:6]:
                 print("    COLLISION %s: %r overlaps %r" % (label, a, b))
             for kind, src, out in trunc[:6]:

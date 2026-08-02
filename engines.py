@@ -6446,6 +6446,95 @@ class SportsEngine(Browsable):
                                self.LIVE if ev["live"] else self.INK_DIM, x_min=3)
         return bytes(buf)
 
+    def _render_baseball_detail(self, buf, ev):
+        """Baseball's EXPANDED view. The main row already shows inning /
+        diamond / outs / count -- the same size, just smaller. What this
+        view adds is room: both teams' full records, venue, series
+        status, and the SAME live-state glyphs drawn bigger and with
+        actual breathing space, rather than a wholly different set of
+        facts. Selecting a game you're already watching should feel like
+        zooming in, not switching to a different display.
+        """
+        accent = self._sport_accent(ev)
+        draw_event_frame(buf, 1.0 if ev["live"] else 0.35, accent, accent)
+
+        tag = self._state_tag(ev)
+        head = ev["league_name"] or "MLB"
+        if tag:
+            head = f"{head}  {tag}"
+        draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
+                           self.LIVE if ev["live"] else color_on_dark(accent), x_min=3)
+
+        # Real budget, not guessed: two team blocks (17px each: 10px
+        # name/score + 1 gap + 5px record + 1 gap) leave room for the
+        # live-state row PLUS at least one footer line. The first version
+        # of this advanced the cursor by more than the live-state row
+        # actually draws (+12 when the real ink only reaches +6-7), which
+        # pushed y past the footer guard on EVERY live game -- series,
+        # venue and broadcast never appeared, not because anything
+        # overflowed, but because the cursor overshot its own content.
+        # render_audit's put_px instrumentation (added specifically to
+        # catch this CLASS of bug) found no clipped pixels here, which is
+        # what proved it was a cursor-accounting bug, not a real overflow.
+        comps = ev["competitors"]
+        y = 11
+        for c in comps[:2]:
+            bar = c.get("color") or self.INK_DIM
+            for by in range(10):
+                for bx in (3, 4):
+                    put_px(buf, bx, y + by, bar)
+            sc = c.get("score")
+            sc_txt = "" if sc is None else str(sc)
+            col = self.WIN if c.get("winner") else self.HERO_INK
+            avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
+            draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
+            if sc_txt:
+                draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
+            y += 11
+            rec = c.get("record")
+            if rec:
+                draw_text3x5(buf, 8, y, rec, self.INK_DIM)
+            y += 6
+
+        y += 1
+        if ev["live"]:
+            detail = ev.get("detail") or ""
+            top = detail.startswith("TOP")
+            inning = ev.get("period")
+            x = 6
+            if inning:
+                draw_trend_arrow(buf, x, y + 2, top, self.LIVE)
+                x += 5
+                draw_text3x5(buf, x, y + 2, str(inning), self.LIVE)
+                x += text_w(str(inning)) + 6
+            draw_diamond(buf, x, y, ev.get("bases"))
+            x += 12
+            outs = ev.get("outs")
+            if outs is not None:
+                draw_outs(buf, x, y + 5, outs)
+            sit = ev.get("situation") or {}
+            b, k = sit.get("balls"), sit.get("strikes")
+            if isinstance(b, int) and isinstance(k, int):
+                cnt = f"{b}-{k}"
+                draw_text3x5(buf, WIDTH - 4 - text_w(cnt), y + 2, cnt, self.INK)
+            y += 7          # diamond's real extent is 5px + outs' 1px + a gap
+        else:
+            draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8), self.INK_DIM)
+            y += 8
+
+        # HEIGHT-5, not HEIGHT-6: a scale=1 glyph is 5px tall, so the true
+        # last valid start row is 59 (59+5=64). HEIGHT-6=58 rejected a
+        # perfectly legal y=59 -- caught by the same accounting review
+        # that found the cursor overshoot above.
+        foot_lines = [x for x in (ev.get("series"), ev.get("venue"), ev.get("broadcast")) if x]
+        for line in foot_lines:
+            if y > HEIGHT - 5:
+                break
+            draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.INK_DIM, x_min=3)
+            y += 7
+
+    SPORT_DETAIL_RENDERERS["baseball"] = _render_baseball_detail
+
     def _frame_for_view(self):
         if self.detail is not None:
             ev = self._current_event()
