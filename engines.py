@@ -5710,6 +5710,8 @@ class SportsEngine(Browsable):
         if self.score_flash > 0:
             self.score_flash -= 1
 
+        self._detect_big_moments()
+
         # Auto-advance is suspended while EXPANDED: having deliberately
         # opened one event, having it slide away on a timer is the exact
         # push-only behaviour the browse control exists to escape.
@@ -6494,6 +6496,31 @@ class SportsEngine(Browsable):
     # seam, verified byte-identical to the old behaviour before anything
     # is added to it.
     SPORT_DETAIL_RENDERERS = {}
+
+    # ---- per-sport BIG-MOMENT detection -----------------------------------
+    # Same additive seam as SPORT_RENDERERS/SPORT_DETAIL_RENDERERS, one
+    # more level over: a sport registers a detector, called once per tick
+    # with no arguments beyond self. Each detector is responsible for
+    # finding its OWN relevant live game/state (from self.data/
+    # self.universal) and deciding whether to fire -- deliberately not
+    # handed a single "the live game" by the caller, because what counts
+    # as the relevant game differs by sport (MLB/soccer/WNBA check the
+    # pinned favorite's live game; golf checks self.golf_move, already
+    # computed by the feed). A detector that finds nothing simply returns.
+    # Registry starts EMPTY -- adding a detector is purely additive and
+    # cannot regress another sport, same contract as the two seams above.
+    # Detectors that raise are swallowed (never let a bad one break sports
+    # mode); each is timed for I/O the same as everything else in this
+    # project -- see sports.py for the request-volume discipline any new
+    # per-game polling here must follow.
+    BIG_MOMENT_DETECTORS = {}
+
+    def _detect_big_moments(self):
+        for fn in self.BIG_MOMENT_DETECTORS.values():
+            try:
+                fn(self)
+            except Exception:                    # noqa: BLE001 - never break sports mode
+                pass
 
     def _frame_event_detail(self, ev):
         fn = self.SPORT_DETAIL_RENDERERS.get(ev.get("sport"))
