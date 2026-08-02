@@ -1,5 +1,10 @@
 {
   "lat": 33.735277,
   "lon": -78.9089469,
-  "label": "MYRTLE"
+  "label": "MYRTLE",
+  "airport": {
+    "code": "MYR",
+    "lat": 33.679699,
+    "lon": -78.928299
+  }
 }

@@ -91,8 +91,19 @@ def load_location():
 
 
 def save_location(lat, lon, label):
-    CONFIG_PATH.write_text(json.dumps(
-        {"lat": lat, "lon": lon, "label": label[:10]}, indent=2))
+    """PRESERVES any key this function does not own (notably `airport`,
+    which flights.py stores in this same file) -- the identical lesson
+    sports.save_config() already had to learn about golf_player: a writer
+    that rebuilds the whole document silently wipes a sibling feature's
+    config the first time someone moves the home pin."""
+    data = {}
+    if CONFIG_PATH.exists():
+        try:
+            data = json.loads(CONFIG_PATH.read_text()) or {}
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            data = {}
+    data.update({"lat": lat, "lon": lon, "label": label[:10]})
+    CONFIG_PATH.write_text(json.dumps(data, indent=2))
 
 
 def _fetch_position():

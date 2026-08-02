@@ -28,6 +28,7 @@ aircraft can't turn one refresh cycle into dozens of outbound requests --
 new callsigns just enrich over the following cycles instead.
 """
 import json
+import math
 import threading
 import time
 import urllib.error
@@ -55,6 +56,78 @@ def _get_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         return json.load(r)
+
+
+def load_airport():
+    """The home airport, for the radar scope's airport marker, or None.
+
+    Lives in satellite.py's location_config.json rather than a new file --
+    an airport is a LOCATION fact, and CLAUDE.md's standing rule is that
+    there is exactly one source of truth for where the owner is. Stored
+    as {"code", "lat", "lon"}; anything malformed returns None so the
+    scope simply draws no airport rather than plotting a guessed one.
+
+    NOT auto-detected. Resolving "the nearest airport" needs a whole
+    airport database (OurAirports' CSV is 12MB) to answer a question the
+    owner can answer once in a config field -- same config-driven pattern
+    as the pinned golfer and the favourite team.
+    """
+    path = satellite.CONFIG_PATH
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text()) or {}
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return None
+    ap = data.get("airport")
+    if not isinstance(ap, dict):
+        return None
+    try:
+        lat, lon = float(ap["lat"]), float(ap["lon"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
+    return {"code": paneltext.panel_text(ap.get("code"))[:4] or "ARPT",
+            "lat": lat, "lon": lon}
+
+
+def save_airport(code, lat, lon):
+    """Persist (or clear, with a falsy code) the home airport. Preserves
+    every other key in the shared location config."""
+    path = satellite.CONFIG_PATH
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text()) or {}
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            data = {}
+    if code:
+        data["airport"] = {"code": str(code).upper()[:4],
+                           "lat": float(lat), "lon": float(lon)}
+    else:
+        data.pop("airport", None)
+    path.write_text(json.dumps(data, indent=2))
+    return data.get("airport")
+
+
+def bearing_distance(lat1, lon1, lat2, lon2):
+    """(bearing_deg, distance_nm) from point 1 to point 2.
+
+    Great-circle, same haversine satellite.py already uses for ground
+    distance -- shared concept, but returned in NAUTICAL miles because
+    that is the unit the flight scope's range rings are labelled in
+    (aviation convention, and what RADIUS_NM is already expressed in).
+    """
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dl = math.radians(lon2 - lon1)
+    dp = p2 - p1
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    d_km = 2 * 6371.0088 * math.asin(min(1.0, math.sqrt(a)))
+    brg = math.degrees(math.atan2(
+        math.sin(dl) * math.cos(p2),
+        math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl))) % 360.0
+    return brg, d_km * 0.539957
 
 
 def _ident(ac):
