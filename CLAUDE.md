@@ -935,7 +935,8 @@ same discipline as the main-renderer seam.
 | sport | status |
 |---|---|
 | baseball | **done** — same diamond/outs/count/arrow language as the main row, plus room the main row doesn't have: both teams' full records, series status, venue, broadcast |
-| mma / soccer / golf / others | not started — main renderers exist for these but their detail views still use the generic fallback |
+| soccer | **done** — full record with points ("7-5-5, 26 PTS", no room on the compact row), venue, broadcast, series, note, shootout at full size. Verified live against two real MLS matches |
+| mma / golf / others | not started — main renderers exist for these but their detail views still use the generic fallback |
 
 **Two real bugs found building baseball's detail view, both from
 verification, neither visible by eye:**
