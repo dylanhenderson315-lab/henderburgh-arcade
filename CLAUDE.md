@@ -206,12 +206,14 @@ appends them to the menu automatically.
     clear of the plane icon's rotation footprint at every heading.
     Nothing drawn for CRUISE or `None` — same "no badge for the mundane
     case" rule the notable tag already follows.
-  - **Honest gap**: verified pixel-perfect against real captured ORD
-    data (17 aircraft, real CLIMB and DESCEND cases dumped and checked);
-    not yet observed on the real panel against genuine local MYR traffic,
-    because none existed at build time. The LOW+phase escalation
-    specifically wasn't observed live either — its two component signals
-    were each verified independently.
+  - **Partial live check 2026-08-02**: one real aircraft (VIR74W,
+    39,000ft) appeared near MYR at session start — correctly classified
+    CRUISE (altitude alone, per the FAA floor rule) with no arrow drawn,
+    confirmed on the real panel (score=1, zero errors). Still an honest
+    gap: no CLIMB or DESCEND case has occurred at MYR itself yet, so the
+    arrow's real-panel appearance remains verified only against captured
+    ORD data, not local traffic. The LOW+phase escalation is likewise
+    still unverified live. Check again next session.
 - **sports** (`sports.py`/`SportsEngine`, 2026-07-30, expanded same day) —
   NFL/NBA/MLB/NHL/EPL/NCAAF/NCAAB scores via ESPN's free undocumented site
   API. Pinned favorite team (full-screen score, scoring-flash animation,
