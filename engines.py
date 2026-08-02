@@ -6534,7 +6534,36 @@ class SportsEngine(Browsable):
     # mode); each is timed for I/O the same as everything else in this
     # project -- see sports.py for the request-volume discipline any new
     # per-game polling here must follow.
-    BIG_MOMENT_DETECTORS = {}
+
+    def _detect_wnba_big_play(self):
+        """WNBA late-clock scoring play. All the fetching, the one-shot
+        seen/new tracking and the clock/period threshold live in
+        sports.py (_fetch_wnba_big_plays/_refresh_wnba_big_play) -- this
+        method does ZERO I/O, same rule as every other engine in this
+        project. It only pops whatever the feed thread already found and
+        turns it into a celebration.
+
+        Label is "BIG PLAY", not "BUZZER BEATER" -- deliberately more
+        honest than punchier. Calibrated against two real finished WNBA
+        games (see sports.WNBA_BIG_PLAY_CLOCK_SECONDS's docstring): the
+        qualifying plays sat at 3.2s/0.9s/4.2s remaining, clearly late
+        and clearly meaningful, but "buzzer beater" implies the shot beat
+        the clock to zero, which nothing observed actually did.
+
+        Real gap, same one noted in sports.py: WNBA cannot currently be
+        set as the pinned favorite (LEAGUE_PATHS/set_favorite both reject
+        it), so this detector's upstream feed data
+        (sports.FEED.pop_wnba_big_play()) can never actually be non-None
+        today -- correct code, unreachable until WNBA pinning exists."""
+        play = sports.FEED.pop_wnba_big_play()
+        if not play:
+            return
+        self._set_big_moment("WNBA BIG PLAY", play.get("clock") or "",
+                              play.get("text") or "", color=(255, 140, 0))
+
+    BIG_MOMENT_DETECTORS = {
+        "wnba_big_play": _detect_wnba_big_play,
+    }
 
     def _detect_golf_big_moment(self):
         """Golf's detector -- the only one of the five that needs no new

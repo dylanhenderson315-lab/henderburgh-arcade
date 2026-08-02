@@ -1179,6 +1179,65 @@ ESPN parsing, no new polling.
   universal feed ever surfaces is what proves this live, not a synthetic
   push.
 
+**WNBA — done (2026-08-02), with one real, still-open gap.**
+`sports._fetch_wnba_big_plays()` fetches
+`SUMMARY_URL.format(path='basketball/wnba', event_id=...)` (a private
+`_WNBA_PATH` constant — WNBA is deliberately NOT added to
+`LEAGUE_PATHS`/`DEFAULT_LEAGUES`, see below) and returns every
+`scoringPlay: true` play in the FINAL period reached
+(`max(period.number)` across the payload, which already covers OT since
+ESPN numbers OT periods 5, 6... above regulation) whose
+`clock.displayValue` is under **5.0 seconds**
+(`WNBA_BIG_PLAY_CLOCK_SECONDS`).
+
+- **Threshold is CONFIRMED REAL, not a best guess.** Pulled two real
+  completed WNBA games live on 2026-08-02 (LV @ CHI, event 401857105;
+  NY @ PHX, event 401857106) and found a genuine example to calibrate
+  against: real final-period scoring plays split into two clear
+  clusters — last-possession makes at 3.2s/0.9s/4.2s remaining, versus
+  garbage-time free throws at 12.7s/24.1s/35.4s/43.9s in the same final
+  minute. 5.0s sits cleanly between the two clusters in both real games.
+  The clock field itself needed its own small parser
+  (`sports._clock_seconds()`) — ESPN's `displayValue` is `"M:SS"` above a
+  minute and a bare seconds float (`"3.2"`, `"0.9"`) under it, confirmed
+  against these same real payloads.
+- **On-panel label is "BIG PLAY", not "BUZZER BEATER"** — a deliberately
+  more honest label. All three real qualifying plays found (3.2s/0.9s/
+  4.2s remaining) were clearly still-meaningful late scores, but none
+  actually beat the clock to zero, so "buzzer beater" would overclaim
+  what was really detected.
+- **One-shot seen/new tracking lives in `sports.SportsFeed`** (not the
+  engine): `_wnba_seen`/`_wnba_event_id`, same "adopt the current set on
+  first read of a new game, diff after that" idiom as
+  `GameDayEngine._seen_done`. Verified directly (not just by inspection):
+  first poll of a game adopts both of LV@CHI's real qualifying plays
+  without firing; a second poll of unchanged data fires nothing; a
+  simulated game switch resets the baseline without firing; and forcing
+  only one of the two real plays into the seen set correctly surfaces
+  the other (Sydney Taylor's real 0.9s three) as newly-detected.
+- **Real gap, honestly unresolved rather than worked around**: WNBA
+  cannot currently be set as the pinned favorite team at all.
+  `LEAGUE_PATHS` doesn't include it and both `load_config()` and
+  `set_favorite()` reject any league outside `LEAGUE_PATHS` — confirmed
+  by reading both functions. `SportsFeed._refresh_wnba_big_play()` (the
+  I/O side, cost-scoped identically to `_refresh_win_prob()` — only the
+  pinned favorite's own currently-live game, same discipline as
+  win-probability) is therefore correct but **practically unreachable**
+  until WNBA becomes a pinnable favorite league somewhere else in the
+  project. That is a real, separate piece of work, not part of this
+  detector — not attempted here since widening `LEAGUE_PATHS` to make
+  WNBA choosable for the whole sports mode is a bigger, differently-
+  scoped change than "add one big-moment detector".
+- **Not yet live-verified end-to-end on a real live game**, for the same
+  reason the shared infrastructure above hasn't been: both real WNBA
+  games available at build time were already `post` (finished) — the
+  parsing/threshold logic is confirmed against their full real
+  play-by-play, but firing in real time against a genuinely in-progress
+  game (as opposed to a completed game's full play list) remains
+  unobserved. Verify this the same way the shared infra note above says
+  to verify MLB: with the first real trigger, not a synthetic push — and
+  only once WNBA pinning exists to make it reachable at all.
+
 ### Per-sport EXPANDED-DETAIL renderers (started 2026-08-01)
 
 **Why, and why it's a SEPARATE follow-up rather than part of the main-
