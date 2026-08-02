@@ -5401,6 +5401,14 @@ class FlightEngine(Browsable):
         self.view = self.VIEW_SCOPE
         self.sweep = 0.0
         self.airport = None
+        # Distinguishes "auto-cycle spotlighted this aircraft" from "the
+        # user pressed rotate to select it" -- without this, the existing
+        # spotlight rotation (scope -> detail -> next aircraft -> ... ->
+        # scope) would silently walk the view away from an aircraft
+        # someone deliberately opened a few seconds later. Same "browsing
+        # while expanded stays expanded" rule sports already follows for
+        # its own select-to-expand.
+        self._auto_detail = False
         self._init_scroll()
 
     # ---- input -----------------------------------------------------------
@@ -5419,15 +5427,26 @@ class FlightEngine(Browsable):
     def input(self, cmd):
         if self._browse_input(cmd):
             return
-        if cmd in ("up", "down"):
-            # FlightEngine is not VERTICAL_BROWSE, so Browsable._axis()
-            # leaves up/down alone and they are free to mean something
-            # here: flip between the scope and the detail card on demand.
-            self.view = (self.VIEW_DETAIL if self.view == self.VIEW_SCOPE
-                         else self.VIEW_SCOPE)
+        # SELECT-TO-EXPAND, same convention SportsEngine already uses --
+        # `rotate` IS the select button on this hardware (the phone
+        # remote's centre action), so on the scope it opens the aircraft
+        # currently under the cursor (left/right already moves that
+        # cursor in both views) into the full detail card, and collapses
+        # back out of it. `drop` is the second way back, and still
+        # toggles auto-advance when nothing is expanded -- identical
+        # split to sports, not a new idiom invented for this mode.
+        if cmd == "rotate":
+            self.view = (self.VIEW_SCOPE if self.view == self.VIEW_DETAIL
+                         else self.VIEW_DETAIL)
+            self._auto_detail = False    # manual either way -- see reset()
             self.hold = 0
-        elif cmd in ("rotate", "drop"):
-            self.cycling = not self.cycling
+        elif cmd == "drop":
+            if self.view == self.VIEW_DETAIL:
+                self.view = self.VIEW_SCOPE
+                self._auto_detail = False
+            else:
+                self.cycling = not self.cycling
+            self.hold = 0
 
     def auto(self):
         pass          # already self-cycling; ambient and manual look the same
@@ -5449,12 +5468,20 @@ class FlightEngine(Browsable):
         # mode's heartbeat, and freezing it while browsing would make a
         # live scope look crashed. Cheap -- one float add, no propagation.
         self.sweep = (self.sweep + self.SWEEP_DEG_PER_TICK) % 360.0
-        if self.cycling and n and self.browse.auto_ok:
+        # Auto-advance is suspended while a DETAIL view was reached by
+        # manual select (rotate) -- same "browsing while expanded stays
+        # expanded" rule sports' select-to-expand already follows. Only a
+        # detail view the SPOTLIGHT ROTATION itself opened continues to
+        # auto-walk; the moment a real person picks a specific aircraft,
+        # the mode must stop pulling the view away from it on a timer.
+        auto_ok = self.view == self.VIEW_SCOPE or self._auto_detail
+        if self.cycling and n and self.browse.auto_ok and auto_ok:
             self.hold += 1
             if self.view == self.VIEW_SCOPE:
                 if self.hold >= self.SCOPE_TICKS:
                     self.hold = 0
                     self.view = self.VIEW_DETAIL
+                    self._auto_detail = True
                     self.cur = 0
             elif self.hold >= self.VIEW_TICKS:
                 self.hold = 0
@@ -5464,6 +5491,7 @@ class FlightEngine(Browsable):
                 # you only see when the mode first comes up.
                 if self.cur == 0:
                     self.view = self.VIEW_SCOPE
+                    self._auto_detail = False
         self.score = n
 
     # ---- radar scope (GROUND projection: bearing + ground distance) -------
@@ -5695,7 +5723,9 @@ class FlightEngine(Browsable):
         # overlapped both of them on a wide case (598MPH + 45MI NW) --
         # caught by rendering, invisible to a code read. It's the least
         # important of the three, so it yields.
-        gap = (WIDTH - 2 - text_w(right)) - (2 + text_w(left))
+        gap_start = 2 + text_w(left)
+        gap_end = WIDTH - 2 - text_w(right)
+        gap = gap_end - gap_start
         type_fits_inline = bool(typ) and gap >= text_w(typ) + 6
         if typ and not type_fits_inline and isinstance(alt, (int, float)):
             alt_txt = f"{typ} {alt:.0f}FT"
@@ -5704,7 +5734,19 @@ class FlightEngine(Browsable):
         draw_text3x5(buf, 2, 41, left, self.INK_DIM)
         draw_text3x5(buf, WIDTH - 2 - text_w(right), 41, right, self.INK_DIM)
         if type_fits_inline:
-            draw_text_centered(buf, 41, typ, (86, 94, 116))
+            # Centred WITHIN THE GAP the fit-check just measured, not
+            # across the full panel -- draw_text_centered() always centres
+            # on WIDTH, which is a different, wider span whenever `left`
+            # and `right` aren't symmetric (e.g. left="-", right="24MI NE"
+            # skews the true gap well off-centre). A real collision this
+            # way: P46T vs "24MI NE" passed the fit check (30px of gap for
+            # a 15px string) and still visually overlapped, because the
+            # centred-on-64px draw started at x=24 while the gap the check
+            # validated actually started at x=5. Found by driving
+            # select-to-expand across every real aircraft with
+            # render_audit's collision detector, not by eye.
+            typ_x = gap_start + max(0, (gap - text_w(typ)) // 2)
+            draw_text3x5(buf, typ_x, 41, typ, (86, 94, 116))
 
         draw_dots(buf, 47, len(aircraft), self.cur, on=col, cap=8)
         draw_divider(buf, 50)
