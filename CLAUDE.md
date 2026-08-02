@@ -936,7 +936,8 @@ same discipline as the main-renderer seam.
 |---|---|
 | baseball | **done** — same diamond/outs/count/arrow language as the main row, plus room the main row doesn't have: both teams' full records, series status, venue, broadcast |
 | soccer | **done** — full record with points ("7-5-5, 26 PTS", no room on the compact row), venue, broadcast, series, note, shootout at full size. Verified live against two real MLS matches |
-| mma / golf / others | not started — main renderers exist for these but their detail views still use the generic fallback |
+| golf | **done** — full tournament name, round status, venue, broadcast (the deep leaderboard the main view already provides isn't repeated). Verified against the real finished Rocket Classic |
+| mma / others | not started — main renderer exists for MMA but no card was available to verify against at build time (zero events, no live/upcoming card in the window checked) |
 
 **Two real bugs found building baseball's detail view, both from
 verification, neither visible by eye:**
