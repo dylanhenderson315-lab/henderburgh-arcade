@@ -470,10 +470,45 @@ appends them to the menu automatically.
       after this — confirms the rotate-driven step-loop (added last
       session) now also exercises all THREE view states across every
       real aircraft automatically, not just two.
-  - **NOT YET BUILT**: the airline-callsign matching layer (phase 3,
-    confidence-gated, general-log-always-the-default per the feasibility
-    research's own finding that GA tail numbers cannot be reliably
-    matched from ASR text).
+  - **PHASE 3 — done and verified against real live data, 2026-08-02.**
+    `atc.match_callsign()` matches AIRLINE NAME + FLIGHT NUMBER only,
+    exact-match required against the REAL currently-tracked aircraft list
+    — never GA tail numbers, per the feasibility research's own finding
+    that those cannot be reliably reconstructed from ASR text.
+    `atc.AIRLINE_ICAO` is real, static reference data (FAA radio
+    callsigns → ICAO codes), same category as `flights.ICAO_TYPE_NAMES`.
+    **Built and tuned against real captured MYR transcript text before
+    ever touching the engine**: confirmed exact matches (`DAL2327`,
+    `FFT4117`) against real currently-tracked aircraft, and confirmed
+    correct REJECTION of same-airline-different-flight-number candidates
+    (`"SOUTHWEST 1437"` said repeatedly on real audio while only
+    `SWA2587` — a different flight — was actually in range that
+    session). A match draws a bright-green `"MATCH: <ident>"` tag in the
+    log (`ATC_MATCH`, visually unmistakable from the general amber) and
+    the SAME color on the matched aircraft's own scope marker — the
+    correlation is visible from either direction, matching the original
+    pitch. **General log is ALWAYS the unfiltered default** regardless of
+    match status — nothing about this layer can ever hide a real
+    transmission, only add a highlight on top.
+    - **A real bug found by checking against LIVE data, not the
+      synthetic test that had already passed.** Matching was originally
+      gated to the exact same "entry changed" trigger as page
+      computation — a one-shot attempt at the moment a transmission
+      arrives. But `flights.FEED`'s background thread may not have
+      completed its first fetch yet on that exact tick, so a genuinely
+      correct real match (`"SOUTHWEST 1437"` → `SWA1437`, both real) was
+      silently missed because the aircraft list was still empty at that
+      specific instant — invisible to a synthetic test that pre-seeds
+      both the transcript and the aircraft list together, only exposed
+      by driving the real, asynchronous startup race. Fixed by retrying
+      every tick while unmatched (cheap: one regex pass over a short
+      string) instead of a single attempt, with the page budget
+      recomputed correctly even when the match lands on a LATER tick
+      than the transcript itself did. Verified by forcing the exact
+      race (ticking immediately after `reset()`, before the feed has
+      warmed up) and confirming the match eventually lands once real
+      data arrives, not just in the case where both happened to be
+      ready at the same instant.
 
   **PERFORMANCE — measured before building, not assumed:**
   | workload | cost | vs 50ms frame budget |
