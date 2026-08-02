@@ -276,8 +276,62 @@ def _fetch_route(callsign):
     return {
         "origin": origin.get("iata_code") or origin.get("icao_code"),
         "dest": dest.get("iata_code") or dest.get("icao_code"),
-        "airline": airline.get("name"),
+        # `municipality` is the real city name adsbdb already returns
+        # alongside the airport code -- confirmed live (RDU ->
+        # "Raleigh/Durham", LGA -> "New York") -- it was simply being
+        # discarded before. Uppercased/folded at this I/O boundary like
+        # every other externally-sourced string here.
+        "origin_city": paneltext.panel_text(origin.get("municipality")) or None,
+        "dest_city": paneltext.panel_text(dest.get("municipality")) or None,
+        # Folded here, not with a bare .upper() at render time -- adsbdb
+        # airline names can carry accents/curly punctuation the font can't
+        # draw (same bug class as paneltext.py's tally, instance 2, which
+        # was this exact field).
+        "airline": paneltext.panel_text(airline.get("name")) or None,
     }
+
+
+# Readable name for the most common ICAO aircraft type designators --
+# CONFIRMED REAL, sourced from the standard ICAO type-designator registry,
+# not invented. ADS-B only ever reports the bare code (adsb.lol's `t`
+# field); this is a static reference lookup, same class of thing as the
+# compass-direction table above, not a fabricated per-flight value. A
+# code missing from this table falls back to the raw code as-is -- never
+# a guessed name for an aircraft this table doesn't know.
+#
+# Populated from real codes observed in a live 40nm sample near ORD on
+# 2026-08-02 (A21N/B39M/A321/A20N/BCS3/B77L/B737/B772/B744, 13 aircraft)
+# plus the other common narrow/wide-body types an airliner-heavy sky is
+# realistically going to show.
+ICAO_TYPE_NAMES = {
+    "A319": "A319", "A320": "A320", "A321": "A321",
+    "A20N": "A320NEO", "A21N": "A321NEO", "A19N": "A319NEO",
+    "A332": "A330-200", "A333": "A330-300", "A339": "A330-900NEO",
+    "A342": "A340-200", "A343": "A340-300", "A345": "A340-500", "A346": "A340-600",
+    "A359": "A350-900", "A35K": "A350-1000",
+    "A388": "A380-800",
+    "BCS1": "A220-100", "BCS3": "A220-300",
+    "B734": "737-400", "B735": "737-500", "B736": "737-600",
+    "B737": "737-700", "B738": "737-800", "B739": "737-900",
+    "B37M": "737 MAX 7", "B38M": "737 MAX 8", "B39M": "737 MAX 9", "B3XM": "737 MAX 10",
+    "B752": "757-200", "B753": "757-300",
+    "B762": "767-200", "B763": "767-300", "B764": "767-400",
+    "B772": "777-200", "B77L": "777-200LR", "B773": "777-300", "B77W": "777-300ER",
+    "B778": "777-8", "B779": "777-9",
+    "B788": "787-8", "B789": "787-9", "B78X": "787-10",
+    "B744": "747-400", "B748": "747-8",
+    "E135": "ERJ-135", "E145": "ERJ-145",
+    "E170": "E170", "E75L": "ERJ-175", "E75S": "ERJ-175",
+    "E190": "E190", "E195": "E195", "E290": "E190-E2", "E295": "E195-E2",
+    "CRJ2": "CRJ200", "CRJ7": "CRJ700", "CRJ9": "CRJ900", "CRJX": "CRJ1000",
+    "DH8D": "DASH 8-400",
+}
+
+
+def _type_name(icao_type):
+    """Readable aircraft type, or the raw code if it isn't in the table."""
+    t = (icao_type or "").strip().upper()
+    return ICAO_TYPE_NAMES.get(t, t) or None
 
 
 class FlightFeed:

@@ -180,6 +180,40 @@ appends them to the menu automatically.
   altitude wasn't color-coded anywhere, and altitude is the more standard
   "what kind of traffic is this" signal on real ATC displays).
 
+  **Real city names + readable aircraft type (2026-08-02)**, prompted by
+  a commercial reference product (a flight-info LED display) the owner
+  wanted this mode to read more like. Two real fields were already
+  available and simply being discarded:
+  - `adsbdb`'s route response includes `origin.municipality`/
+    `destination.municipality` (confirmed live: RDU → "Raleigh/Durham",
+    LGA → "New York") alongside the airport codes already in use —
+    `flights._fetch_route()` now keeps `origin_city`/`dest_city`, folded
+    through `paneltext.panel_text()` at the I/O boundary like every other
+    externally-sourced string here (airline names get the same fold now
+    too, closing a gap where they were only `.upper()`'d, the exact bug
+    class in `paneltext.py`'s tally instance 2).
+  - `flights.ICAO_TYPE_NAMES` — a static ICAO-type-designator → readable
+    name lookup (`"B738"` → `"737-800"`), same category of reference data
+    as the compass-direction table, not invented per-flight. Populated
+    from real codes seen in a live 40nm sample near ORD (A21N/B39M/A321/
+    A20N/BCS3/B77L/B737/B772/B744) plus other common airliner types. A
+    code missing from the table falls back to the bare code, never a
+    guessed name.
+  - The route line now prefers `"<origin city> > <dest city>"`, falling
+    back to the airport-code pair when either municipality is missing,
+    through the same `fit_text()` truncation every other row already
+    uses — verified against a real adsbdb payload (DAL1362, RDU→LGA) and
+    an intentionally-long pair (DFW→MSP full city names) to confirm
+    graceful truncation with zero overflow/collision
+    (`render_audit.py flights` clean both times). Known tradeoff, same as
+    every other truncated field in this project: a city pair too long to
+    fit loses the destination city entirely rather than clipping mid-word
+    — acceptable, not a bug.
+  - Row layout/positions are UNCHANGED from the already-audited baseline
+    — only the CONTENT of the type and route slots got smarter, not the
+    layout math, to avoid reopening the collision risk `render_audit.py`
+    exists to catch.
+
   **Flight phase — CLIMB / DESCEND / CRUISE** (`flights._phase()`,
   2026-08-01). Verified against real ORD traffic (MYR had zero aircraft
   in range at build time; ORD confirmed the payload shape and value

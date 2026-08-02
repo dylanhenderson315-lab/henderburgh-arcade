@@ -5280,10 +5280,14 @@ class FlightEngine(Browsable):
         if phase in (flights.PHASE_CLIMB, flights.PHASE_DESCEND):
             draw_trend_arrow(buf, 3, 16, phase == flights.PHASE_CLIMB, col)
 
-        # .upper() defensively: aircraft type codes are conventionally
-        # uppercase in ADS-B data, but "conventionally" is exactly the
-        # word that just burned the airline-name field above.
-        typ = (ac.get("type") or "").upper()
+        # Readable name when the ICAO type code is in flights.ICAO_TYPE_NAMES
+        # ("B738" -> "737-800"), the bare code otherwise -- never a guessed
+        # name for a code the table doesn't recognise. .upper() defensively:
+        # ADS-B type codes are conventionally uppercase, but "conventionally"
+        # is exactly the word that already burned the airline-name field
+        # once (see paneltext.py's tally, instance 2).
+        typ = flights._type_name(ac.get("type")) or ""
+        typ = typ.upper()
 
         # ADS-B natively reports altitude in FEET (already imperial, left
         # as-is) but ground speed in KNOTS and distance in NAUTICAL miles
@@ -5323,15 +5327,24 @@ class FlightEngine(Browsable):
 
         route = ac.get("route")
         if route and route.get("origin") and route.get("dest"):
-            draw_text_centered(buf, 53, f"{route['origin']}>{route['dest']}".upper(), self.ROUTE)
-            # adsbdb returns mixed-case names ("United Airlines"), but the
-            # font is uppercase-only -- draw_text3x5 silently skips glyphs
-            # it doesn't have, so lowercase letters vanished and "United
-            # Airlines" rendered as just the two capitals, "U" and "A",
-            # nothing else. Width-fit against real pixels, not a blind
-            # character slice -- a fixed [:16] let long names clip
-            # mid-glyph off the right edge instead of stopping cleanly.
-            airline = fit_text((route.get("airline") or "").upper(), WIDTH - 4)
+            # Real city names when adsbdb provided them ("RALEIGH/DURHAM >
+            # NEW YORK"), falling back to the airport codes it always
+            # provides ("RDU>LGA") when either municipality is missing.
+            # fit_text() truncates gracefully rather than clipping mid-word
+            # if a long city pair still doesn't fit at scale 1 -- same
+            # safety net already used for the airline name below.
+            o_city, d_city = route.get("origin_city"), route.get("dest_city")
+            if o_city and d_city:
+                route_line = f"{o_city} > {d_city}"
+            else:
+                route_line = f"{route['origin']}>{route['dest']}".upper()
+            draw_text_centered(buf, 53, fit_text(route_line, WIDTH - 4), self.ROUTE)
+            # adsbdb returns mixed-case names ("United Airlines"); already
+            # folded through paneltext.panel_text() in flights.py at the
+            # I/O boundary (not a bare .upper() here) so a diacritic or
+            # curly-quoted airline name can't silently drop a character,
+            # same discipline every other feed in this project follows.
+            airline = fit_text(route.get("airline") or "", WIDTH - 4)
             if airline:
                 draw_text_centered(buf, 59, airline, (86, 94, 116))
         else:
