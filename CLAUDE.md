@@ -292,6 +292,31 @@ appends them to the menu automatically.
   actually see. The ISS keeps its badge tint and a larger mark
   regardless.
 
+  **Orientation — tried text, shipped a real landmark instead
+  (2026-08-02, same session).** First attempt: N/S/E/W single-letter
+  labels on the crosshair, plus an alternating footer legend explaining
+  the diamond/plus marks ("<>=HOME +=MYR"). Both were built, verified
+  clean, and then reverted on direct feedback — they read as clunky
+  instrument-panel text against the sweep/rings aesthetic this view is
+  going for, and didn't actually make the marks self-explanatory.
+  **`flights.COASTLINE`** replaced both: real geography, not decoration —
+  extracted once from Natural Earth's public-domain 10m coastline dataset,
+  clipped to the contiguous run within 55nm of the configured home,
+  verified against the raw source before embedding (nearest real point is
+  2.77nm at bearing 131.7° SE, consistent with the actual Grand Strand
+  shoreline curving away from a few miles inland). **A live Overpass API
+  coastline query was tried FIRST and reliably times out server-side** — a
+  known limitation of that API for `natural=coastline` queries specifically
+  (coastline ways are expensive), not a transient failure, which is why
+  this is a one-time static extraction rather than a feed. Same reasoning
+  as MYR's coordinates being a one-time lookup rather than a live source:
+  coastlines don't move. Drawn as connected line segments through the
+  exact same bearing/distance → `scope_xy()` pipeline every other scope
+  element uses, so it tracks correctly if the configured home ever moves.
+  **Static and location-specific on purpose** — if the home ever relocates
+  somewhere the Atlantic isn't nearby, this needs manual re-extraction,
+  same expectation as re-picking the home airport after a move.
+
   **Controls — the two modes now use DIFFERENT bindings, noted honestly
   rather than glossed over**:
   - **Flights** (updated 2026-08-02): `rotate` — the hardware's actual
