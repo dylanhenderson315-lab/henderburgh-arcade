@@ -410,6 +410,48 @@ def _fetch_win_prob(league, event_id):
 
 
 
+def _fetch_home_run_plays(league, event_id):
+    """MLB home-run plays from a game's play-by-play, or [] for anything
+    else. Returns a list of {"id": str, "text": str}, text already
+    paneltext.panel_text()-folded (this is the I/O boundary -- see
+    paneltext.py's docstring on why the fold belongs here, not in the
+    caller).
+
+    Confirmed live against a real finished game before writing this: each
+    scoring play carries `scoringPlay: bool` and `alternativeType.text`,
+    which is the literal string "Home Run" (plus distance) for a home run
+    -- other scoring plays seen the same day were "Single", "Double",
+    "Sacrifice Fly", none of which should trigger a celebration. Same
+    per-game summary endpoint _fetch_win_prob() already uses -- deliberately
+    NOT a new endpoint, so the request-volume discipline (only the pinned
+    favorite's own LIVE game, see the caller in engines.py) is the only
+    thing standing between this and the per-league-poll volume risk
+    CLAUDE.md already flags twice.
+    """
+    if league != "MLB":
+        return []
+    path = LEAGUE_PATHS[league]
+    data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))
+    plays = data.get("plays")
+    if not isinstance(plays, list):
+        return []
+    out = []
+    for p in plays:
+        if not p.get("scoringPlay"):
+            continue
+        alt_type = p.get("alternativeType") or {}
+        if alt_type.get("text") != "Home Run":
+            continue
+        pid = p.get("id") or p.get("playId")
+        if pid is None:
+            continue
+        out.append({
+            "id": str(pid),
+            "text": paneltext.panel_text(p.get("text") or ""),
+        })
+    return out
+
+
 def _fetch_key_events(league, event_id):
     """One soccer match's play-by-play event log (goals, cards, subs,
     kickoff/halftime/regulation-end markers...) from the summary

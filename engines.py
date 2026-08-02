@@ -5463,6 +5463,11 @@ class SportsEngine(Browsable):
         # unclaimed sport contributes nothing and that is correct, not a
         # gap to fill generically).
         self._pending_big_moment = None
+        # Seen-play cursor for _detect_mlb_home_run() -- same one-shot
+        # idiom as GameDayEngine._seen_done. None until the first read
+        # adopts a baseline, so a game already in progress can't replay
+        # its earlier home runs the moment the mode is opened.
+        self._seen_home_runs = None
         # State for _detect_soccer_goal -- the per-game "seen" set, keyed
         # off the currently-watched event_id so a game change starts
         # clean instead of replaying goals already shown (same reasoning
@@ -6579,6 +6584,53 @@ class SportsEngine(Browsable):
                 fn(self)
             except Exception:                    # noqa: BLE001 - never break sports mode
                 pass
+
+
+    def _detect_mlb_home_run(self):
+        """MLB home-run detector -- first real plug-in for BIG_MOMENT_DETECTORS.
+
+        Scoped EXACTLY like sports._fetch_win_prob(): only the pinned
+        favorite's own game, and only while it is genuinely `state == "in"`
+        -- never the whole universal feed. That is the same narrow scope
+        CLAUDE.md's ESPN request-volume section requires for any new
+        per-game polling; see sports._fetch_home_run_plays()'s own
+        docstring for the payload facts (scoringPlay + alternativeType.text
+        == "Home Run", confirmed live).
+
+        Seen-play tracking lives on THIS instance (`_seen_home_runs`), same
+        one-shot idiom as GameDayEngine's `_seen_done` for MMA finishes:
+        the first read adopts the current set without firing (a game
+        already in progress when the mode is opened must not replay every
+        earlier home run), and only IDs not in that set are new.
+        """
+        favorite = self.data.get("favorite")
+        fg = self.data.get("favorite_game")
+        if not favorite or favorite.get("league") != "MLB":
+            return
+        if not fg or fg.get("state") != "in":
+            return
+        event_id = fg.get("event_id")
+        if not event_id:
+            return
+        hrs = sports._fetch_home_run_plays("MLB", event_id)
+        ids = {h["id"] for h in hrs}
+        if self._seen_home_runs is None:
+            self._seen_home_runs = ids           # first read: adopt, don't replay
+            return
+        new_ids = ids - self._seen_home_runs
+        self._seen_home_runs = ids
+        if not new_ids:
+            return
+        # Only the most recent new one matters -- _set_big_moment is a
+        # one-slot queue anyway, so firing on more than one would just
+        # overwrite itself.
+        newest = max((h for h in hrs if h["id"] in new_ids), key=lambda h: h["id"])
+        home, away = fg["home"], fg["away"]
+        line1 = f"{away['abbr']} {away['score']}, {home['abbr']} {home['score']}"
+        color = home.get("color") or away.get("color") or (255, 200, 40)
+        self._set_big_moment("HOME RUN", line1, newest["text"], color)
+
+    BIG_MOMENT_DETECTORS["mlb_hr"] = _detect_mlb_home_run
 
     def _frame_event_detail(self, ev):
         fn = self.SPORT_DETAIL_RENDERERS.get(ev.get("sport"))
