@@ -732,6 +732,124 @@ def draw_alert_frame(alert, ticks, place="", n_alerts=1, cur_alert=0):
     return bytes(buf)
 
 
+# =============================================================================
+# BIG-MOMENT CELEBRATION -- a full-panel graphic for a sports mode to fire
+# when something genuinely notable just happened (home run, goal, finish,
+# buzzer-beater...). Lives here, not in sports.py/mma.py, because it is
+# SHARED across every sport that can trigger it -- one graphic, one feel,
+# same reasoning as draw_alert_frame being one severe-weather treatment
+# shared by WeatherEngine and the global takeover rather than each mode
+# inventing its own.
+#
+# CONTRACT: any engine that can fire a celebration implements
+# `pop_big_moment()`, returning either None or a dict:
+#   {"kind": str, "line1": str, "line2": str, "color": (r,g,b)}
+# `kind`/`line1`/`line2` must already be paneltext.panel_text()-folded by
+# the producing engine -- this module draws them as-is, same rule as every
+# other externally-sourced string in the project. `color` is the accent to
+# burst with; pass the team/fighter's real color when one exists (same
+# "real hue, not invented" rule as _hex_to_rgb's brightness floor), or a
+# neutral warm gold when there isn't one (golf, MMA).
+#
+# `pop_big_moment()` is a POP, not a peek: calling it consumes the moment,
+# so a caller that polls every tick fires the celebration exactly once per
+# real event, the same one-shot idiom Pulse uses for "never flash on the
+# first value seen" (here: never re-fire on every subsequent read).
+#
+# ORIGINAL DESIGN, DELIBERATELY NOT A BROADCAST RECREATION. No league
+# logo, no referee signal, no copied graphic package -- an expanding
+# radial burst + rotating sunburst rays + an impact-frame white flash on
+# the first few ticks, which reads as "something exciting happened"
+# without reproducing anything trademarked. Reuses Pulse's blink-not-hold
+# philosophy (motion reads as an event, a static color reads as a choice)
+# scaled up to fill the whole panel, closer to GAME DAY's RESULT view
+# drama than to sports' routine scoring flash.
+# =============================================================================
+CELEBRATION_TICKS = 90     # ~4.5s at ambient's 0.05s tick rate
+_CX, _CY = WIDTH // 2, WIDTH // 2 - 2   # burst center, nudged up for text room
+
+
+def _burst_ring(buf, t, radius, color, n=28, phase=0.0):
+    """One ring of points around (_CX, _CY) -- cheap (no fill), and a few
+    of these at staggered radii is what reads as an expanding shockwave."""
+    for i in range(n):
+        a = phase + (2 * math.pi * i) / n
+        x = int(_CX + radius * math.cos(a))
+        y = int(_CY + radius * math.sin(a) * 0.92)   # slight squash: panel isn't square-safe at the edges
+        put_px(buf, x, y, color)
+
+
+def _sunburst_rays(buf, t, color, n=10):
+    """Rotating rays from center to edge -- the "energy" backdrop behind
+    the rings, distinct enough from a plain radial gradient to read as
+    deliberately drawn rather than a blur."""
+    rot = t * 0.12
+    for i in range(n):
+        a = rot + (2 * math.pi * i) / n
+        dx, dy = math.cos(a), math.sin(a)
+        for r in range(4, 30, 2):
+            x = int(_CX + dx * r)
+            y = int(_CY + dy * r)
+            if 0 <= x < WIDTH and 0 <= y < HEIGHT:
+                fade = max(0.15, 1.0 - r / 34.0)
+                put_px(buf, x, y, tuple(int(c * fade) for c in color))
+
+
+def draw_celebration(buf, t, moment, total=CELEBRATION_TICKS):
+    """One frame of the big-moment celebration. `t` counts UP from 0 at
+    the moment it fired; `moment` is whatever pop_big_moment() returned."""
+    fill(buf, (0, 0, 0))
+    color = moment.get("color") or (255, 200, 40)
+
+    # Impact frame: a near-white flash on the first two ticks, the same
+    # "hit" beat a real broadcast graphic uses before settling into its
+    # sustained look -- done here with plain brightness, not a copied
+    # asset.
+    if t < 2:
+        fill(buf, tuple(min(255, int(c * 0.6 + 90)) for c in color))
+
+    _sunburst_rays(buf, t, color)
+
+    # Three rings at staggered radii/phases so they don't read as one
+    # blob -- each expands and wraps, giving continuous outward motion
+    # for the whole hold rather than a single pulse that goes static.
+    for k in range(3):
+        radius = ((t * 1.6 + k * 11) % 34) + 3
+        ring_color = tuple(int(c * (1.0 - 0.4 * (k / 3))) for c in color)
+        _burst_ring(buf, t, radius, ring_color, phase=k * 1.9)
+
+    # Dark plate behind the text so it stays legible over the burst --
+    # same reasoning as any header's contrast treatment elsewhere in this
+    # project, just centered instead of top-anchored.
+    kind = str(moment.get("kind") or "")
+    line1 = str(moment.get("line1") or "")
+    line2 = str(moment.get("line2") or "")
+    lines = [ln for ln in (kind, line1, line2) if ln]
+    block_h = len(lines) * 8
+    y0 = _CY - block_h // 2 + 4
+    for y in range(max(0, y0 - 2), min(HEIGHT, y0 + block_h + 2)):
+        for x in range(WIDTH):
+            cur = buf[(y * WIDTH + x) * 3:(y * WIDTH + x) * 3 + 3]
+            put_px(buf, x, y, tuple(int(c * 0.28) for c in cur))
+
+    # Kind (e.g. "HOME RUN") flashes white/color like Pulse; the two
+    # detail lines hold steady so the moment stays readable while it
+    # celebrates.
+    flash = (t // 3) % 2 == 0
+    kind_color = (255, 255, 255) if flash else color
+    y = y0
+    if kind:
+        draw_text_centered(buf, y, fit_text(kind, WIDTH - 6, scale=1), kind_color)
+        y += 8
+    if line1:
+        draw_text_centered(buf, y, fit_text(line1, WIDTH - 6), (235, 238, 245))
+        y += 8
+    if line2:
+        draw_text_centered(buf, y, fit_text(line2, WIDTH - 6), (170, 178, 195))
+
+    return bytes(buf)
+
+
 def draw_marquee(buf, y, text, color, scroll, scale=1, gap="   "):
     """Seamless looping scroller -- the shared tape used by every ticker
     mode. Draws two copies so the wrap has no visible seam."""
@@ -5331,6 +5449,16 @@ class SportsEngine(Browsable):
         self._last_away_score = None
         self._last_event_id = None
         self.score_flash = 0
+        # BIG-MOMENT queue -- see draw_celebration()'s module docstring for
+        # the shared contract. Per-sport detection (HR, goal, finish,
+        # buzzer-beater...) calls _set_big_moment() from within tick(); this
+        # engine only owns the one-slot queue and the pop, not any
+        # detection logic. Detection is per-sport and lives in whichever
+        # per-sport tick/parse path already has the data (same split as
+        # SPORT_RENDERERS/SPORT_DETAIL_RENDERERS -- a sport opts in, an
+        # unclaimed sport contributes nothing and that is correct, not a
+        # gap to fill generically).
+        self._pending_big_moment = None
 
     # ---- input -----------------------------------------------------------
     def has_content(self):
@@ -5338,6 +5466,26 @@ class SportsEngine(Browsable):
         ESPN is featuring, so this is only empty when genuinely nothing is
         happening, not merely when the configured leagues are off-season."""
         return bool(self.universal or self.data.get("games"))
+
+    def pop_big_moment(self):
+        """Consumed by AmbientEngine's celebration interrupt -- see
+        draw_celebration()'s module docstring in the shared section above
+        for the full contract. One-slot queue: a second moment arriving
+        before this is popped simply overwrites the first rather than
+        queuing, since by the time anyone reads it only the most recent
+        real event matters."""
+        m, self._pending_big_moment = self._pending_big_moment, None
+        return m
+
+    def _set_big_moment(self, kind, line1, line2="", color=None):
+        """Called by per-sport detection in tick() -- the one write path
+        into the queue pop_big_moment() reads. `kind`/`line1`/`line2` must
+        already be paneltext.panel_text()-folded by the caller, same as
+        every other externally-sourced string this engine draws."""
+        self._pending_big_moment = {
+            "kind": kind, "line1": line1, "line2": line2,
+            "color": color or (255, 200, 40),
+        }
 
     PANEL_TEAM = "team"
     PANEL_GOLF = "golf"
@@ -7460,6 +7608,13 @@ class AmbientEngine(Browsable):
         self.cycling = True
         self._trans_from = None
         self._trans_i = 0
+        # BIG-MOMENT CELEBRATION state. Lives here, not on any sub-engine,
+        # because the interrupt is an AMBIENT behaviour -- manual browsing
+        # of the sports mode keeps its own routine scoring flash (Pulse)
+        # and never sees this. See draw_celebration()'s module docstring
+        # for the shared contract every sport plugs into.
+        self._celebration = None
+        self._celebration_t = 0
         self._init_scroll()
 
     @property
@@ -7535,6 +7690,33 @@ class AmbientEngine(Browsable):
         for e in self.engines.values():
             e.tick()                   # keeps every feed warm; see class docstring
 
+        # BIG-MOMENT CELEBRATION. Checked every tick regardless of which
+        # sub-mode is currently showing -- a home run should interrupt the
+        # news ticker exactly as readily as it interrupts a quiet sports
+        # screen, same "the moment finds you" idea as the severe-weather
+        # takeover, just scoped to ambient instead of every mode (severe
+        # weather already outranks this for free: it is composited by
+        # arcade_server AFTER this engine's frame() runs, so an alert
+        # covers a celebration exactly as it covers anything else).
+        #
+        # Priority within ambient: an active celebration is NOT interrupted
+        # by a second moment firing mid-hold -- the queued one is simply
+        # dropped (pop_big_moment() already consumed it). A missed
+        # celebration is a fair trade for never stacking or truncating one
+        # that's already playing.
+        if self._celebration_t <= 0:
+            for e in self.engines.values():
+                pop = getattr(e, "pop_big_moment", None)
+                moment = pop() if callable(pop) else None
+                if moment:
+                    self._celebration = moment
+                    self._celebration_t = CELEBRATION_TICKS
+                    break
+        else:
+            self._celebration_t -= 1
+            if self._celebration_t <= 0:
+                self._celebration = None
+
         avail = self._available()
         if not avail:
             return                     # nothing anywhere yet; the frame() shows why
@@ -7546,7 +7728,10 @@ class AmbientEngine(Browsable):
             self._advance(1)
             self.hold = 0
 
-        if self.cycling and len(avail) > 1 and self.browse.auto_ok:
+        # Dwell timing PAUSES during a celebration -- it is a full-panel
+        # interrupt, not a sub-mode taking its normal turn, so it must not
+        # eat into whatever mode's dwell was in progress when it fired.
+        if self._celebration_t <= 0 and self.cycling and len(avail) > 1 and self.browse.auto_ok:
             self.hold += 1
             if self.hold >= self._dwell_for(self.current):
                 self.hold = 0
@@ -7556,6 +7741,10 @@ class AmbientEngine(Browsable):
 
     # ---- render --------------------------------------------------------
     def frame(self):
+        if self._celebration_t > 0:
+            elapsed = CELEBRATION_TICKS - self._celebration_t
+            return draw_celebration(blank(), elapsed, self._celebration)
+
         avail = self._available()
         if not avail:
             # Fall back to the clock rather than a "NO DATA YET" screen.

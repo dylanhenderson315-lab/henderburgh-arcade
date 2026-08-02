@@ -916,6 +916,74 @@ when adding one.
 | tennis | not started — still no live match as of 2026-08-01. **Confirmed real**: header events carry `linescores`, one entry per SET with `value`/`displayValue`/`period`/`winner` (checked against a real finished match, J. Pegula d. D. Shnaider 7-5 6-4) — this is the field the set-by-set grid needs, but it has not been rendered against a LIVE match, only a finished one glimpsed while checking the shape |
 | golf | **done** — 6-row leaderboard, movement arrows (sign verified: negative = climbed the leaderboard) |
 
+### Big-moment celebration — SHARED INFRASTRUCTURE done, per-sport detection IN PROGRESS (started 2026-08-02)
+
+**What**: a full-panel graphic that interrupts `ambient` when something
+genuinely notable happens in a live game the sports engine is tracking —
+home run, goal, MMA finish, buzzer-beater, etc. Built as two pieces,
+deliberately in this order, because every per-sport detector plugs into
+the same graphic and interrupt mechanism — building those twice per sport
+in parallel would have been exactly the kind of collision the shared-first
+ordering exists to avoid.
+
+**1. `draw_celebration()` (`engines.py`, module level, next to
+`draw_alert_frame`)** — original design, not a broadcast recreation: an
+impact-frame white flash on the first two ticks, rotating sunburst rays,
+three staggered expanding rings, and a centered text block (kind/line1/
+line2) on a dimmed plate for legibility. No league logo, no referee
+signal, nothing trademarked. `CELEBRATION_TICKS = 90` (~4.5s at ambient's
+0.05s tick rate). Verified by rendering frames to PNG at t=1/20/45/89 and
+by running it through `render_audit.py`'s instrumented `put_px`/
+`draw_text3x5` directly (0 dropped chars, 0 overflow, decorative ring/ray
+overshoot off-panel is expected and harmless — same class of exemption as
+marquee edge-drawing).
+
+**2. The contract every sport plugs into** — `pop_big_moment()` /
+`_set_big_moment()` on `SportsEngine`, a one-slot queue (a second moment
+before the first is popped overwrites it rather than queuing — only the
+most recent real event matters by the time anyone reads it). A moment is
+`{"kind", "line1", "line2", "color"}`, all three text fields already
+`paneltext.panel_text()`-folded by whichever per-sport detector calls
+`_set_big_moment()`. **Detection itself is deliberately NOT part of this
+shared layer** — same split as `SPORT_RENDERERS`: a sport opts in from
+inside its own tick/parse path, an unclaimed sport contributes nothing.
+
+**3. `AmbientEngine`'s interrupt** — checked every tick regardless of
+which sub-mode is showing (a home run interrupts the news ticker exactly
+as readily as a quiet sports screen). Severe weather still outranks it
+for free: `arcade_server` composites the global alert takeover *after*
+`AmbientEngine.frame()` runs, so an alert covers a celebration exactly
+like it covers anything else — no new precedence code needed. Dwell
+timing **pauses** during a celebration (`self.hold` does not advance)
+so it can't eat into whichever sub-mode's turn was in progress. **Does
+NOT fire for manual sports browsing** — `draw_celebration()` is only
+ever called from `AmbientEngine.frame()`, never from `SportsEngine`
+itself; confirmed by grep, not just intent.
+
+Verified: fires once on `_set_big_moment()`, `hold` stays paused for the
+full 90-tick hold, clears itself and resumes normal dwell after, second
+call after consumption returns `None` (no double-fire). Both
+`render_audit.py` and `fold_audit.py` re-run clean across the whole
+project after this change (0 modes failed, 0 feeds not folding).
+
+**Not yet live-verified against real hardware, deliberately**: there is
+no real detector wired in yet, so pushing a fabricated celebration to the
+live panel would be exactly the kind of synthesized-data check the
+project's "never invent" rule exists to prevent. The first real per-sport
+trigger (MLB, most likely) is what proves this live, not a synthetic
+push — verify it then, not now.
+
+**Per-sport detectors, in the audited priority order (MLB → soccer →
+WNBA → golf → MMA; tennis/football blocked, no data)** — see the
+sports-coverage section above for what each sport's live payload actually
+exposes (MLB's `scoringPlay`+`alternativeType.text`, soccer's
+`keyEvents`, WNBA's `plays[]`, golf's existing `golfer_move()`, MMA's
+type-ID reconstruction). Cost discipline: any new per-game polling for
+scoring-play detail must reuse the SAME narrow scope win-probability
+already uses — only the pinned favorite's own live game, never every game
+in a league — or it reopens the ESPN request-volume risk this project has
+already had to mitigate twice.
+
 ### Per-sport EXPANDED-DETAIL renderers (started 2026-08-01)
 
 **Why, and why it's a SEPARATE follow-up rather than part of the main-
