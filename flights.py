@@ -216,9 +216,37 @@ def _ident(ac):
 # live data over a 250nm sample (213 aircraft): A3 large 154, A1 light 23,
 # A2 small 16, A5 heavy 11, A7 rotorcraft 6, A4 high-vortex 1, B2 1.
 # Nothing here is guessed -- every category used below was observed.
+CAT_LIGHT = "A1"          # <15,500 lb: typical piston/small GA
+CAT_SMALL = "A2"          # 15,500-75,000 lb
+CAT_LARGE = "A3"          # 75,000-300,000 lb: the bulk of real airliner traffic
+CAT_HIGH_VORTEX = "A4"    # large aircraft with a high-vortex wake (e.g. 757-class)
 CAT_HEAVY = "A5"          # >300,000 lb: the wide-bodies
 CAT_ROTOR = "A7"
 CAT_LIGHTER_THAN_AIR = "B2"
+
+# Real ICAO type designators for common business jets -- used to tell a
+# bizjet apart from a piston/light GA aircraft on the radar scope, since
+# BOTH share the same emitter category (A1 light or A2 small; nothing in
+# the ADS-B category spec itself distinguishes them). Reference data, same
+# category as ICAO_TYPE_NAMES below, but with an HONEST GAP that table
+# doesn't have: this list is built from general real-world ICAO type-
+# designator knowledge, NOT (yet) verified against an actual locally-
+# observed sample the way ICAO_TYPE_NAMES was (no bizjet happened to be in
+# range during this feature's build). Treat as a real but unconfirmed-
+# locally reference table -- worth pruning/extending once real bizjet
+# traffic near MYR is actually seen, same "confirm before trusting"
+# standard the rest of this project holds itself to.
+BIZJET_TYPES = {
+    "C25A", "C25B", "C25C", "C500", "C510", "C525", "C550", "C560", "C56X",
+    "C650", "C680", "C68A", "C700", "C750",             # Cessna Citation family
+    "GLF4", "GLF5", "GLF6", "G150", "G200", "G280",     # Gulfstream
+    "LJ35", "LJ40", "LJ45", "LJ60", "LJ75",             # Learjet
+    "FA7X", "FA8X", "F2TH", "F900",                     # Dassault Falcon
+    "E50P", "E55P",                                      # Embraer Phenom
+    "CL30", "CL35", "CL60",                              # Challenger
+    "H25B", "HA4T",                                      # Hawker
+    "PC24",                                               # Pilatus PC-24
+}
 # Tags are kept to 7 characters because draw_header fits its right tag to
 # 30px (7 glyphs) and SILENTLY truncates past that -- "HELICOPTER" became
 # "HELICOP" on the panel. Caught by rendering the badges, not by reading
@@ -391,6 +419,13 @@ def _fetch_positions(lat, lon):
             # not for display -- `ident` is still what's shown on screen.
             "hex": (ac.get("hex") or "").strip().upper() or None,
             "callsign": (ac.get("flight") or "").strip(),
+            # Real ADS-B emitter category (A1 light .. A7 rotorcraft, B2
+            # lighter-than-air -- see the CAT_* constants above). Was
+            # already being read for _notable() but discarded before
+            # reaching the engine; the scope's icon classification needs
+            # it too, same "don't recompute what's already in the real
+            # payload" reasoning as everything else here.
+            "category": str(ac.get("category") or ""),
             "type": (ac.get("t") or "").strip(),
             "alt_ft": alt,
             "gs_kt": ac.get("gs"),

@@ -1007,6 +1007,108 @@ def draw_scope_target(buf, x, y, color, glow=1.0, big=False):
         put_px(buf, xi, yi + 1, dim)
 
 
+# PART 3 -- real, INTUITIVE aircraft icons on the flight radar scope,
+# replacing the plain dot every target used to draw. Not decorative: each
+# shape is chosen so the KIND of traffic is readable from the icon alone,
+# oriented to real heading (`track_deg`) the same rotation math
+# `FlightEngine._draw_plane_icon` already uses for the DETAIL card, just
+# scaled down to what a 46px-diameter scope can actually resolve.
+#
+# HONEST CONSTRAINT, stated rather than glossed over: at this pixel
+# density (up to 8 real aircraft inside a 23px radius), four visually
+# DISTINCT heading-oriented silhouettes is optimistic -- a business jet's
+# narrower dart and an airliner's wider one are a real, deliberate
+# difference in the pixel offsets below, but at 1:1 LED pixel scale they
+# will often read as "a small pointed shape" to a human eye rather than
+# unmistakably different aircraft classes. The helicopter and the plain
+# GA dash are the two shapes that stay unmistakable at this scale (one
+# has no heading-oriented wings at all, the other is a rotor disk, not a
+# dart) -- those two carry the real weight of "readable at a glance".
+SCOPE_ICON_HELI = "HELI"
+SCOPE_ICON_AIRLINER = "AIRLINER"
+SCOPE_ICON_BIZJET = "BIZJET"
+SCOPE_ICON_GA = "GA"
+
+
+def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, big=False):
+    """One aircraft blip, shaped by `kind` (one of the SCOPE_ICON_*
+    constants) and rotated to `heading_deg` (real ADS-B track, not
+    guessed) using the identical fwd/right rotation convention
+    `FlightEngine._draw_plane_icon` uses for the DETAIL card -- one
+    rotation math, two scales, not two independently-invented ones.
+    `heading_deg is None` falls back to a fixed "up" orientation rather
+    than an uncertainty ring (unlike the DETAIL icon): at 1-2px spread,
+    a dim ring around a target this small would read as clutter, not
+    signal, and the DETAIL card already carries the honest
+    heading-unknown treatment for whichever aircraft is actually
+    selected.
+    """
+    col = (int(color[0] * glow), int(color[1] * glow), int(color[2] * glow))
+    theta = math.radians(heading_deg if heading_deg is not None else 0.0)
+    fwd = (math.sin(theta), -math.cos(theta))
+    right = (math.cos(theta), math.sin(theta))
+
+    def pt(fx, fy):
+        return (x + fx * fwd[0] + fy * right[0], y + fx * fwd[1] + fy * right[1])
+
+    def dot(p):
+        put_px(buf, int(round(p[0])), int(round(p[1])), col)
+
+    scale = 1.3 if big else 1.0
+
+    if kind == SCOPE_ICON_HELI:
+        # A rotor disk from above (a small ring around the mark, NOT
+        # heading-oriented -- a hovering/slow helicopter's rotor reads
+        # the same from any angle) plus a short tail-boom stub that IS
+        # heading-oriented, so it still shows which way it's pointed.
+        # The one shape here that owes nothing to the dart family --
+        # deliberately, so it can never be mistaken for a fixed-wing
+        # aircraft at a glance.
+        xi, yi = int(round(x)), int(round(y))
+        put_px(buf, xi, yi, col)
+        for dx, dy in ((2, 0), (-2, 0), (0, 2), (0, -2)):
+            put_px(buf, xi + dx, yi + dy, col)
+        dot(pt(-3.0 * scale, 0))
+    elif kind == SCOPE_ICON_GA:
+        # No wings drawn at all -- the honest way to say "small" at this
+        # resolution is less ink, not a shrunk copy of the airliner dart.
+        # A short heading-oriented line: nose, centre, tail.
+        dot(pt(1.6 * scale, 0))
+        dot(pt(0, 0))
+        dot(pt(-1.6 * scale, 0))
+    else:
+        # AIRLINER / BIZJET -- a small heading-oriented dart. The two
+        # differ only in how far the "wings" flare from the centreline
+        # (BIZJET narrower, AIRLINER wider) -- see the honesty note
+        # above on how reliably that reads at 1px.
+        spread = 1.7 if kind == SCOPE_ICON_AIRLINER else 1.0
+        dot(pt(2.0 * scale, 0))
+        dot(pt(0, 0))
+        dot(pt(-1.1 * scale, -spread * scale))
+        dot(pt(-1.1 * scale, spread * scale))
+
+
+def draw_scope_airport(buf, x, y, color, glow=1.0):
+    """A small runway-strip glyph -- two parallel end-cap ticks joined by
+    a short bar, unmistakably 'a landing strip' rather than a generic
+    plus/waypoint mark. Deliberately NOT oriented to the airport's real
+    runway heading: `flights.load_airport()`/`location_config.json`
+    store only lat/lon/name, no runway bearing, and hardcoding one real
+    airport's heading (MYR's is genuinely 18/36, confirmed by a real ATC
+    transmission captured this same session -- 'RUNWAY 18V ALPHA') would
+    be silently WRONG the moment the configured home airport changes to
+    a different one. A canonical vertical orientation is an honest
+    generic 'this is a runway' glyph, not a claimed real bearing this
+    project doesn't actually have on file."""
+    col = (int(color[0] * glow), int(color[1] * glow), int(color[2] * glow))
+    xi, yi = int(round(x)), int(round(y))
+    for dy in (-2, -1, 0, 1, 2):
+        put_px(buf, xi, yi + dy, col)
+    for dx in (-1, 1):
+        put_px(buf, xi + dx, yi - 2, col)
+        put_px(buf, xi + dx, yi + 2, col)
+
+
 def draw_scope_home(buf, color=(235, 242, 255), cx=SCOPE_CX, cy=SCOPE_CY):
     """Home at the centre -- a small diamond, distinct in SHAPE from every
     target mark so it reads as 'you are here' rather than 'another blip'."""
@@ -5400,6 +5502,31 @@ class FlightEngine(Browsable):
                 return color
         return cls.ALT_HIGH_COLOR
 
+    @staticmethod
+    def _ac_kind(ac):
+        """Which scope icon this real aircraft gets -- from its real
+        ADS-B emitter category (flights.CAT_*), plus real ICAO type
+        designator to split GA from a business jet WHERE that's
+        actually knowable (see flights.BIZJET_TYPES's own honesty note:
+        both share the same category, so type is the only real signal
+        that can tell them apart, and type isn't always broadcast)."""
+        cat = ac.get("category") or ""
+        if cat == flights.CAT_ROTOR:
+            return SCOPE_ICON_HELI
+        if cat in (flights.CAT_LARGE, flights.CAT_HIGH_VORTEX, flights.CAT_HEAVY):
+            return SCOPE_ICON_AIRLINER
+        if cat in (flights.CAT_LIGHT, flights.CAT_SMALL):
+            t = (ac.get("type") or "").strip().upper()
+            if t in flights.BIZJET_TYPES:
+                return SCOPE_ICON_BIZJET
+            return SCOPE_ICON_GA
+        # No/unknown category (real, happens) -- default to the airliner
+        # dart rather than guessing GA or heli specifically; most real
+        # traffic this project has observed IS category A3 large, so
+        # this default is the statistically honest fallback, not an
+        # arbitrary one (see flights.py's own 213-aircraft sample note).
+        return SCOPE_ICON_AIRLINER
+
     def __init__(self):
         self.score = 0
         self.reset()
@@ -5849,11 +5976,12 @@ class FlightEngine(Browsable):
                 # PART 2: the airport is a genuinely selectable target
                 # now (see AIRPORT_KEY/_step), not just a drawn marker --
                 # it gets the same white "selected" treatment an
-                # aircraft does when it's the current sel_key.
+                # aircraft does when it's the current sel_key. PART 3:
+                # a runway glyph instead of a generic plus, see
+                # draw_scope_airport()'s own docstring.
                 port_sel = (self.sel_key == self.AIRPORT_KEY)
                 port_col = (255, 255, 255) if port_sel else self.ROUTE
-                draw_scope_target(buf, x, y, port_col,
-                                  glow=scope_glow(brg, self.sweep), big=True)
+                draw_scope_airport(buf, x, y, port_col, glow=scope_glow(brg, self.sweep))
 
         for ac in aircraft:
             frac = self._scope_r_frac(ac.get("dist_nm"))
@@ -5875,8 +6003,12 @@ class FlightEngine(Browsable):
             # keeps drawing regardless of match status.
             matched = ac.get("ident") and ac["ident"] == self.atc_match_ident
             mark_col = self.ATC_MATCH if matched else ((255, 255, 255) if sel else col)
-            draw_scope_target(buf, x, y, mark_col,
-                              glow=scope_glow(brg, self.sweep), big=(sel or matched))
+            # PART 3: a real, heading-oriented icon instead of a plain
+            # dot -- see draw_scope_aircraft()'s own honesty note on how
+            # distinctly each kind actually reads at this pixel density.
+            kind = self._ac_kind(ac)
+            draw_scope_aircraft(buf, x, y, ac.get("track_deg"), kind, mark_col,
+                                glow=scope_glow(brg, self.sweep), big=(sel or matched))
 
         draw_scope_home(buf)
         # Tried an alternating text legend ("<>=HOME +=MYR") same session,
