@@ -92,23 +92,46 @@ class AtcLogFeed:
     def __init__(self):
         self._lock = threading.Lock()
         self._entries = []       # newest-first
-        self._last_read = 0.0
+        self._last_refresh_try = 0.0   # when _refresh() last actually RAN
         self._last_mtime = None
 
     def get(self):
         """Every entry currently in the log, newest first. Never blocks;
         never invents an entry -- an unreadable/missing/corrupt file is
-        an empty list, not a guess."""
+        an empty list, not a guess.
+
+        REAL BUG, FOUND ON THE LIVE PANEL, NOT IN A UNIT TEST: this used
+        to track a single `_last_read` timestamp, bumped on every call to
+        get(). On an engine ticking every 0.05s, get() is called every
+        0.05s too, so `now - _last_read` was ALWAYS ~0.05s -- it could
+        never accumulate to REFRESH's 2.0s, because the timestamp being
+        compared against was itself being reset by the very call doing
+        the comparing. The throttle never elapsed after the very first
+        read, so the live panel showed the SAME first-ever entry for
+        14+ real minutes while the file kept growing underneath it --
+        every standalone test (a fresh short-lived process, get() called
+        only a few times seconds apart) read fresh data every time and
+        never exposed it. Fixed the same way flights.py's FlightFeed
+        already does it correctly: a SEPARATE `_last_refresh_try` that is
+        only touched by the refresh path itself, never by the read path.
+        """
         now = time.time()
         with self._lock:
-            due = now - self._last_read >= self.REFRESH
+            due = now - self._last_refresh_try >= self.REFRESH
         if due:
             self._refresh()
         with self._lock:
-            self._last_read = now
             return list(self._entries)
 
     def _refresh(self):
+        # Set UNCONDITIONALLY, on every path out of this method (even the
+        # early-return ones) -- this is the timestamp get()'s throttle
+        # checks, and it must reflect "a refresh attempt happened", not
+        # "a refresh attempt happened AND found new content", or a
+        # missing/unchanged file would retry every single call instead
+        # of respecting REFRESH.
+        with self._lock:
+            self._last_refresh_try = time.time()
         if not LOG_PATH.exists():
             with self._lock:
                 self._entries = []
