@@ -263,11 +263,34 @@ appends them to the menu automatically.
   UPCOMING/OVERHEAD-NOW pair is untouched and still selects itself from
   whether a pass is happening. An **actual overhead pass outranks the dome
   and pins the view to it**: that is the go-outside moment the mode exists
-  for, and the new scope must never be able to interrupt it. `has_content()`
-  is deliberately unchanged, so the dome does not alter when the mode
-  appears in ambient. Sunlit objects render bright, shadowed ones
-  present-but-dim (above the horizon but genuinely not visible), the ISS
-  keeps its badge tint and a larger mark.
+  for, and the new scope must never be able to interrupt it.
+
+  **`has_content()` UPDATED 2026-08-02** to also count real objects
+  genuinely visible right now, independent of whether the predictor has
+  anything QUEUED next — a clear night with several bright objects
+  currently crossing the sky but nothing predicted soon previously could
+  never surface the dome in ambient at all, withholding one of the best
+  visuals in the project exactly when it would land. Uses `sky_now()`'s
+  `visible` flag (elevation + sunlit + observer darkness, the same
+  three-part test `predict()` already uses), **never the raw above-
+  horizon list** — confirmed live that 8–14 objects sit above the horizon
+  in broad daylight with `visible` correctly `False` for all of them; the
+  raw list would have made the dome claim content nearly around the
+  clock. Verified against real orbital data at a real nighttime instant
+  (not fabricated): 2 real objects visible with zero queued passes ->
+  `has_content()` now `True`, was `False` before this change.
+
+  **A second bug was found and fixed by actually rendering the new
+  scenario, not by inspection**: `tick()`'s view stayed pinned to
+  VIEW_PASSES (nothing to draw for an empty pass list) even once
+  `has_content()` said yes, so `frame()` would have shown "NO VISIBLE
+  PASSES" instead of the dome it just claimed to have. `tick()` now
+  forces `VIEW_SCOPE` when passes are empty but something is genuinely
+  visible. Dome target coloring also switched from `sunlit` to `visible`
+  for the same daylight-false-positive reason — a sunlit object at noon
+  now renders dim, not bright, matching what a person outside would
+  actually see. The ISS keeps its badge tint and a larger mark
+  regardless.
 
   **Controls**: `up`/`down` toggles scope ↔ detail in both modes. Both
   engines are `VERTICAL_BROWSE = False`, so `Browsable._axis()` leaves
