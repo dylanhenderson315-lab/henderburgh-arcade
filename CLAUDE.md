@@ -348,6 +348,74 @@ appends them to the menu automatically.
     because `left="-"`/`right="24MI NE"` skews the true gap well off
     panel-centre. Now centred within the actual gap the check measured.
 
+  **ATC transcription log — PERSONAL-RIG-ONLY, phase 1 (transcription
+  process) done and verified live 2026-08-02.** Concept: selecting an
+  aircraft on the scope and pressing select twice (past the detail card)
+  opens a timestamped log of real ATC transmissions. Feasibility was
+  investigated FIRST, no code, against five specific questions before any
+  commitment — full writeup and the answers are in the session this was
+  built in; the short version below is what shaped the build.
+
+  - **PERSONAL-RIG-ONLY, not a maybe.** LiveATC.net's own current terms
+    (confirmed live): *"Audio streams may not be used in any third-party
+    products."* Transcribing to text doesn't launder that clause — see
+    `PRODUCTION.md`'s matching exclusion note, which this doc and that one
+    must stay in sync on. Same category of restriction as the flight
+    tracker's plane icon deliberately not being a real airline logo, just
+    a data-source restriction instead of an IP one.
+  - **A genuinely separate OS PROCESS** (`atc_transcribe.py`, run
+    standalone — `.venv/bin/python atc_transcribe.py`), never imported by
+    `arcade_server.py` or `engines.py`. Confirmed reasoning, not just
+    caution: `mlx-whisper`'s real compute is Metal/native (releases the
+    GIL, same as numpy), so a thread was *probably* fine, but proving that
+    under real concurrent render-loop load wasn't worth the risk when
+    process isolation removes the question entirely — same discipline as
+    the existing hard rule against `import arcade_server` from a script,
+    applied in the opposite direction.
+  - **Real stream, found by testing, not scraping**: LiveATC's website is
+    Cloudflare-protected and can't be scraped for a feed list, but their
+    actual audio mounts are served separately and weren't protected.
+    `s1-bos.liveatc.net/kmyr` confirmed live, continuous, real MYR ground
+    frequency audio.
+  - **Real performance, measured on this Mac mini (M4 Pro)**: a genuine
+    71.68s MYR clip transcribed in 1.76s — a **40.8× realtime factor**
+    with `mlx-community/whisper-small.en-mlx`. `CHUNK_SECONDS = 20` (see
+    `atc.py`) leaves enormous headroom before the next chunk is due.
+  - **A real bug from the FIRST live run, not a hypothetical**: `curl
+    --max-time` exits **28** (`CURLE_OPERATION_TIMEDOUT`) when it correctly
+    cuts a continuous stream off after the requested duration — the
+    ENTIRE POINT of using `--max-time` against a stream that never ends on
+    its own — but the original code treated any non-zero exit as a hard
+    failure, so every single fetch was silently discarded despite
+    returning real, valid audio. Fixed: exit codes `(0, 28)` are both
+    treated as success; only an actually-empty/tiny file counts as a real
+    failure. Caught immediately by watching the FIRST live run rather than
+    assuming a clean unit test proved the real pipeline worked.
+  - **A second real quirk, also from the live run**: Whisper occasionally
+    returns a bare `"!"` or similar stray punctuation on near-silent
+    audio instead of `""`. Not a crash, just noise — filtered by requiring
+    at least one alphanumeric character in the result before it counts as
+    a real transmission.
+  - **Verified stable against the real live stream**, not a sample file:
+    ~90s of continuous real operation, 3 real transcript chunks, zero
+    crashes, e.g. `"...wind at 200 at 16 gusts 22, the altimeter 2 at 9 or
+    8, 3, 2 clouds, 2001 are scattered at 5500, broken at 8,000"` — a real,
+    coherent ATIS-style weather readout. Process CPU held at ~0.1%
+    baseline between chunks.
+  - **Log format**: `atc_log.jsonl` (gitignored — runtime state, not
+    source), one JSON line per non-empty chunk, `{"ts": <real wall-clock
+    chunk-START time>, "text": ..., "duration": 20}`. The engine-side
+    reader (not yet built — phase 2) only ever reads this file; it never
+    talks to the worker process directly, matching every other feed's
+    "background writes, engine reads a snapshot" shape, just with a file
+    standing in for an in-memory `FEED` object because the writer is a
+    separate process.
+  - **NOT YET BUILT**: the rolling in-engine log store/eviction and the
+    "ATC LOG" scope view itself (phase 2), and the airline-callsign
+    matching layer (phase 3, confidence-gated, general-log-always-the-
+    default per the feasibility research's own finding that GA tail
+    numbers cannot be reliably matched from ASR text).
+
   **PERFORMANCE — measured before building, not assumed:**
   | workload | cost | vs 50ms frame budget |
   |---|---|---|

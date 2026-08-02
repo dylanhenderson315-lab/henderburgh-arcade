@@ -3,3 +3,8 @@ numpy==2.5.1
 opencv-python-headless==5.0.0.93
 pillow==12.3.0
 sgp4==2.27
+# Only used by atc_transcribe.py, the standalone ATC log worker --
+# PERSONAL-RIG-ONLY (see atc.py's docstring and CLAUDE.md). Not needed by
+# arcade_server.py or any mode's render path; the engine degrades
+# honestly (atc.HAVE_MLX_WHISPER False) if this is absent.
+mlx-whisper==0.4.3

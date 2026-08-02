@@ -149,6 +149,30 @@ data source that is scraped rather than offered.
   session history I have access to, and it is a real pre-sale blocker,
   not a nice-to-have.**
 
+## Features explicitly EXCLUDED from the sellable device (not oversights)
+
+**ATC transcription log** (`atc.py`/`atc_transcribe.py`, added 2026-08-02)
+transcribes LiveATC.net's public MYR audio stream locally with Whisper for
+a personal-rig-only radar-scope feature. This is deliberately **not**
+part of the sellable-device scope, and should not be added to it without
+first resolving the constraint below — this is a note that a decision
+was already made, not a TODO to build it in.
+
+Reasoning: LiveATC.net's own current terms (confirmed live, 2026-08-02)
+state plainly **"Audio streams may not be used in any third-party
+products."** Transcribing to text rather than replaying the audio doesn't
+obviously escape that clause — it is still a product feature derived from
+their stream. For one owner's personal Mac mini this is a low-risk,
+non-commercial personal use; for a manufactured unit sold to other
+people, that unit unambiguously *is* a third-party product, and shipping
+this feature on it would be a direct violation of a real, current, named
+term of service — not a hypothetical or an abstract IP concern the way
+the flight tracker's plane icon (deliberately not a real airline logo) is.
+Revisit only if either (a) the home location moves somewhere LiveATC
+coverage doesn't reach, making the question moot, or (b) a licensing
+conversation with LiveATC.net actually happens — guessing past this
+clause is not an option.
+
 ## What IS concretely true about the hardware path today
 
 - **Dev/prototype rig (in use right now):** Mac mini running

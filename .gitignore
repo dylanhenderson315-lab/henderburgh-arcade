@@ -16,3 +16,7 @@ tron_brain.json
 
 # macOS
 .DS_Store
+
+# ATC transcription log -- runtime state (real transcript text with real
+# timestamps), not source, and personal-rig-only (see atc.py/CLAUDE.md).
+atc_log.jsonl
