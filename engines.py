@@ -5425,6 +5425,12 @@ class FlightEngine(Browsable):
                                  # from the general-log amber (never the same color as "just data")
     ATC_PAGE_TICKS = 90       # ~4.5s per page, long enough to actually read one before it turns
 
+    # PART 2: the airport is a genuinely selectable target on the scope,
+    # not just a drawn marker -- this is its selection key, in the same
+    # sel_key namespace as a real aircraft's hex/ident. Never collides
+    # with one: no real ICAO24 hex or callsign looks like this.
+    AIRPORT_KEY = "__AIRPORT__"
+
     def reset(self):
         self.data = {"aircraft": [], "age": None, "home_label": "HOME",
                     "configured": False, "err": None}
@@ -5439,6 +5445,10 @@ class FlightEngine(Browsable):
         # refresh, so an index survives across ticks but the AIRCRAFT AT
         # that index does not.
         self.sel_key = None
+        # PART 2: the airport is now a genuinely selectable target, not
+        # just a drawn marker -- stepping past the last real aircraft
+        # (or the first, going the other way) lands on it. Sentinel key,
+        # never collides with a real hex/ident.
         self.hold = 0
         self.cycling = True
         self.ticks = 0
@@ -5450,17 +5460,32 @@ class FlightEngine(Browsable):
         # ATC log PAGINATION -- a real transmission runs well past what
         # 7 lines can hold (confirmed up to 250+ real characters), and
         # nothing may ever be silently cut off. self.atc_pages holds
-        # EVERY page for the current entry (recomputed only when the
-        # entry actually changes, not every frame); atc_page cycles
-        # through them automatically and can also be stepped manually.
-        self.atc_pages = [[]]
+        # EVERY page across the current CONTENT SET (recomputed only
+        # when that content actually changes, not every frame) -- each
+        # page is {"lines": [...], "ts": <the real entry it came from>}
+        # so a multi-entry aircraft "conversation" can show each
+        # transmission's own real age, not one caption for the whole
+        # set. atc_page cycles through them automatically and can also
+        # be stepped manually.
+        self.atc_pages = [{"lines": [], "ts": None}]
         self.atc_page = 0
         self.atc_hold = 0
-        self._atc_page_ts = None
+        # Identifies the current content set (which selection, which
+        # real entries by timestamp) so tick() knows when to rebuild
+        # self.atc_pages -- replaces phase 2's single `_atc_page_ts`
+        # now that content can span more than one entry.
+        self._atc_content_key = (None, ())
+        # PART 2 -- the real display ident of the currently SELECTED
+        # aircraft (not the matched one), or None for the general/
+        # airport log. Set every tick(); read by _frame_atc_log() to
+        # decide which of the two views to draw.
+        self.atc_scoped_ident = None
         # PHASE 3 -- confidence-gated real-ident match for the current
-        # entry, or None. NEVER a silent filter: the general log above
-        # always shows every real transmission regardless of this value,
-        # this only controls whether an EXTRA highlight is drawn on top.
+        # GENERAL-VIEW entry, or None. NEVER a silent filter: the
+        # general log above always shows every real transmission
+        # regardless of this value, this only controls whether an EXTRA
+        # highlight is drawn on top. Meaningless (and left None) inside
+        # a per-aircraft filtered view -- see tick().
         self.atc_match_ident = None
         # Distinguishes "auto-cycle spotlighted this aircraft" from "the
         # user pressed rotate to select it" -- without this, the existing
@@ -5513,19 +5538,33 @@ class FlightEngine(Browsable):
                 self.atc_hold = 0
             return
         aircraft = self.data.get("aircraft") or []
-        n = len(aircraft)
+        # PART 2: the airport is a real stop in the SAME step cycle, not
+        # a separate control -- appended after every aircraft so
+        # stepping past the last one (or before the first, going the
+        # other way) reaches it. Only when it's actually configured;
+        # nothing to select if there's no home airport set.
+        targets = [self._sel_key(ac) for ac in aircraft]
+        if self.airport:
+            targets.append(self.AIRPORT_KEY)
+        n = len(targets)
         if not n:
             return
         # Step FROM the current selection's real position in today's
         # list, not from a stale index -- a manual left/right always
-        # means "the aircraft next to the one I'm looking at right now",
+        # means "the item next to the one I'm looking at right now",
         # which only means the same thing every time if it's resolved by
         # identity first.
-        idx = self._find_by_key(aircraft, self.sel_key)
+        idx = targets.index(self.sel_key) if self.sel_key in targets else None
         if idx is None:
             idx = 0 if direction > 0 else -1   # first press with nothing selected: land on the near edge
         new_idx = (idx + direction) % n
-        self.sel_key = self._sel_key(aircraft[new_idx])
+        self.sel_key = targets[new_idx]
+        # The airport has no DETAIL card (no altitude/route/heading to
+        # show) -- landing on it while a per-aircraft detail view is
+        # open falls back to the scope rather than trying to render an
+        # aircraft-shaped card for a runway.
+        if self.sel_key == self.AIRPORT_KEY and self.view == self.VIEW_DETAIL:
+            self.view = self.VIEW_SCOPE
         self.hold = 0
 
     def input(self, cmd):
@@ -5542,11 +5581,19 @@ class FlightEngine(Browsable):
         # view, and still toggles auto-advance when already on the scope
         # -- identical split to sports, not a new idiom invented here.
         if cmd == "rotate":
-            self.view = {
-                self.VIEW_SCOPE: self.VIEW_DETAIL,
-                self.VIEW_DETAIL: self.VIEW_ATC_LOG,
-                self.VIEW_ATC_LOG: self.VIEW_SCOPE,
-            }[self.view]
+            if self.sel_key == self.AIRPORT_KEY:
+                # The airport has no DETAIL card -- its whole "drill
+                # down" is the general frequency log, so rotate is a
+                # simple two-state toggle here, not the three-stop cycle
+                # an aircraft gets.
+                self.view = (self.VIEW_ATC_LOG if self.view != self.VIEW_ATC_LOG
+                             else self.VIEW_SCOPE)
+            else:
+                self.view = {
+                    self.VIEW_SCOPE: self.VIEW_DETAIL,
+                    self.VIEW_DETAIL: self.VIEW_ATC_LOG,
+                    self.VIEW_ATC_LOG: self.VIEW_SCOPE,
+                }[self.view]
             self._auto_detail = False    # manual either way -- see reset()
             self.hold = 0
         elif cmd == "drop":
@@ -5573,63 +5620,106 @@ class FlightEngine(Browsable):
         # is fetched every tick same as every other feed here, not
         # specially gated to when the log view is showing.
         self.atc_entries = atc.FEED.get()
-        # Recompute pages when the top entry actually changed (by
-        # timestamp, the real identity of a transmission) -- not every
-        # tick, and not merely because the list was re-fetched with the
-        # same content. A fresh transmission always starts back at page 1
-        # rather than wherever the cursor happened to be sitting.
-        top_ts = self.atc_entries[0].get("ts") if self.atc_entries else None
-        entry_changed = top_ts != self._atc_page_ts
-        if entry_changed:
-            self._atc_page_ts = top_ts
+
+        # PART 2 -- WHICH content the log shows depends on what's
+        # selected. An aircraft selected (and still actually in range --
+        # _find_by_key, not a stale index) gets its CONVERSATION: every
+        # real transmission in the retained log that names it, newest
+        # first. Nothing selected, or the airport selected, gets the
+        # unfiltered general frequency (unchanged from phase 2: just the
+        # single newest transmission).
+        #
+        # "Conversation" is honest about its own granularity: this is
+        # real filtering of real transcript chunks, not reconstructed
+        # dialogue turns. Each chunk can contain more than this one
+        # aircraft's transmission (a shared frequency also carries the
+        # controller and any other aircraft talking in the same 20s
+        # window) -- see CLAUDE.md's note on why clean per-utterance
+        # speaker attribution was investigated and found NOT derivable
+        # from this ASR output (no diarization, no utterance boundaries,
+        # real cross-talk within a single chunk). Filtering by which
+        # chunks mention this aircraft's real callsign is the honest
+        # ceiling of what "its conversation" can mean here.
+        ac_list_now = self.data.get("aircraft") or []
+        sel_idx = (self._find_by_key(ac_list_now, self.sel_key)
+                   if self.sel_key not in (None, self.AIRPORT_KEY) else None)
+        scoped_ac = ac_list_now[sel_idx] if sel_idx is not None else None
+        self.atc_scoped_ident = scoped_ac.get("ident") if scoped_ac else None
+
+        if self.atc_scoped_ident:
+            content_entries = [e for e in self.atc_entries
+                               if atc.match_callsign(e.get("text", ""), [self.atc_scoped_ident])
+                               == self.atc_scoped_ident]
+            self.atc_match_ident = None   # the general-log highlight has no meaning inside a filtered view
+        else:
+            content_entries = self.atc_entries[:1]
+
+        # Recompute pages when the actual CONTENT changed (which
+        # selection, which real entries by timestamp) -- not every tick,
+        # and not merely because the feed was re-read with the same
+        # data. A fresh transmission, or a fresh selection, always
+        # starts back at page 1 rather than wherever the cursor was.
+        content_key = (self.atc_scoped_ident, tuple(e.get("ts") for e in content_entries))
+        content_changed = content_key != self._atc_content_key
+        if content_changed:
+            self._atc_content_key = content_key
             self.atc_page = 0
             self.atc_hold = 0
-            self.atc_match_ident = None     # fresh entry: reset, retried below
+            if not self.atc_scoped_ident:
+                self.atc_match_ident = None     # fresh general entry: reset, retried below
 
-        text = self.atc_entries[0].get("text", "") if self.atc_entries else ""
         # PHASE 3 -- confidence-gated callsign match against the REAL
-        # currently-tracked aircraft. Airline+flight-number only, exact
-        # match required -- see atc.match_callsign()'s own docstring for
-        # why GA tail numbers are never attempted.
+        # currently-tracked aircraft, GENERAL VIEW ONLY. Airline+flight-
+        # number only, exact match required -- see
+        # atc.match_callsign()'s own docstring for why GA tail numbers
+        # are never attempted. Inside a per-aircraft filtered view every
+        # page already involves that aircraft by construction, so a
+        # redundant "MATCH: X" tag there would just repeat the header.
         #
-        # RETRIED EVERY TICK WHILE UNMATCHED, not gated to "entry
+        # RETRIED EVERY TICK WHILE UNMATCHED, not gated to "content
         # changed" alone -- a REAL bug, found by checking against real
         # live data rather than trusting the synthetic test that passed:
         # flights.FEED's background thread may not have completed its
         # first fetch yet on the exact tick a transmission arrives, so
-        # matching only once at entry-change time silently missed a real,
+        # matching only once at that moment silently missed a real,
         # correct match (SOUTHWEST 1437 -> SWA1437) purely because the
         # aircraft list was still empty at that specific instant. Once
         # matched, this stops re-trying (no wasted work); if it never
         # matches, the retry is one cheap regex pass per tick against a
         # short string, negligible next to the 50ms frame budget.
-        if self.atc_entries and self.atc_match_ident is None:
-            real_idents = [ac.get("ident") for ac in (self.data.get("aircraft") or [])]
-            new_match = atc.match_callsign(text, real_idents)
+        if not self.atc_scoped_ident and content_entries and self.atc_match_ident is None:
+            real_idents = [ac.get("ident") for ac in ac_list_now]
+            new_match = atc.match_callsign(content_entries[0].get("text", ""), real_idents)
             if new_match:
                 self.atc_match_ident = new_match
-                entry_changed = True   # force a page recompute: the match tag now reserves a line
+                content_changed = True   # force a page recompute: the match tag now reserves a line
 
-        if entry_changed:
+        if content_changed:
             # A match costs one line of page budget (ATC_PAGE_LINES - 1)
             # so the tag never competes with the transcript text itself
             # for room -- recomputed here too so a match discovered on a
             # LATER tick (see above) still gets its line reserved rather
             # than overlapping the first line of already-paginated text.
-            page_lines = self.ATC_PAGE_LINES - 1 if self.atc_match_ident else self.ATC_PAGE_LINES
-            all_lines = wrap_text(text, WIDTH - 4, max_lines=None)
-            self.atc_pages = [all_lines[i:i + page_lines]
-                              for i in range(0, len(all_lines), page_lines)] or [[]]
+            page_lines = (self.ATC_PAGE_LINES - 1
+                         if (not self.atc_scoped_ident and self.atc_match_ident)
+                         else self.ATC_PAGE_LINES)
+            pages = []
+            for e in content_entries:
+                lines = wrap_text(e.get("text", ""), WIDTH - 4, max_lines=None)
+                for i in range(0, len(lines), page_lines):
+                    pages.append({"lines": lines[i:i + page_lines], "ts": e.get("ts")})
+            self.atc_pages = pages or [{"lines": [], "ts": None}]
         # Auto-advance through pages while the log is actually on screen,
-        # so a long real transmission is GUARANTEED to be seen in full
-        # rather than permanently stuck on page 1 -- this is the "no
-        # cutoffs, everything must be seen" requirement, not a nicety.
+        # so a long real transmission -- or a long real conversation --
+        # is GUARANTEED to be seen in full rather than permanently stuck
+        # on page 1. This is the "no cutoffs, everything must be seen"
+        # requirement, not a nicety.
         if self.view == self.VIEW_ATC_LOG and len(self.atc_pages) > 1:
             self.atc_hold += 1
             if self.atc_hold >= self.ATC_PAGE_TICKS:
                 self.atc_hold = 0
                 self.atc_page = (self.atc_page + 1) % len(self.atc_pages)
-        ac_list = self.data.get("aircraft") or []
+        ac_list = ac_list_now
         # Flash on the NEAREST aircraft changing -- that is the "something
         # new is overhead" moment, not merely the list reordering.
         self.pulse.note(ac_list[0]["ident"] if ac_list else None)
@@ -5641,7 +5731,18 @@ class FlightEngine(Browsable):
         # sit in the old slot (that WAS the bug). Drop the selection and
         # fall back to the scope, same as arriving fresh: an honest "back
         # to overview" beats a selection that quietly became a lie.
-        if self.sel_key is not None and self._find_by_key(ac_list, self.sel_key) is None:
+        # AIRPORT_KEY is exempt from the "still in the aircraft list"
+        # check (it's never in that list by construction) but still
+        # clears if the airport itself gets unconfigured out from under
+        # the selection.
+        if self.sel_key == self.AIRPORT_KEY:
+            if not self.airport:
+                self.sel_key = None
+                if self.view != self.VIEW_SCOPE:
+                    self.view = self.VIEW_SCOPE
+                    self._auto_detail = False
+                    self.hold = 0
+        elif self.sel_key is not None and self._find_by_key(ac_list, self.sel_key) is None:
             self.sel_key = None
             if self.view != self.VIEW_SCOPE:
                 self.view = self.VIEW_SCOPE
@@ -5745,7 +5846,13 @@ class FlightEngine(Browsable):
             frac = self._scope_r_frac(nm)
             if frac is not None:
                 x, y = scope_xy(brg, frac)
-                draw_scope_target(buf, x, y, self.ROUTE,
+                # PART 2: the airport is a genuinely selectable target
+                # now (see AIRPORT_KEY/_step), not just a drawn marker --
+                # it gets the same white "selected" treatment an
+                # aircraft does when it's the current sel_key.
+                port_sel = (self.sel_key == self.AIRPORT_KEY)
+                port_col = (255, 255, 255) if port_sel else self.ROUTE
+                draw_scope_target(buf, x, y, port_col,
                                   glow=scope_glow(brg, self.sweep), big=True)
 
         for ac in aircraft:
@@ -5880,45 +5987,67 @@ class FlightEngine(Browsable):
         return f"{s}S"
 
     def _frame_atc_log(self):
-        """GENERAL airport ATC log -- see atc.py/CLAUDE.md, PERSONAL-RIG-
-        ONLY. Deliberately the GENERAL feed, not filtered to the selected
-        aircraft: per-aircraft callsign correlation is phase 3 and, per
-        the feasibility research's own finding, will only ever be a
-        confidence-gated HIGHLIGHT on top of this general log, never a
-        silent filter that could misattribute a transmission to the
-        wrong aircraft. Until that lands, showing every real transmission
-        is the honest default, not a placeholder.
+        """TWO views over one log -- see atc.py/CLAUDE.md, PERSONAL-RIG-
+        ONLY, and PART 2's writeup there for why per-utterance speaker
+        attribution isn't built (not honestly derivable from this ASR
+        output).
 
-        PAGINATED, NEVER TRUNCATED. A real transmission runs 100-250+
-        characters (confirmed against real MYR audio), which does not fit
-        7 lines -- explicit requirement: nothing may ever be silently cut
-        off. self.atc_pages (computed once per entry in tick(), not here)
-        holds every page; tick() auto-advances through them and _step()
-        lets left/right override manually. This method only draws the
-        CURRENT page plus a "Pi/N" indicator when there is more than one,
-        so it is always visible that more content exists and is coming.
+        `self.atc_scoped_ident` set (an aircraft is selected): shows
+        that aircraft's CONVERSATION -- every real transmission in the
+        retained log that names it, newest first, real filtering of
+        real data. Nothing selected, or the airport selected: shows the
+        GENERAL frequency log (just the single newest transmission,
+        unchanged from phase 2) plus the phase 3 confidence-gated match
+        highlight, since there IS no single "selected aircraft" for that
+        highlight to be redundant with here.
+
+        PAGINATED, NEVER TRUNCATED, in both cases. A real transmission
+        runs 100-250+ characters, which does not fit 7 lines -- explicit
+        requirement: nothing may ever be silently cut off.
+        self.atc_pages (computed once per content-change in tick(), not
+        here) holds every page across the WHOLE current content set,
+        each carrying its own source entry's real timestamp so a
+        multi-transmission conversation shows each message's own real
+        age, not one caption for the lot. tick() auto-advances through
+        them and _step() lets left/right override manually.
         """
         buf = blank()
         fill(buf, self.BG)
 
-        if not self.atc_entries:
-            # Never invents a transmission. Whether this is because the
+        has_content = bool(self.atc_pages) and self.atc_pages[0].get("ts") is not None
+        title = "ATC LOG" if not self.atc_scoped_ident else fit_text(self.atc_scoped_ident, 30)
+        accent = self.ATC if not self.atc_scoped_ident else self.ATC_MATCH
+
+        if not has_content:
+            # Never invents a transmission. For the general view: the
             # worker process isn't running, mlx-whisper isn't installed,
             # or the frequency has genuinely been quiet for the whole
             # LOG_MAX_AGE_SECONDS window -- all three collapse to the
-            # same honest "nothing to show" rather than three different
-            # guesses about which one it is.
-            draw_header(buf, "ATC LOG", self.ATC)
-            draw_text_centered(buf, 28, "NO ATC DATA", self.INK_DIM)
-            draw_text_centered(buf, 36, "YET", self.INK_DIM)
+            # same honest "nothing to show". For a selected aircraft:
+            # real transmissions exist on the frequency, just none that
+            # name THIS aircraft yet -- a different, more specific
+            # honest state, worth its own wording.
+            draw_header(buf, title, accent)
+            if self.atc_scoped_ident:
+                # "NO TRANSMISSIONS" alone is 17 chars / 66px -- 2px over
+                # the 64px panel. Caught by render_audit against this
+                # exact state, not by eye. Split across two lines like
+                # the general-view "NO ATC DATA / YET" message already
+                # does, rather than truncating a word.
+                draw_text_centered(buf, 24, "NO", self.INK_DIM)
+                draw_text_centered(buf, 32, "TRANSMISSIONS", self.INK_DIM)
+                draw_text_centered(buf, 40, "YET", self.INK_DIM)
+            else:
+                draw_text_centered(buf, 28, "NO ATC DATA", self.INK_DIM)
+                draw_text_centered(buf, 36, "YET", self.INK_DIM)
             return bytes(buf)
 
         n_pages = len(self.atc_pages)
         page_tag = f"P{self.atc_page + 1}/{n_pages}" if n_pages > 1 else None
-        draw_header(buf, "ATC LOG", self.ATC, right_tag=page_tag)
+        draw_header(buf, title, accent, right_tag=page_tag)
 
-        entry = self.atc_entries[0]           # newest first, see atc.AtcLogFeed
-        age = max(0.0, time.time() - entry.get("ts", 0))
+        page = self.atc_pages[self.atc_page]
+        age = max(0.0, time.time() - (page.get("ts") or 0))
         # "14S AGO" reads as live and current; past ATC_LOG_RECENT_SECONDS
         # it switches to "LAST: Xm Ys" so a five-minute-old transmission
         # is never mistaken for something that just happened -- exactly
@@ -5930,21 +6059,25 @@ class FlightEngine(Browsable):
         # 60px budget and silently lost "AGO". Shortened to "LAST:" so
         # the widest real case ("LAST: 4M 59S", 13 chars) fits with
         # margin instead of trimming the message that was supposed to be
-        # the whole point of this label.
+        # the whole point of this label. Uses THIS PAGE's own entry age,
+        # not the newest overall -- a conversation's older transmissions
+        # correctly read as older once paged to.
         if age < self.ATC_LOG_RECENT_SECONDS:
             caption = f"{self._fmt_ago(age)} AGO"
         else:
             caption = f"LAST: {self._fmt_ago(age)}"
-        draw_text_centered(buf, 10, fit_text(caption, WIDTH - 4), self.ATC)
+        draw_text_centered(buf, 10, fit_text(caption, WIDTH - 4), accent)
 
         y = 17
-        if self.atc_match_ident:
-            # PHASE 3: a confidence-gated match, visually UNMISTAKABLE
-            # (bright green, distinct from the general-log amber) so it
-            # reads as "confirmed", never blended into the ordinary text.
-            # Costs exactly the one line of page budget tick() already
-            # reserved for it (ATC_PAGE_LINES - 1) -- never silently
-            # eats into the transcript text's own room.
+        if not self.atc_scoped_ident and self.atc_match_ident:
+            # PHASE 3, GENERAL VIEW ONLY: a confidence-gated match,
+            # visually UNMISTAKABLE (bright green, distinct from the
+            # general-log amber) so it reads as "confirmed", never
+            # blended into the ordinary text. Costs exactly the one line
+            # of page budget tick() already reserved for it
+            # (ATC_PAGE_LINES - 1) -- never silently eats into the
+            # transcript text's own room. Not drawn in a per-aircraft
+            # scoped view -- the header already names that aircraft.
             draw_text_centered(buf, y, fit_text(f"MATCH: {self.atc_match_ident}", WIDTH - 4),
                                self.ATC_MATCH)
             y += 6
@@ -5952,8 +6085,7 @@ class FlightEngine(Browsable):
         # 6-7 lines (depending on whether the match row above is showing)
         # leaves y=59 clear, the real HEIGHT-5 boundary a 5px glyph must
         # start at or before.
-        page = self.atc_pages[self.atc_page] if self.atc_pages else []
-        for i, ln in enumerate(page):
+        for i, ln in enumerate(page.get("lines") or []):
             draw_text3x5(buf, max(2, (WIDTH - text_w(ln)) // 2), y + i * 6, ln, self.INK)
         return bytes(buf)
 
