@@ -1066,31 +1066,28 @@ def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, big=False
             px(2, -1)
         return
 
-    # Top-down dart: nose + tapered fuselage + wings, sized per kind and
-    # THICKENED (two parallel fuselage rows, a wing line 2px thick) so
-    # it reads as a small filled shape, not a thin scratch.
+    # Top-down cross: ONE fuselage stroke, ONE wing stroke -- simplified
+    # from an earlier 6-stroke version (thickened fuselage, swept wing
+    # lines, a tailplane) that cost more per-frame render work than it
+    # was worth and looked busier than the pixel budget could justify.
+    # Two clean strokes, sized per kind, reads as a plane without the
+    # clutter or the extra draw_line calls.
     fwd = (math.sin(theta), -math.cos(theta))
     right = (math.cos(theta), math.sin(theta))
 
     def pt(fx, fy):
         return (x + fx * fwd[0] + fy * right[0], y + fx * fwd[1] + fy * right[1])
 
-    def line(a, b):
-        draw_line(buf, a[0], a[1], b[0], b[1], col)
-
     nose_fx, wing_fy = {
-        SCOPE_ICON_AIRLINER: (4.5, 3.4),
-        SCOPE_ICON_BIZJET:   (3.6, 2.2),
-        SCOPE_ICON_GA:       (2.6, 1.3),
+        SCOPE_ICON_AIRLINER: (3.2, 2.6),
+        SCOPE_ICON_BIZJET:   (2.6, 1.7),
+        SCOPE_ICON_GA:       (2.0, 1.0),
     }[kind]
     nose_fx, wing_fy = nose_fx * scale, wing_fy * scale
-    tail_fx = -nose_fx * 0.8
-    line(pt(nose_fx, 0), pt(tail_fx, 0))
-    line(pt(nose_fx, 0.9), pt(tail_fx, 0.9))         # thickens the fuselage
-    line(pt(nose_fx * 0.1, -wing_fy), pt(nose_fx * 0.1, wing_fy))
-    line(pt(nose_fx * 0.1, -wing_fy), pt(nose_fx * 0.5, 0))  # wing sweep -> nose
-    line(pt(nose_fx * 0.1, wing_fy), pt(nose_fx * 0.5, 0))
-    line(pt(tail_fx, -wing_fy * 0.4), pt(tail_fx, wing_fy * 0.4))  # tailplane
+    a, b = pt(nose_fx, 0), pt(-nose_fx, 0)
+    draw_line(buf, a[0], a[1], b[0], b[1], col)
+    a, b = pt(0, -wing_fy), pt(0, wing_fy)
+    draw_line(buf, a[0], a[1], b[0], b[1], col)
 
 
 def draw_scope_airport(buf, x, y, color, glow=1.0):
@@ -5942,6 +5939,13 @@ class FlightEngine(Browsable):
     # a non-linear scale that does not say so would be misleading.
     SCOPE_RING_NM = (10, 20, 40)
 
+    # This mode's own, bigger scope -- overrides the SCOPE_CX/CY/R module
+    # defaults (still used as-is by the satellite dome, untouched) via
+    # the cx/cy/radius params every draw_scope_* primitive already
+    # accepts. Verified it still clears the legend row below via
+    # render_audit before shipping.
+    FLT_CX, FLT_CY, FLT_R = SCOPE_CX, 32, 26
+
     def _frame_scope(self, aircraft):
         buf = blank()
         fill(buf, self.BG)
@@ -5949,8 +5953,9 @@ class FlightEngine(Browsable):
                     right_tag=f"{len(aircraft)}",
                     stale=bool(self.data.get("age") and self.data["age"] > 60))
 
+        cx, cy, r = self.FLT_CX, self.FLT_CY, self.FLT_R
         draw_scope_rings(buf, [math.sqrt(nm / float(flights.RADIUS_NM))
-                               for nm in self.SCOPE_RING_NM])
+                               for nm in self.SCOPE_RING_NM], cx=cx, cy=cy, radius=r)
 
         # REAL coastline (flights.COASTLINE -- Natural Earth data, see its
         # own docstring for provenance), not a decorative shape. This is
@@ -5968,13 +5973,13 @@ class FlightEngine(Browsable):
         for clat, clon in flights.COASTLINE:
             brg, nm = flights.bearing_distance(lat, lon, clat, clon)
             frac = self._scope_r_frac(nm)
-            pts.append(scope_xy(brg, frac) if frac is not None else None)
+            pts.append(scope_xy(brg, frac, cx=cx, cy=cy, radius=r) if frac is not None else None)
         for a, b in zip(pts, pts[1:]):
             if a is not None and b is not None:
                 draw_line(buf, a[0], a[1], b[0], b[1], (26, 78, 108))
 
-        draw_scope_crosshair(buf)
-        draw_scope_sweep(buf, self.sweep)
+        draw_scope_crosshair(buf, cx=cx, cy=cy, radius=r)
+        draw_scope_sweep(buf, self.sweep, cx=cx, cy=cy, radius=r)
 
         # Airport first, UNDER the aircraft: it is context, not traffic,
         # and a plane on final should never be hidden by the runway it is
@@ -5985,7 +5990,7 @@ class FlightEngine(Browsable):
                 lat, lon, self.airport["lat"], self.airport["lon"])
             frac = self._scope_r_frac(nm)
             if frac is not None:
-                x, y = scope_xy(brg, frac)
+                x, y = scope_xy(brg, frac, cx=cx, cy=cy, radius=r)
                 # PART 2: the airport is a genuinely selectable target
                 # now (see AIRPORT_KEY/_step), not just a drawn marker --
                 # it gets the same white "selected" treatment an
@@ -6001,7 +6006,7 @@ class FlightEngine(Browsable):
             brg = ac.get("dir_deg")
             if frac is None or brg is None:
                 continue          # no position fix -- plot nothing, guess nothing
-            x, y = scope_xy(brg, frac)
+            x, y = scope_xy(brg, frac, cx=cx, cy=cy, radius=r)
             col = self._alt_color(ac.get("alt_ft"))
             # IDENTITY-keyed, not positional -- see reset()'s note on
             # self.sel_key. A reordering list can no longer silently move
@@ -6023,14 +6028,22 @@ class FlightEngine(Browsable):
             draw_scope_aircraft(buf, x, y, ac.get("track_deg"), kind, mark_col,
                                 glow=scope_glow(brg, self.sweep), big=(sel or matched))
 
-        draw_scope_home(buf)
+        draw_scope_home(buf, cx=cx, cy=cy)
         # Tried an alternating text legend ("<>=HOME +=MYR") same session,
         # reverted: real feedback was that text captions read as clunky
         # against this view's aesthetic. Orientation now comes from real
         # landmarks (the coastline outline, the airport mark) rather than
         # instrument-panel labels -- see the coastline note above.
-        ring_txt = "/".join(str(nm) for nm in self.SCOPE_RING_NM) + "NM"
-        draw_text_centered(buf, 58, fit_text(ring_txt, WIDTH - 4), (86, 94, 116))
+        #
+        # MILES, not NM -- this project converts to imperial at the
+        # render layer everywhere else (km_to_mi/kmh_to_mph/nm_to_mi in
+        # this same file); the ring geometry itself still comes from the
+        # real nm values (that's what the ADS-B distance and
+        # flights.RADIUS_NM actually are), only the printed label
+        # changes. One compact line, not "NM" appended, to leave the
+        # bigger scope its full bottom margin.
+        mi_txt = "/".join(str(round(nm_to_mi(nm))) for nm in self.SCOPE_RING_NM) + "MI"
+        draw_text_centered(buf, 59, fit_text(mi_txt, WIDTH - 4), (70, 76, 92))
         return bytes(buf)
 
     # ---- render --------------------------------------------------------
@@ -6083,7 +6096,6 @@ class FlightEngine(Browsable):
         tail_l, tail_r = pt(cls._ICON_FUSELAGE[1], -cls._ICON_TAIL), pt(cls._ICON_FUSELAGE[1], cls._ICON_TAIL)
 
         draw_line(buf, *nose, *tail, color)
-        draw_line(buf, *pt(cls._ICON_FUSELAGE[0], 1.4), *pt(cls._ICON_FUSELAGE[1], 1.4), color)
         draw_line(buf, *wing_l, *wing_r, color)
         draw_line(buf, *tail_l, *tail_r, color)
         put_px(buf, int(round(nose[0])), int(round(nose[1])), color)   # nose pip -- reads as "front" even at low res
