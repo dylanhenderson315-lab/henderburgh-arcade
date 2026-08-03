@@ -1043,38 +1043,54 @@ def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, big=False
     heading-unknown treatment for whichever aircraft is actually
     selected.
     """
-    # CUTE FIXED SIDE-VIEW SPRITES, not top-down rotated silhouettes --
-    # a side view can only face left or right, so heading only picks
-    # which way it's mirrored (fwd's x-component sign), not a full
-    # rotation. Each sprite is a tiny hand-placed pixel cluster (put_px
-    # offsets, +x=nose-right, +y=down), mirrored on x for a leftward
-    # heading -- cheap, and reads as an actual little vehicle instead of
-    # an abstract dart.
+    # HELICOPTER stays a fixed 2D SIDE-VIEW sprite (mirrored left/right
+    # only, not rotated -- a side view can't face any other way).
+    # Everything else is a real TOP-DOWN silhouette, rotated to actual
+    # heading, since that's the natural "looking down at the radar"
+    # view for a fixed-wing aircraft.
     col = (int(color[0] * glow), int(color[1] * glow), int(color[2] * glow))
     theta = math.radians(heading_deg if heading_deg is not None else 0.0)
-    face_right = math.sin(theta) >= 0
     xi, yi = int(round(x)), int(round(y))
+    scale = 1.25 if big else 1.0
 
-    def px(dx, dy):
-        put_px(buf, xi + (dx if face_right else -dx), yi + dy, col)
+    if kind == SCOPE_ICON_HELI:
+        face_right = math.sin(theta) >= 0
 
-    # 2x scale from the original pixel-cluster sprites, plus a belly
-    # row so each one reads as a fuselage BLOCK, not a thin scratch.
-    SPRITES = {
-        SCOPE_ICON_AIRLINER: [(4, 0), (3, 0), (2, 0), (1, 0), (0, 0), (-1, 0), (-2, 0),
-                              (2, 1), (1, 1), (0, 1), (-1, 1),
-                              (-2, -1), (-2, -2)],
-        SCOPE_ICON_BIZJET: [(3, 0), (2, 0), (1, 0), (0, 0), (-1, 0),
-                            (1, 1), (0, 1),
-                            (-1, -1), (-1, -2)],
-        SCOPE_ICON_GA: [(2, 0), (1, 0), (0, 0), (-1, 0), (0, 1)],
-        SCOPE_ICON_HELI: [(0, 0), (0, 1), (-2, -2), (-1, -2), (0, -2), (1, -2), (2, -2),
-                          (-2, 2), (-3, 3)],
-    }
-    for dx, dy in SPRITES[kind]:
-        px(dx, dy)
-    if big:
-        px(2 if kind != SCOPE_ICON_GA else 1, -1)   # one extra pixel = "selected/notable"
+        def px(dx, dy):
+            put_px(buf, xi + (dx if face_right else -dx), yi + dy, col)
+
+        for dx, dy in [(0, 0), (0, 1), (-2, -2), (-1, -2), (0, -2), (1, -2), (2, -2),
+                       (-2, 2), (-3, 3)]:
+            px(dx, dy)
+        if big:
+            px(2, -1)
+        return
+
+    # Top-down dart: nose + tapered fuselage + wings, sized per kind and
+    # THICKENED (two parallel fuselage rows, a wing line 2px thick) so
+    # it reads as a small filled shape, not a thin scratch.
+    fwd = (math.sin(theta), -math.cos(theta))
+    right = (math.cos(theta), math.sin(theta))
+
+    def pt(fx, fy):
+        return (x + fx * fwd[0] + fy * right[0], y + fx * fwd[1] + fy * right[1])
+
+    def line(a, b):
+        draw_line(buf, a[0], a[1], b[0], b[1], col)
+
+    nose_fx, wing_fy = {
+        SCOPE_ICON_AIRLINER: (4.5, 3.4),
+        SCOPE_ICON_BIZJET:   (3.6, 2.2),
+        SCOPE_ICON_GA:       (2.6, 1.3),
+    }[kind]
+    nose_fx, wing_fy = nose_fx * scale, wing_fy * scale
+    tail_fx = -nose_fx * 0.8
+    line(pt(nose_fx, 0), pt(tail_fx, 0))
+    line(pt(nose_fx, 0.9), pt(tail_fx, 0.9))         # thickens the fuselage
+    line(pt(nose_fx * 0.1, -wing_fy), pt(nose_fx * 0.1, wing_fy))
+    line(pt(nose_fx * 0.1, -wing_fy), pt(nose_fx * 0.5, 0))  # wing sweep -> nose
+    line(pt(nose_fx * 0.1, wing_fy), pt(nose_fx * 0.5, 0))
+    line(pt(tail_fx, -wing_fy * 0.4), pt(tail_fx, wing_fy * 0.4))  # tailplane
 
 
 def draw_scope_airport(buf, x, y, color, glow=1.0):
@@ -5565,6 +5581,13 @@ class FlightEngine(Browsable):
         # just a drawn marker -- stepping past the last real aircraft
         # (or the first, going the other way) lands on it. Sentinel key,
         # never collides with a real hex/ident.
+        # Route-line marquee: full destination city, never truncated --
+        # scrolls when it doesn't fit rather than cutting it. NOT named
+        # `self.scroll`, which Browsable's own `self.browse`/other
+        # marquee modes already claim for a different purpose (see
+        # CLAUDE.md's own documented trap about that exact collision).
+        self.route_scroll = 0.0
+        self._route_scroll_key = None
         self.hold = 0
         self.cycling = True
         self.ticks = 0
@@ -5727,6 +5750,7 @@ class FlightEngine(Browsable):
     def tick(self):
         self.ticks += 1
         self._scroll_tick()
+        self.route_scroll += 0.5   # same per-tick speed every other marquee in this project uses
         self.data = flights.FEED.get()
         self.airport = flights.load_airport()
         # PERSONAL-RIG-ONLY (see atc.py/CLAUDE.md). atc.FEED degrades
@@ -6023,13 +6047,28 @@ class FlightEngine(Browsable):
     # table -- this is deliberately NOT a real airline/aircraft logo (no
     # trademark/IP exposure), just an abstract "which way is it pointing"
     # silhouette in the same spirit as a radar-scope aircraft mark.
-    _ICON_FUSELAGE = (7.5, -6.5)   # (nose fx, tail fx) along the heading axis
-    _ICON_WING = 5.5                # main wing half-span, at fx=0
-    _ICON_TAIL = 2.2                # tailplane half-span, at fx=tail
+    _ICON_FUSELAGE = (9.5, -8.0)   # (nose fx, tail fx) along the heading axis -- enlarged for readability
+    _ICON_WING = 7.0                 # main wing half-span, at fx=0
+    _ICON_TAIL = 2.8                 # tailplane half-span, at fx=tail
 
     @classmethod
-    def _draw_plane_icon(cls, buf, cx, cy, heading_deg, color):
+    def _draw_plane_icon(cls, buf, cx, cy, heading_deg, color, kind=None):
+        """Same top-down/side-view split as the scope's
+        `draw_scope_aircraft`, logically consistent with it: a
+        helicopter is a fixed 2D side-view sprite (mirrored, not
+        rotated), everything else is a real top-down silhouette rotated
+        to heading, now thickened (a second parallel fuselage line) to
+        read as a filled shape at this bigger DETAIL-card size."""
         theta = math.radians(heading_deg if heading_deg is not None else 0)
+
+        if kind == SCOPE_ICON_HELI:
+            face_right = math.sin(theta) >= 0
+            xi, yi = int(round(cx)), int(round(cy))
+            for dx, dy in [(0, 0), (0, 2), (-4, -4), (-2, -4), (0, -4), (2, -4), (4, -4),
+                           (-4, 4), (-6, 6)]:
+                put_px(buf, xi + (dx if face_right else -dx), yi + dy, color)
+            return
+
         # Forward unit vector (0 deg = up on screen); right unit vector is
         # forward rotated +90 deg, used for the wing/tail cross-strokes.
         fwd = (math.sin(theta), -math.cos(theta))
@@ -6044,6 +6083,7 @@ class FlightEngine(Browsable):
         tail_l, tail_r = pt(cls._ICON_FUSELAGE[1], -cls._ICON_TAIL), pt(cls._ICON_FUSELAGE[1], cls._ICON_TAIL)
 
         draw_line(buf, *nose, *tail, color)
+        draw_line(buf, *pt(cls._ICON_FUSELAGE[0], 1.4), *pt(cls._ICON_FUSELAGE[1], 1.4), color)
         draw_line(buf, *wing_l, *wing_r, color)
         draw_line(buf, *tail_l, *tail_r, color)
         put_px(buf, int(round(nose[0])), int(round(nose[1])), color)   # nose pip -- reads as "front" even at low res
@@ -6256,7 +6296,7 @@ class FlightEngine(Browsable):
         # Heading-oriented icon, the visual centerpiece -- colour-coded by
         # altitude band (see ALT_BANDS) since that reads as "kind of
         # traffic" better than raw distance would at this size.
-        self._draw_plane_icon(buf, WIDTH // 2, 22, ac.get("track_deg"), col)
+        self._draw_plane_icon(buf, WIDTH // 2, 22, ac.get("track_deg"), col, kind=self._ac_kind(ac))
 
         # Phase arrow: climbing/descending only, nothing drawn for cruise
         # or an undetermined phase -- same "no badge for the mundane
@@ -6339,19 +6379,31 @@ class FlightEngine(Browsable):
             # safety net already used for the airline name below.
             o_city, d_city = route.get("origin_city"), route.get("dest_city")
             codes = f"{route['origin']}>{route['dest']}".upper()
-            route_line = codes
+            # DESTINATION, spelled out in full, is the priority -- a raw
+            # 3-letter code ("RDU", "LGA") isn't legible to someone who
+            # doesn't already know airport codes, and "where is this
+            # plane going" is the more useful real-world question than
+            # "where did it come from". Codes are the last resort, only
+            # when adsbdb gave no city name at all for the destination.
             if o_city and d_city:
-                pair = f"{o_city} > {d_city}"
-                # Only use city names if the WHOLE pair fits. Truncating
-                # this particular string is uniquely bad: a real case from
-                # the audit, "CHICAGO > ALLENTOWN", cuts to "CHICAGO >" --
-                # a dangling arrow that reads as a broken layout AND hides
-                # the destination entirely. The airport codes always fit
-                # and always name both ends, so they are the better
-                # fallback than a half-drawn sentence.
-                if text_w(pair) <= WIDTH - 4:
-                    route_line = pair
-            draw_text_centered(buf, 53, route_line, self.ROUTE)
+                route_line = f"{o_city} > {d_city}"
+            elif d_city:
+                route_line = f"> {d_city}"
+            else:
+                route_line = codes
+            # NEVER TRUNCATED -- scrolls instead when it's wider than the
+            # panel, same marquee `draw_marquee` already uses for news/
+            # ticker, rather than cutting the destination name short.
+            # Reset to the start whenever the text itself changes (a
+            # different aircraft, or a freshly-resolved route), so it
+            # doesn't jump in mid-scroll and always begins readable.
+            if route_line != self._route_scroll_key:
+                self._route_scroll_key = route_line
+                self.route_scroll = 0.0
+            if text_w(route_line) <= WIDTH - 4:
+                draw_text_centered(buf, 53, route_line, self.ROUTE)
+            else:
+                draw_marquee(buf, 53, route_line, self.ROUTE, self.route_scroll)
             # adsbdb returns mixed-case names ("United Airlines"); already
             # folded through paneltext.panel_text() in flights.py at the
             # I/O boundary (not a bare .upper() here) so a diacritic or

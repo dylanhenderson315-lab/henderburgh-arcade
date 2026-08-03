@@ -72,7 +72,7 @@ import engines
 # `ambient` inherits this: it composes real instances of the other
 # modes and delegates frame(), so a news marquee inside ambient is
 # the same marquee.
-MARQUEE_OK = {"news", "ticker", "sports", "gameday", "ambient"}
+MARQUEE_OK = {"news", "ticker", "sports", "gameday", "ambient", "flights"}
 
 # Modes worth auditing: the data modes and event modes, which are the ones
 # rendering externally-sourced text. Games draw their own sprites and have
