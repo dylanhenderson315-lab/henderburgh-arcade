@@ -1051,41 +1051,45 @@ def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, big=False
     def pt(fx, fy):
         return (x + fx * fwd[0] + fy * right[0], y + fx * fwd[1] + fy * right[1])
 
-    def dot(p):
-        put_px(buf, int(round(p[0])), int(round(p[1])), col)
+    def line(a, b):
+        draw_line(buf, a[0], a[1], b[0], b[1], col)
 
     scale = 1.3 if big else 1.0
 
     if kind == SCOPE_ICON_HELI:
-        # A rotor disk from above (a small ring around the mark, NOT
-        # heading-oriented -- a hovering/slow helicopter's rotor reads
-        # the same from any angle) plus a short tail-boom stub that IS
-        # heading-oriented, so it still shows which way it's pointed.
-        # The one shape here that owes nothing to the dart family --
+        # A rotor disk from above (a small diamond OUTLINE around the
+        # mark, drawn as connected lines rather than loose dots so it
+        # reads as a ring, not a smear -- NOT heading-oriented, a
+        # hovering/slow helicopter's rotor looks the same from any
+        # angle) plus a heading-oriented tail-boom stub. The one shape
+        # here that owes nothing to the fuselage+wing family --
         # deliberately, so it can never be mistaken for a fixed-wing
         # aircraft at a glance.
-        xi, yi = int(round(x)), int(round(y))
-        put_px(buf, xi, yi, col)
-        for dx, dy in ((2, 0), (-2, 0), (0, 2), (0, -2)):
-            put_px(buf, xi + dx, yi + dy, col)
-        dot(pt(-3.0 * scale, 0))
-    elif kind == SCOPE_ICON_GA:
-        # No wings drawn at all -- the honest way to say "small" at this
-        # resolution is less ink, not a shrunk copy of the airliner dart.
-        # A short heading-oriented line: nose, centre, tail.
-        dot(pt(1.6 * scale, 0))
-        dot(pt(0, 0))
-        dot(pt(-1.6 * scale, 0))
+        r = 2.2 * scale
+        top, bot = (x, y - r), (x, y + r)
+        lft, rgt = (x - r, y), (x + r, y)
+        line(top, rgt); line(rgt, bot); line(bot, lft); line(lft, top)
+        line((x, y), pt(-r - 1.2, 0))
     else:
-        # AIRLINER / BIZJET -- a small heading-oriented dart. The two
-        # differ only in how far the "wings" flare from the centreline
-        # (BIZJET narrower, AIRLINER wider) -- see the honesty note
-        # above on how reliably that reads at 1px.
-        spread = 1.7 if kind == SCOPE_ICON_AIRLINER else 1.0
-        dot(pt(2.0 * scale, 0))
-        dot(pt(0, 0))
-        dot(pt(-1.1 * scale, -spread * scale))
-        dot(pt(-1.1 * scale, spread * scale))
+        # AIRLINER / BIZJET / GA -- all the same real silhouette (a
+        # fuselage line crossed by a wing line, exactly the shape
+        # `_draw_plane_icon` already uses for the DETAIL card, just
+        # scaled down), connected LINES instead of loose dots so it
+        # reads as one small airplane rather than a scatter of pixels.
+        # The three sizes/spans below are a real, deliberate difference
+        # in the geometry; see this function's own docstring for how
+        # reliably that distinction actually reads at 1px scale.
+        nose_fx, wing_fy = {
+            SCOPE_ICON_AIRLINER: (2.4, 2.1),
+            SCOPE_ICON_BIZJET:   (1.9, 1.3),
+            SCOPE_ICON_GA:       (1.5, 0.9),
+        }[kind]
+        nose = pt(nose_fx * scale, 0)
+        tail = pt(-nose_fx * 0.85 * scale, 0)
+        wing_l = pt(nose_fx * 0.15 * scale, -wing_fy * scale)
+        wing_r = pt(nose_fx * 0.15 * scale, wing_fy * scale)
+        line(nose, tail)
+        line(wing_l, wing_r)
 
 
 def draw_scope_airport(buf, x, y, color, glow=1.0):
