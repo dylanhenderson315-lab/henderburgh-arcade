@@ -589,6 +589,82 @@ appends them to the menu automatically.
     input path (rotate ×4, left ×1) with zero errors and a real
     non-black rendered frame confirmed via direct pixel dump.
 
+  **PART 3 — radar scope visual overhaul, 2026-08-02.** Real,
+  heading-oriented aircraft icons replace the plain dot every scope
+  target used to draw; the airport gets a runway glyph instead of a
+  generic plus.
+
+  - **Icon classification is real ADS-B data, not decoration.**
+    `FlightEngine._ac_kind()` reads `category` (real ADS-B emitter
+    category — added to `flights._fetch_positions()`'s output dict;
+    it was already being read for `_notable()` but discarded before
+    reaching the engine) to pick one of four shapes:
+    - **Helicopter** (category A7) — a small rotor-disk cluster
+      (screen-relative, NOT heading-oriented — a hovering rotor reads
+      the same from any angle) plus a heading-oriented tail-boom stub.
+      The one shape that owes nothing to the dart family, deliberately,
+      so it reads unmistakably even at 1px.
+    - **Airliner** (A3/A4/A5) — a wide heading-oriented dart.
+    - **Business jet** — same dart, narrower spread, chosen ONLY when
+      the aircraft's real ICAO type designator (`type`) matches
+      `flights.BIZJET_TYPES`, a new reference table (Citation/
+      Gulfstream/Learjet/Falcon/Phenom/Challenger/Hawker/PC-24 real
+      designators). **Honest gap, stated in the table's own docstring**:
+      unlike `ICAO_TYPE_NAMES` (populated from a real locally-observed
+      sample), this list is built from general real-world type-
+      designator knowledge — no bizjet happened to be in range during
+      this build to confirm against. Business jets and light GA share
+      the SAME emitter category (A1/A2), so `type` is the only real
+      signal that can split them, and `type` isn't always broadcast —
+      when it's missing or not a known bizjet code, it falls back to
+      plain GA rather than guessing.
+    - **GA** (A1/A2, not a known bizjet type) — a plain heading-oriented
+      dash, no wings at all. Deliberately less ink, not a shrunk copy
+      of the airliner dart — "small" reads as *less drawn*, not smaller
+      copies of a bigger shape.
+    - No/unknown category defaults to the airliner dart, not a guess —
+    A3 (large) is the majority real category in this project's own
+    213-aircraft sample, so it's the statistically honest fallback.
+  - **`draw_scope_airport()`** — two end-cap ticks joined by a short
+    bar, an "I"-shaped runway-strip glyph. **Deliberately NOT oriented
+    to the airport's real runway heading**: `flights.load_airport()`/
+    `location_config.json` store only lat/lon/name, no runway bearing.
+    MYR's real runway is genuinely 18/36 (confirmed live in a captured
+    transmission this same session — `"RUNWAY 18V ALPHA"`), but
+    hardcoding that one real airport's heading would be silently WRONG
+    the moment the configured home airport changes to a different one —
+    a canonical vertical glyph is an honest generic "this is a runway"
+    mark, not a claimed real bearing this project doesn't actually have
+    on file.
+  - **Honest constraint on how distinctly four shapes actually read at
+    this pixel density**, stated in `draw_scope_aircraft()`'s own
+    docstring rather than oversold: with up to 8 real aircraft inside a
+    23px scope radius, the airliner/bizjet/GA family is a REAL,
+    deliberate difference in the pixel offsets, but at 1:1 LED pixel
+    scale it will often read as "a small pointed shape" to a human eye
+    rather than unmistakably different classes. The helicopter and the
+    plain GA dash are the two shapes that stay unmistakable regardless
+    of scale (one has no heading-oriented wings at all, the other is a
+    rotor disk, not a dart) — confirmed by rendering a synthetic frame
+    with all four kinds present and saving it to PNG: the helicopter's
+    rotor cluster and the airport's runway glyph are both instantly
+    readable at a glance; the airliner/bizjet/GA distinction is real in
+    the code but visually subtle.
+  - **Verified**: `render_audit.py`'s instrumented `put_px` driven
+    directly against synthetic-but-realistic aircraft covering all four
+    icon kinds, a near-rim position (39.9nm, right at the edge of the
+    23px radius), an unknown-heading helicopter, and every selection
+    state (each aircraft in turn, the airport) — zero clipped pixels,
+    zero exceptions. Full `render_audit.py`/`fold_audit.py` suites clean
+    (0 modes failed, 0 feeds not folding). Live panel exercised through
+    the real input path with a real non-black rendered frame confirmed
+    by pixel dump — **no real traffic happened to be in range at check
+    time**, so the icon SHAPES themselves were confirmed via the direct
+    synthetic render + saved PNG, not the live hardware pass; the live
+    check confirms the code path runs cleanly on real hardware, not what
+    it looks like there. Worth a real visual spot-check next time actual
+    live traffic of a mixed category is in range.
+
   **PERFORMANCE — measured before building, not assumed:**
   | workload | cost | vs 50ms frame budget |
   |---|---|---|
