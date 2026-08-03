@@ -1058,15 +1058,18 @@ def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, big=False
     def px(dx, dy):
         put_px(buf, xi + (dx if face_right else -dx), yi + dy, col)
 
+    # 2x scale from the original pixel-cluster sprites, plus a belly
+    # row so each one reads as a fuselage BLOCK, not a thin scratch.
     SPRITES = {
-        # nose, fuselage, tail-up (a stubby little plane, wide body)
-        SCOPE_ICON_AIRLINER: [(2, 0), (1, 0), (0, 0), (-1, 0), (-1, -1)],
-        # shorter fuselage, swept tail
-        SCOPE_ICON_BIZJET: [(1, 0), (0, 0), (-1, 0), (-1, -1)],
-        # tiny fuselage, no tail flourish -- reads as smallest/plainest
-        SCOPE_ICON_GA: [(1, 0), (0, 0), (-1, 0)],
-        # body + top rotor bar + tail boom stub
-        SCOPE_ICON_HELI: [(0, 0), (-1, -1), (0, -1), (1, -1), (-1, 1)],
+        SCOPE_ICON_AIRLINER: [(4, 0), (3, 0), (2, 0), (1, 0), (0, 0), (-1, 0), (-2, 0),
+                              (2, 1), (1, 1), (0, 1), (-1, 1),
+                              (-2, -1), (-2, -2)],
+        SCOPE_ICON_BIZJET: [(3, 0), (2, 0), (1, 0), (0, 0), (-1, 0),
+                            (1, 1), (0, 1),
+                            (-1, -1), (-1, -2)],
+        SCOPE_ICON_GA: [(2, 0), (1, 0), (0, 0), (-1, 0), (0, 1)],
+        SCOPE_ICON_HELI: [(0, 0), (0, 1), (-2, -2), (-1, -2), (0, -2), (1, -2), (2, -2),
+                          (-2, 2), (-3, 3)],
     }
     for dx, dy in SPRITES[kind]:
         px(dx, dy)
