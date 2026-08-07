@@ -665,6 +665,120 @@ appends them to the menu automatically.
     it looks like there. Worth a real visual spot-check next time actual
     live traffic of a mixed category is in range.
 
+
+  **ICON/PERFORMANCE REVISIT, 2026-08-03.** Real user feedback after
+  Part 3 shipped: reported lag/choppiness plus icons that looked
+  "forced and over processed". The icon geometry was genuinely heavier
+  than it needed to be (a 6-`draw_line`-per-aircraft top-down dart --
+  thickened fuselage, swept wing lines, a tailplane) for what a few LED
+  pixels can resolve; simplified to 2 strokes (one fuselage line, one
+  wingspan line) per aircraft, and the DETAIL card's icon dropped a
+  redundant parallel fuselage line added in the same pass. Real,
+  measurable per-frame cost reduction, not just a visual simplification.
+  Same session, further explicit feedback: **helicopters stay a fixed
+  2D SIDE-VIEW sprite** (mirrored left/right by heading's sign, never
+  rotated -- a side view can't face any other way), **everything else
+  is TOP-DOWN**, rotated to real heading. `draw_scope_aircraft()` and
+  `_draw_plane_icon()` (DETAIL card) both now branch on `kind` for
+  this split, sharing the same simplified 2-stroke top-down geometry.
+  - **Scope enlarged, own bigger radius**: `FlightEngine.FLT_CX/CY/R`
+    (32, 32, 26) override the shared module-level `SCOPE_CX/CY/R`
+    (which `SatelliteEngine`'s dome still uses untouched) via the
+    `cx`/`cy`/`radius` params every `draw_scope_*` primitive already
+    accepted -- no shared-primitive changes needed, just passing the
+    override through every call site in `_frame_scope()`.
+  - **Ring legend now prints MILES**, not nautical miles -- this
+    project converts to imperial at the render layer everywhere else
+    (`km_to_mi`/`kmh_to_mph`/`nm_to_mi`), the scope legend was the one
+    holdout. The ring GEOMETRY itself is still computed from the real
+    nm values (that's what `RADIUS_NM` and ADS-B `dist_nm` actually
+    are); only the printed label changed, via `nm_to_mi()`, rounded, on
+    one compact line so the bigger circle keeps its bottom margin.
+  - Verified: zero clipped pixels confirmed directly via
+    `render_audit.py`'s instrumented `put_px` against the same
+    synthetic multi-kind aircraft set as Part 3 (including the near-rim
+    case), plus a rendered PNG spot-check of the bigger scope with all
+    icon kinds present. Full suite clean (0 modes failed).
+
+  **DESTINATION LEGIBILITY, 2026-08-03.** Real user feedback: the
+  DETAIL card's route line fell back to raw 3-letter airport codes
+  ("RDU>LGA") too often, and a code isn't legible to someone who
+  doesn't already know airport codes. Reordered the fallback chain to
+  prioritize the DESTINATION city name, spelled out -- if the full
+  origin+dest pair doesn't fit, the ORIGIN city is dropped first
+  (`"> RALEIGH/DURHAM"`), never the destination; raw codes are now the
+  true last resort, only when adsbdb gave no city name at all. Further
+  feedback: rather than ever truncating a long destination name, it now
+  **scrolls** (`draw_marquee`, same primitive news/ticker/gameday
+  already use) when it doesn't fit at `WIDTH-4` -- `self.route_scroll`
+  (deliberately NOT named `self.scroll`, which `Browsable`/other
+  marquee modes already claim -- see this doc's own documented trap
+  about that exact collision), reset to the start whenever the
+  underlying text changes (a different aircraft, or a freshly-resolved
+  route) so it never jumps mid-scroll. `render_audit.py`'s `MARQUEE_OK`
+  exemption set gained `"flights"` for this -- same legitimate off-panel
+  edge-drawing every other marquee mode is already exempted for.
+
+  **THE HANGAR, 2026-08-03.** A NEW feature (not part of the Part
+  1-3 overhaul) -- inspired by a competitor product (FlightPortrait): a
+  persistent, accumulating collection of every distinct real aircraft
+  this device has ever seen, by tail number, building up over time
+  rather than only showing live/ambient traffic.
+  - **Verified feasible BEFORE building, against real live data**: a
+    real 238-aircraft ADS-B sample near ORD showed real registration
+    (`"r"` field) present on 235/238 (98.7%), real type on 227/238
+    (95.4%) -- reliable enough to build on. `hangar.py` (new module,
+    same shape as every other feed/log store here) keys entries by
+    REGISTRATION, not the ICAO24 hex -- a bare hex isn't the human-
+    legible tail number this feature is about, and the ~1-2% of real
+    aircraft with no broadcast registration are simply not recorded,
+    an honest gap rather than an invented placeholder identity.
+  - **Bounded from the start**, per the immediately-preceding audit's
+    own lesson on unbounded resources: `HANGAR_MAX_ENTRIES = 500`,
+    LRU-by-last-seen eviction, documented in `hangar.py`'s own
+    docstring with the same rigor as `atc.py`'s `LOG_MAX_AGE_SECONDS`.
+  - **Writer is `flights.py`'s own background poll thread** -- zero new
+    network calls, zero new poll cadence, pure composition of data
+    that cycle already fetched. A disk write only happens when
+    something actually CHANGED (a new distinct aircraft, or a real
+    update to a repeat visitor's type/airline/times_seen), not
+    unconditionally every ~15s refresh -- most cycles see zero new
+    distinct aircraft.
+  - **A FOURTH view, deliberately NOT a fourth stop on the rotate
+    cycle.** It's whole-device history, orthogonal to whatever's
+    currently selected -- same relationship `SatelliteEngine`'s sky
+    dome has to its pass list, so it reuses that exact idiom: up/down
+    toggles it (`FlightEngine` is not `VERTICAL_BROWSE`, so the axis
+    was unclaimed -- no new input plumbing needed). Paging reuses the
+    same left/right `Browsable` machinery ATC log's pagination already
+    established.
+  - **Dispatches BEFORE the "no aircraft right now" idle check in
+    `frame()`** -- deliberately. The collection has nothing to do with
+    whether anything is in the sky this instant (arguably most useful
+    exactly when it's empty), and letting an empty sky silently block
+    a real, populated view would be exactly the "one system doesn't
+    know about a state another just entered" bug class this doc names
+    repeatedly. Checked directly, not folded into `has_content()`.
+  - **Verified end-to-end against real live data, not synthesized**:
+    ran the real fetch->record pipeline against a live ADS-B sample,
+    confirmed registration/type/airline all populate correctly.
+    `render_audit.py`'s instrumented `put_px` driven directly against
+    synthetic edge cases (no type, no airline, a 3-day-old entry, an
+    oversized registration/airline string) -- zero clipped/overflow/
+    collision. New permanent `fold_audit.py` coverage for the `reg`
+    field (verified directly via `fold_audit.check()`, since the
+    script's own first live call -- ESPN -- is still 403ing as of this
+    session, an external condition unrelated to this feature, already
+    flagged and not worked around). **Live-verified on the real panel,
+    not staged**: the live device's own background poller had already
+    recorded 11 distinct real aircraft at MYR by the time of the check
+    (including a real Robinson R44 helicopter and three real business
+    jets -- Hawker, Learjet, Citation), toggle in/out and paging both
+    confirmed through the real `/api/press` input path, and a
+    `times_seen` count that genuinely incremented (5X->6X) BETWEEN two
+    checks a few seconds apart, caught live by the device's own poller
+    mid-verification -- not a fabricated before/after.
+
   **PERFORMANCE — measured before building, not assumed:**
   | workload | cost | vs 50ms frame budget |
   |---|---|---|
