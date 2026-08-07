@@ -8093,10 +8093,24 @@ class SportsEngine(Browsable):
         if fg["event_id"] != self._soccer_goal_event_id:
             # The game being watched changed (a new pinned-favorite game
             # went live, or the old one finished and a fresh one
-            # started) -- adopt a clean seen-set for it, same "don't
-            # replay history" rule as GameDayEngine._seen_done.
+            # started). fetch_new_soccer_goals() itself does NOT adopt a
+            # baseline -- its own docstring says the CALLER must hand in
+            # a fresh empty set and is responsible for not replaying
+            # history. A plain `self._soccer_goal_seen = set()` here
+            # does the "fresh set" half but not the "don't replay" half:
+            # the very next call below would report every goal already
+            # scored before this game was opened as brand new (a real,
+            # confirmed misfire -- ambient landing on a favorite game
+            # already 2-0 would fire two GOAL celebrations for goals
+            # that happened minutes ago). Adopt the baseline first, same
+            # "don't replay" rule as GameDayEngine._seen_done and
+            # _detect_mlb_home_run's _seen_home_runs: call once to seed
+            # `seen` with whatever already scored, discard that result,
+            # and only report what's genuinely new after that.
             self._soccer_goal_event_id = fg["event_id"]
             self._soccer_goal_seen = set()
+            sports.fetch_new_soccer_goals(fav["league"], fg["event_id"],
+                                           self._soccer_goal_seen)
 
         goals = sports.fetch_new_soccer_goals(fav["league"], fg["event_id"],
                                                self._soccer_goal_seen)
