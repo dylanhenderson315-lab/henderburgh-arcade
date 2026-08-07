@@ -8093,10 +8093,24 @@ class SportsEngine(Browsable):
         if fg["event_id"] != self._soccer_goal_event_id:
             # The game being watched changed (a new pinned-favorite game
             # went live, or the old one finished and a fresh one
-            # started) -- adopt a clean seen-set for it, same "don't
-            # replay history" rule as GameDayEngine._seen_done.
+            # started). fetch_new_soccer_goals() itself does NOT adopt a
+            # baseline -- its own docstring says the CALLER must hand in
+            # a fresh empty set and is responsible for not replaying
+            # history. A plain `self._soccer_goal_seen = set()` here
+            # does the "fresh set" half but not the "don't replay" half:
+            # the very next call below would report every goal already
+            # scored before this game was opened as brand new (a real,
+            # confirmed misfire -- ambient landing on a favorite game
+            # already 2-0 would fire two GOAL celebrations for goals
+            # that happened minutes ago). Adopt the baseline first, same
+            # "don't replay" rule as GameDayEngine._seen_done and
+            # _detect_mlb_home_run's _seen_home_runs: call once to seed
+            # `seen` with whatever already scored, discard that result,
+            # and only report what's genuinely new after that.
             self._soccer_goal_event_id = fg["event_id"]
             self._soccer_goal_seen = set()
+            sports.fetch_new_soccer_goals(fav["league"], fg["event_id"],
+                                           self._soccer_goal_seen)
 
         goals = sports.fetch_new_soccer_goals(fav["league"], fg["event_id"],
                                                self._soccer_goal_seen)
@@ -11771,14 +11785,26 @@ class GameDayEngine(Browsable):
         """
         buf = blank(); fill(buf, self.BG)
         self._occasion_frame(buf, 0.5 if f.get("state") == "in" else 0.3)
-        self._kicker(buf, "FIGHT STATS", self.GOLD)
 
         fighters = f.get("fighters") or []
         stats = mma.FEED.get_stats(f.get("id")) if f.get("id") else {}
         left = stats.get(fighters[0]["id"]) if fighters else None
         right = stats.get(fighters[1]["id"]) if len(fighters) > 1 else None
         if not fighters or (left is None and right is None):
+            # Bail out to the matchup view BEFORE drawing anything of our
+            # own -- the kicker used to be drawn here first, which meant
+            # "FIGHT STATS" got recorded (by render_audit.py's draw
+            # instrumentation) immediately before _frame_upcoming's own
+            # "MAIN EVENT"/"CO-MAIN EVENT" kicker, both centered at the
+            # same y=6 box. The stray draw never reached a real panel (this
+            # buf is discarded in favor of _frame_upcoming's own fresh
+            # buffer), but it produced a real, intermittent COLLISION
+            # report every time a fight had no stats fetched yet -- exactly
+            # the "FIGHT STATS overlaps MAIN EVENT" failure seen in
+            # render_audit.py gameday runs. Drawing the kicker only once we
+            # know we're keeping this frame removes the phantom draw.
             return self._frame_upcoming(f)
+        self._kicker(buf, "FIGHT STATS", self.GOLD)
 
         # Last name only -- both corners plus the row labels have to
         # share 64px, and the font can always fit a single surname.
