@@ -1100,7 +1100,26 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         parts = parsed.path.strip("/").split("/")
         n = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(n) if n else b""
+        # Every non-upload endpoint here expects a small JSON body or none
+        # at all. Reading `n` bytes unconditionally meant ANY POST -- not
+        # just /api/upload-video -- could force an arbitrarily large read
+        # into memory just by lying about Content-Length; only the upload
+        # path itself was ever bounds-checked (and only AFTER the read).
+        # Cap the generic path at 4MB (a raw uncompressed 64x64 frame via
+        # /api/cast is 12288 bytes, so this is generous headroom for any
+        # real client) and let only the upload endpoint go larger, still
+        # bounded by MAX_UPLOAD_BYTES.
+        if parsed.path == "/api/upload-video":
+            if n > MAX_UPLOAD_BYTES:
+                self._json({"ok": False, "error": "file too large (800MB max)"}, 413)
+                return
+            body = self.rfile.read(n) if n else b""
+        else:
+            cap = 4 * 1024 * 1024
+            if n > cap:
+                self._json({"ok": False, "error": "request body too large"}, 413)
+                return
+            body = self.rfile.read(n) if n else b""
 
         if len(parts) == 3 and parts[:2] == ["api", "mode"]:
             ARCADE.set_mode(unquote(parts[2]))
