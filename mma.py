@@ -427,8 +427,7 @@ class UfcFeed:
                     self._stats_try = time.time()
                 try:
                     self._poll_stats()
-                except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-                        ValueError, KeyError, TypeError) as e:
+                except Exception as e:                     # noqa: BLE001 - never die
                     with self._lock:
                         self._stats_err = f"{type(e).__name__}"
                     time.sleep(ERROR_BACKOFF_BASE)
@@ -478,8 +477,7 @@ class UfcFeed:
                     self._last_try = time.time()
                 try:
                     self._poll()
-                except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-                        ValueError, KeyError, TypeError) as e:
+                except Exception as e:                      # noqa: BLE001 - never die
                     with self._lock:
                         self._fails += 1
                         self._err = f"{type(e).__name__}"

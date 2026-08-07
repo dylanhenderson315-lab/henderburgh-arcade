@@ -447,8 +447,7 @@ class SkyPassFeed:
                 return
             try:
                 self._work(loc)
-            except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-                    ValueError, TypeError, KeyError) as e:
+            except Exception as e:                          # noqa: BLE001 - never die
                 with self._lock:
                     self._err = type(e).__name__
             # Was 5.0s. Tightened to match SKY_NOW_REFRESH so the live
