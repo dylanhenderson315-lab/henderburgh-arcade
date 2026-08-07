@@ -26,6 +26,7 @@ import satellite
 import skypass
 import flights
 import atc
+import hangar
 import sports
 import news
 import weather
@@ -5546,6 +5547,16 @@ class FlightEngine(Browsable):
     VIEW_SCOPE = 0
     VIEW_DETAIL = 1
     VIEW_ATC_LOG = 2
+    # THE HANGAR -- a FOURTH view, but deliberately NOT a fourth stop on
+    # the rotate cycle above. It isn't "more detail on the selected
+    # aircraft" or "the selected target's radio log" -- it's a whole-
+    # device history, orthogonal to whatever is currently selected, same
+    # relationship SatelliteEngine's sky dome has to its pass list. Reused
+    # that exact idiom: up/down toggles it, since FlightEngine (like
+    # SatelliteEngine) is NOT VERTICAL_BROWSE, so up/down is unclaimed --
+    # no new input plumbing, no lengthening of the already-3-stop rotate
+    # chain with a view that doesn't belong in it.
+    VIEW_HANGAR = 3
     SCOPE_TICKS = 260         # ~13s on the scope before walking the cards
     SWEEP_DEG_PER_TICK = 3.0  # ~6s per full rotation at tick_rate 0.05
     ATC = (255, 170, 60)      # warm amber, distinct from PLANE blue / ROUTE yellow -- reads as "radio"
@@ -5585,6 +5596,14 @@ class FlightEngine(Browsable):
         # CLAUDE.md's own documented trap about that exact collision).
         self.route_scroll = 0.0
         self._route_scroll_key = None
+        # THE HANGAR (hangar.py) -- the persistent collection, read
+        # fresh every tick() (cheap: hangar.LOG.get() is a pure
+        # in-memory read, same never-blocks contract as every other
+        # FEED here). hangar_idx pages through it via the same left/
+        # right Browsable machinery every other list in this project
+        # uses, branched on view exactly like ATC_LOG's paging already is.
+        self.hangar_entries = []
+        self.hangar_idx = 0
         self.hold = 0
         self.cycling = True
         self.ticks = 0
@@ -5673,6 +5692,14 @@ class FlightEngine(Browsable):
                 self.atc_page = (self.atc_page + direction) % len(self.atc_pages)
                 self.atc_hold = 0
             return
+        # THE HANGAR -- left/right pages one entry at a time through the
+        # collection, same tap-to-step/hold-to-accelerate Browsable
+        # machinery every other list here uses. Selection/aircraft
+        # stepping has no meaning while this view is open.
+        if self.view == self.VIEW_HANGAR:
+            if self.hangar_entries:
+                self.hangar_idx = (self.hangar_idx + direction) % len(self.hangar_entries)
+            return
         aircraft = self.data.get("aircraft") or []
         # PART 2: the airport is a real stop in the SAME step cycle, not
         # a separate control -- appended after every aircraft so
@@ -5739,6 +5766,15 @@ class FlightEngine(Browsable):
             else:
                 self.cycling = not self.cycling
             self.hold = 0
+        elif cmd in ("up", "down"):
+            # THE HANGAR toggle -- identical idiom to SatelliteEngine's
+            # own up/down dome toggle (see its input()): unclaimed axis
+            # (FlightEngine is not VERTICAL_BROWSE) reused for a whole-
+            # view switch that's orthogonal to selection, rather than
+            # invented as a new gesture.
+            self.view = self.VIEW_HANGAR if self.view != self.VIEW_HANGAR else self.VIEW_SCOPE
+            self._auto_detail = False
+            self.hold = 0
 
     def auto(self):
         pass          # already self-cycling; ambient and manual look the same
@@ -5750,6 +5786,14 @@ class FlightEngine(Browsable):
         self.route_scroll += 0.5   # same per-tick speed every other marquee in this project uses
         self.data = flights.FEED.get()
         self.airport = flights.load_airport()
+        # THE HANGAR -- read every tick, same as every other FEED here
+        # (hangar.LOG.get() is a pure in-memory read, never blocks).
+        # Clamped with %, same cursor-safety idiom every other list in
+        # this project uses so a shrinking list (a real eviction at the
+        # cap) can never IndexError or strand the cursor.
+        self.hangar_entries = hangar.LOG.get()
+        if self.hangar_entries:
+            self.hangar_idx %= len(self.hangar_entries)
         # PERSONAL-RIG-ONLY (see atc.py/CLAUDE.md). atc.FEED degrades
         # honestly to an empty list if the worker process has never run
         # or mlx-whisper isn't installed -- reading it costs nothing
@@ -6159,6 +6203,75 @@ class FlightEngine(Browsable):
             return f"{m}M {s:02d}S"
         return f"{s}S"
 
+    HANGAR = (190, 160, 255)   # soft lavender -- distinct from PLANE blue/ROUTE yellow/ATC amber
+
+    @staticmethod
+    def _fmt_age_long(secs):
+        """Same shape as _fmt_ago but DAYS-aware -- THE HANGAR is a
+        persistent collection, so 'first seen' can genuinely be weeks
+        old, unlike every other _fmt_ago caller in this class which
+        only ever deals in minutes/hours (a live transmission, a
+        satellite pass)."""
+        secs = max(0, int(secs))
+        d, rem = divmod(secs, 86400)
+        h, rem = divmod(rem, 3600)
+        m, s = divmod(rem, 60)
+        if d:
+            return f"{d}D {h}H"
+        if h:
+            return f"{h}H {m:02d}M"
+        if m:
+            return f"{m}M {s:02d}S"
+        return f"{s}S"
+
+    def _frame_hangar(self):
+        """THE HANGAR -- the persistent collection (hangar.py), paged
+        one aircraft at a time. See hangar.py's own docstring for the
+        identity/retention rules; this method only ever reads
+        self.hangar_entries (refreshed in tick()), never touches
+        hangar.py directly."""
+        buf = blank()
+        fill(buf, self.BG)
+        n = len(self.hangar_entries)
+
+        if not n:
+            # Never invents an entry -- an empty collection (device just
+            # set up, or genuinely nothing with a broadcast registration
+            # has passed overhead yet) is shown honestly, same shape as
+            # the ATC log's own empty state.
+            draw_header(buf, "HANGAR", self.HANGAR)
+            draw_text_centered(buf, 28, "NONE SEEN", self.INK_DIM)
+            draw_text_centered(buf, 36, "YET", self.INK_DIM)
+            return bytes(buf)
+
+        idx = self.hangar_idx % n
+        e = self.hangar_entries[idx]
+        draw_header(buf, e.get("reg") or "UNKNOWN", self.HANGAR, right_tag=f"{idx + 1}/{n}")
+
+        # Real, readable type name (flights.ICAO_TYPE_NAMES -- same
+        # static reference table the DETAIL card already uses), falling
+        # back honestly to "TYPE UNKNOWN" for the small real fraction of
+        # aircraft that never broadcast a type code.
+        typ = flights._type_name(e.get("type")) or "TYPE UNKNOWN"
+        draw_text_centered(buf, 19, fit_text(typ, WIDTH - 4), self.INK)
+
+        airline = e.get("airline")
+        if airline:
+            draw_text_centered(buf, 27, fit_text(airline, WIDTH - 4), self.INK_DIM)
+
+        # Repeat visitors get the SAME green treatment as an ATC
+        # confidence-match -- "this one's been here before" is the
+        # collection's own version of a confirmed, notable fact.
+        times = e.get("times_seen") or 1
+        seen_col = self.ATC_MATCH if times > 1 else self.INK_DIM
+        seen_txt = f"SEEN {times}X" if times > 1 else "FIRST SIGHTING"
+        draw_text_centered(buf, 40, fit_text(seen_txt, WIDTH - 4), seen_col)
+
+        age = max(0.0, time.time() - (e.get("first_seen") or 0))
+        draw_text_centered(buf, 52, fit_text(f"{self._fmt_age_long(age)} AGO", WIDTH - 4),
+                           (86, 94, 116))
+        return bytes(buf)
+
     def _frame_atc_log(self):
         """TWO views over one log -- see atc.py/CLAUDE.md, PERSONAL-RIG-
         ONLY, and PART 2's writeup there for why per-utterance speaker
@@ -6267,6 +6380,18 @@ class FlightEngine(Browsable):
             buf = blank()
             fill(buf, self.BG)
             return self._frame_unconfigured(buf)
+
+        # THE HANGAR dispatches BEFORE the "no aircraft right now ->
+        # CLEAR SKIES" check below -- deliberately. The collection has
+        # nothing to do with whether anything is in the sky THIS
+        # instant (it's arguably most useful exactly when the sky is
+        # empty), and the exact bug this project's CLAUDE.md names
+        # repeatedly is a real fact (a view has real content) getting
+        # silently blocked by an unrelated piece of state deciding what
+        # renders next. Checked directly here, not folded into
+        # has_content()/_frame_idle()'s aircraft-only logic.
+        if self.view == self.VIEW_HANGAR:
+            return self._frame_hangar()
 
         aircraft = self.data.get("aircraft") or []
         if not aircraft:

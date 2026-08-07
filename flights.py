@@ -36,6 +36,7 @@ import urllib.request
 
 import paneltext
 
+import hangar
 import satellite
 
 POSITION_URL = "https://api.adsb.lol/v2/point/{lat}/{lon}/{radius_nm}"
@@ -418,6 +419,13 @@ def _fetch_positions(lat, lon):
             # (which reorders every refresh). Used as the SELECTION key,
             # not for display -- `ident` is still what's shown on screen.
             "hex": (ac.get("hex") or "").strip().upper() or None,
+            # Real registration/tail number ("N8986Q"), for THE HANGAR
+            # (hangar.py) -- confirmed present on 235/238 (98.7%) of a
+            # real 238-aircraft live sample near ORD. Folded like every
+            # other externally-sourced string here even though real
+            # registrations are plain ASCII in practice -- no exception
+            # carved out for "this one's probably fine".
+            "reg": paneltext.panel_text((ac.get("r") or "").strip()) or None,
             "callsign": (ac.get("flight") or "").strip(),
             # Real ADS-B emitter category (A1 light .. A7 rotorcraft, B2
             # lighter-than-air -- see the CAT_* constants above). Was
@@ -629,6 +637,18 @@ class FlightFeed:
         # handful of callsigns re-enrich once, not a meaningful cost.
         if len(self._route_cache) > 2000:
             self._route_cache.clear()
+
+        # THE HANGAR (hangar.py) -- record every real aircraft with a
+        # real registration into the persistent collection, right here
+        # on this same background poll thread. Pure composition of data
+        # this cycle already fetched; no new network call, no new poll
+        # cadence. Only aircraft that actually broadcast a registration
+        # are recorded -- see hangar.py's own docstring on why a bare
+        # hex isn't treated as a substitute tail number.
+        for ac in aircraft:
+            if ac["reg"]:
+                hangar.LOG.record_sighting(
+                    ac["reg"], ac["type"], (ac.get("route") or {}).get("airline"))
 
         with self._lock:
             self._aircraft = aircraft

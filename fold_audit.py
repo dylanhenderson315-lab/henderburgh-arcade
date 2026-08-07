@@ -169,6 +169,12 @@ def main():
     bad += check("blog._clean", lambda: {"t": blog._clean(dirty)})
     bad += check("flights._ident",
                  lambda: {"t": flights._ident({"flight": dirty, "r": dirty})})
+    # THE HANGAR's "reg" field (hangar.py) -- folds inline in
+    # _fetch_positions() rather than through a standalone function, same
+    # as _ident's own "r" fallback just above; exercised the same way,
+    # via the real fold call directly on a dirty registration string.
+    bad += check("flights reg field (Hangar)",
+                 lambda: {"t": flights.paneltext.panel_text(dirty)})
     # skypass folds the TLE object name inline in predict() rather than
     # through a standalone cleaner -- exercised via the real fold function
     # directly since there is no fetch to replay without a live catalogue.

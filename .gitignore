@@ -20,3 +20,7 @@ tron_brain.json
 # ATC transcription log -- runtime state (real transcript text with real
 # timestamps), not source, and personal-rig-only (see atc.py/CLAUDE.md).
 atc_log.jsonl
+
+# THE HANGAR -- persistent aircraft collection, real runtime state (real
+# tail numbers with real timestamps), not source (see hangar.py).
+hangar_log.jsonl
