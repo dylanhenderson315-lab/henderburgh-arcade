@@ -571,12 +571,22 @@ def _fetch_positions(lat, lon):
             "phase": phase,
             "vrate_fpm": rate,
             "notable": _notable(ac, phase=phase),
-            # WINDOW FILTER (2026-08-07) -- true if this aircraft's real
-            # bearing FROM home (dir_deg, not track_deg) currently falls
-            # inside the configured window cone. Exposed so FlightEngine
-            # can give it distinct visual treatment with zero I/O of its
-            # own -- see draw_scope_aircraft's window-ring call site.
-            "in_window": in_window(dir_deg, window["center_deg"], window["fov_deg"]),
+            # WINDOW FILTER (2026-08-07, distance-capped 2026-08-08) --
+            # true if this aircraft's real bearing FROM home (dir_deg, not
+            # track_deg) currently falls inside the configured window cone
+            # AND it's within the configured max_nm. Bearing alone answers
+            # "is this the right direction"; real visibility out an actual
+            # window also depends on distance -- a plane at 35nm can sit
+            # dead-centre in the same 296+/-40deg cone as one at 3nm while
+            # being over the horizon or behind terrain. See
+            # satellite.WINDOW_MAX_NM_DEFAULT's own note for the reasoning
+            # behind the default distance and why it's config-driven, not
+            # hardcoded. Exposed so FlightEngine can give it distinct
+            # visual treatment with zero I/O of its own -- see
+            # draw_scope_aircraft's window-ring call site.
+            "in_window": (in_window(dir_deg, window["center_deg"], window["fov_deg"])
+                          and ac.get("dst") is not None
+                          and ac["dst"] <= window["max_nm"]),
         })
     # Most notable first, then nearest -- ADDITIVELY adjusted by the
     # window boost (WINDOW_BOOST above), never replacing this ranking.

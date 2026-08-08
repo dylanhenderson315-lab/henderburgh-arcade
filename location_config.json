@@ -9,6 +9,7 @@
   },
   "window": {
     "center_deg": 296.0,
-    "fov_deg": 80.0
+    "fov_deg": 80.0,
+    "max_nm": 8.0
   }
 }

@@ -1004,7 +1004,8 @@ class Handler(BaseHTTPRequestHandler):
             # HTTP surface for it yet). Same shape as /api/satellite/
             # location just above.
             w = satellite.load_window()
-            self._json({"center_deg": w["center_deg"], "fov_deg": w["fov_deg"]})
+            self._json({"center_deg": w["center_deg"], "fov_deg": w["fov_deg"],
+                        "max_nm": w["max_nm"]})
         elif path == "/api/sports/config":
             leagues, favorite = sports.FEED.get_config()
             u = sports.FEED.get_universal()
@@ -1190,8 +1191,14 @@ class Handler(BaseHTTPRequestHandler):
                 j = json.loads(body or b"{}")
                 center = float(j["center_deg"])
                 fov = float(j["fov_deg"])
-                satellite.save_window(center, fov)
-                self._json({"ok": True, "center_deg": center, "fov_deg": fov})
+                # max_nm is optional on write -- omitting it keeps whatever
+                # was already configured (or the reasoned default on first
+                # save) rather than forcing every caller to know/send it,
+                # same "configurable but not mandatory" shape center_deg/
+                # fov_deg already had before this key existed.
+                max_nm = float(j["max_nm"]) if "max_nm" in j else None
+                w = satellite.save_window(center, fov, max_nm)
+                self._json({"ok": True, **w})
             except (ValueError, KeyError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/sports/leagues":

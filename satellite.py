@@ -113,12 +113,42 @@ def load_location():
 WINDOW_CENTER_DEG_DEFAULT = 296.0
 WINDOW_FOV_DEG_DEFAULT = 80.0
 
+# WINDOW_MAX_NM_DEFAULT (2026-08-08) -- the real fix for a real reported
+# problem: bearing alone answers "is this aircraft in the right DIRECTION",
+# not "can I actually see it out the window right now". A plane at 3nm in
+# the 296+/-40deg cone genuinely is visible out a real window; a plane at
+# 35nm in that same cone is over the horizon or behind terrain even though
+# the bearing math says yes -- the cone was never meant to reach all the
+# way to RADIUS_NM (this project's full 40nm tracking radius), which is a
+# TRACKING limit (how far ADS-B reception reaches), not a VISIBILITY one.
+#
+# 8nm is the chosen default, and it is a judgment call, not a measured
+# fact the way most numbers in this project are -- there is no live sensor
+# that tells you "how far can a person actually see a plane from this
+# specific window", so this is reasoned from real-world aircraft
+# perception distances instead of invented outright: a commercial
+# airliner-sized object is genuinely identifiable to the naked eye out to
+# roughly 8-10 statute miles in clear conditions (smaller GA aircraft
+# noticeably less), and a real residential window's practical sightline is
+# usually well short of the geometric horizon anyway (trees, structures,
+# haze) -- 8nm (~9.2 statute miles) sits at the generous end of "genuinely
+# visible", not the geometric maximum. Tunable via WINDOW config exactly
+# like center_deg/fov_deg, precisely because it's a judgment call the
+# owner may want to correct once they've actually watched a few real
+# aircraft cross the cone at different distances.
+WINDOW_MAX_NM_DEFAULT = 8.0
+
 
 def load_window():
-    """The configured window cone as {"center_deg", "fov_deg"}. Malformed
-    or missing data falls back to the real measured defaults above (never
-    a guessed value) -- same "safe default on first run" shape as
-    load_location()."""
+    """The configured window cone as {"center_deg", "fov_deg", "max_nm"}.
+    Malformed or missing data falls back to the real measured/reasoned
+    defaults above (never a guessed value) -- same "safe default on first
+    run" shape as load_location(). `max_nm` is read with its OWN fallback
+    (WINDOW_MAX_NM_DEFAULT) independently of center_deg/fov_deg, so a
+    config saved before this key existed still loads cleanly instead of
+    falling all the way back to every default -- a real back-compat
+    concern, not hypothetical, since save_window() below already shipped
+    once without this key."""
     data = {}
     if CONFIG_PATH.exists():
         try:
@@ -131,26 +161,53 @@ def load_window():
             center = float(win["center_deg"]) % 360.0
             fov = float(win["fov_deg"])
             if 0.0 < fov <= 360.0:
-                return {"center_deg": center, "fov_deg": fov}
+                try:
+                    max_nm = float(win["max_nm"])
+                    if max_nm <= 0:
+                        raise ValueError
+                except (KeyError, TypeError, ValueError):
+                    max_nm = WINDOW_MAX_NM_DEFAULT
+                return {"center_deg": center, "fov_deg": fov, "max_nm": max_nm}
         except (KeyError, TypeError, ValueError):
             pass
-    return {"center_deg": WINDOW_CENTER_DEG_DEFAULT, "fov_deg": WINDOW_FOV_DEG_DEFAULT}
+    return {"center_deg": WINDOW_CENTER_DEG_DEFAULT, "fov_deg": WINDOW_FOV_DEG_DEFAULT,
+            "max_nm": WINDOW_MAX_NM_DEFAULT}
 
 
-def save_window(center_deg, fov_deg):
+def save_window(center_deg, fov_deg, max_nm=None):
     """Persist the window cone. PRESERVES every key this function does not
     own (notably `airport`, `lat`/`lon`/`label` -- the identical lesson
     save_location()/flights.save_airport() already had to learn: a writer
     that rebuilds the whole document silently wipes a sibling feature's
-    config the first time this one is touched)."""
+    config the first time this one is touched).
+
+    `max_nm=None` (the default) PRESERVES whatever max_nm is already
+    saved -- NOT the module default. Falling back to WINDOW_MAX_NM_DEFAULT
+    whenever the caller omits it would silently reset a real tuned value
+    back to the default every time someone just adjusts center_deg/fov_deg
+    without also resending max_nm (e.g. the control panel's bearing/FOV
+    slider) -- the exact destructive-overwrite bug class this project has
+    already hit twice on this same config file, just one call deeper.
+    Only a brand-new config (nothing saved yet) falls back to the reasoned
+    default; every subsequent save keeps the previous value unless max_nm
+    is explicitly passed."""
     data = {}
     if CONFIG_PATH.exists():
         try:
             data = json.loads(CONFIG_PATH.read_text()) or {}
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             data = {}
+    existing = data.get("window") if isinstance(data.get("window"), dict) else {}
+    if max_nm is not None:
+        resolved_max_nm = float(max_nm)
+    else:
+        try:
+            resolved_max_nm = float(existing["max_nm"])
+        except (KeyError, TypeError, ValueError):
+            resolved_max_nm = WINDOW_MAX_NM_DEFAULT
     data["window"] = {"center_deg": float(center_deg) % 360.0,
-                      "fov_deg": float(fov_deg)}
+                      "fov_deg": float(fov_deg),
+                      "max_nm": resolved_max_nm}
     CONFIG_PATH.write_text(json.dumps(data, indent=2))
     return data["window"]
 
