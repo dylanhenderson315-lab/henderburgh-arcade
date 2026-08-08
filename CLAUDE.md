@@ -1325,6 +1325,142 @@ appends them to the menu automatically.
   cycle/dismiss/hand-off sequence on real hardware, and confirm the
   ceremonial card against a real Hangar-logged aircraft.
 
+  **WINDOW FILTER, ROUND 3 — real distance cap (2026-08-08).** Real
+  feedback, not a visual complaint: bearing alone (296°±40°) answers
+  "is this aircraft in the right DIRECTION", never "can I actually SEE
+  it out the window right now" — a plane at 3nm in that cone genuinely
+  is visible from a real window; one at 35nm in the exact same cone is
+  over the horizon or behind terrain, but the bearing-only cone said yes
+  to both identically.
+
+  - **`satellite.WINDOW_MAX_NM_DEFAULT = 8.0`** — a reasoned judgment
+    call, explicitly NOT a measured fact the way most numbers in this
+    project are (there's no sensor that reports "how far can a person
+    actually see out this specific window"): roughly the generous end of
+    real-world naked-eye identification range for an airliner-sized
+    object in clear conditions, and a real residential window's
+    practical sightline (trees, structures, haze) usually falls short of
+    the geometric horizon anyway, so 8nm (~9.2 statute miles) sits well
+    inside "genuinely visible" rather than the theoretical maximum.
+    Config-driven exactly like `center_deg`/`fov_deg` — precisely
+    because it's a judgment call, tunable once the owner has actually
+    watched real aircraft cross the cone at different distances.
+  - **`load_window()`/`save_window()` extended to carry `max_nm`**, with
+    real back-compat (a config saved before this key existed — every
+    config saved by ROUND 1/2 of this feature — still loads cleanly via
+    its own independent fallback, not a blanket "missing key means
+    everything's default").
+  - **A real destructive-overwrite bug caught and fixed before commit,
+    not after.** The first draft of `save_window(max_nm=None)` fell back
+    to `WINDOW_MAX_NM_DEFAULT` whenever the caller omitted `max_nm` —
+    which would have silently RESET a real tuned value back to 8.0 every
+    single time the owner adjusted just `center_deg`/`fov_deg` from the
+    control panel (which only ever sends those two fields). Caught by
+    testing the exact sequence directly: save with an explicit
+    `max_nm=12.0`, then save again omitting it — the second save must
+    preserve 12.0, not reset to 8.0. It didn't, on the first attempt.
+    Fixed to read the EXISTING saved `max_nm` as the fallback, only
+    falling through to the module default on a genuinely first-ever
+    save. This is the same destructive-overwrite bug class
+    `location_config.json` has already caused twice before in this
+    project (the `airport` key, the `golf_player` key) — one call
+    deeper this time, caught before it shipped rather than after.
+  - **`flights.py`'s `in_window` stamp is now bearing-cone AND
+    `dist_nm <= max_nm`** — a single AND-gated boolean, stamped once, at
+    the same call site every downstream consumer already reads from.
+    This means the window ring, the `WINDOW_BOOST` sort nudge, and the
+    plane-in-window takeover's newly-entered detection ALL inherit the
+    distance cap for free — none of those three call sites needed to
+    change, because they all only ever read the one `in_window` field
+    rather than re-deriving it.
+  - **`/api/window` GET/POST extended** to read/write `max_nm` (POST
+    treats it as optional, matching `save_window()`'s own preserve-if-
+    omitted contract above).
+  - **Verified**: the exact scenario from the real feedback — same
+    bearing (300°, inside the 296°±40° cone), 3nm vs. 35nm — confirmed
+    programmatically: the close one stays `in_window`, the far one
+    correctly drops out. `render_audit.py`/`fold_audit.py` both clean.
+    Real panel restarted and confirmed healthy (`/api/window` returns
+    the real config including the new `max_nm` key; a real non-black,
+    error-free `flights` frame pulled via `/api/frame`). **No real
+    aircraft were in range to confirm the cap against genuinely live
+    traffic this session** — the same honest gap every other flights
+    feature has hit this session; flagged for next time real traffic
+    crosses the cone at a range that would exercise the cutoff.
+
+  **RADAR-SCOPE ICONS REDRAWN (2026-08-08)** — real feedback on an
+  actual rendered screenshot of the live panel, not a described
+  complaint: the helicopter icon (9 disconnected `put_px` dots with no
+  connecting stroke) read as a violet blob, not a helicopter, and the
+  screenshot showed it plainly. Separately, `_ac_kind()`'s three
+  fixed-wing buckets (airliner/bizjet/GA) only ever differed by SIZE —
+  the same 2-stroke cross, scaled — which is why they never felt like
+  distinct categories at 3-5px even though the classification underneath
+  was real.
+
+  Every kind is now a genuinely different SILHOUETTE FAMILY, still 2
+  strokes or fewer per icon (unchanged stroke-count budget, the exact
+  number this project already proved safe against the real lag
+  complaint in ICON/PERFORMANCE REVISIT above — this redesign changes
+  SHAPE, not cost):
+  - **GA** — a single stroke, a lone dash, no wing at all. "Less drawn"
+    stays the point (same reasoning the original GA design had, before
+    it quietly regressed back to a scaled copy of the shared cross at
+    some earlier point this project didn't separately document).
+  - **BIZJET** — a small cross with the wing stroke set AFT of the
+    fuselage's own centre rather than centred on it — a real structural
+    cue (most business jets have a low, rear-mounted wing), not just a
+    smaller airliner.
+  - **AIRLINER** — unchanged proportions: a wide cross, wing centred on
+    the fuselage, the biggest and most symmetric silhouette here.
+  - **HELI** — replaced the 9-point cluster with a connected T: a
+    horizontal rotor bar + a short vertical mast + one tail-boom pixel
+    kicked out behind the facing direction. The rotor bar deliberately
+    stays SCREEN-LEVEL at every heading (mirrored left/right only, never
+    rotated) — a helicopter's rotor disk doesn't visually "point"
+    anywhere, and the bar staying flat while every fixed-wing icon
+    visibly rotates with real heading is itself a recognition cue over
+    time, on top of the shape alone.
+
+  **Verified via a synthetic 8x-zoom PNG spot-check BEFORE touching the
+  live panel** — all four kinds across 7 headings, sent for direct visual
+  review and approved as designed, same "render before calling it done"
+  discipline this project has followed since its very first icon pass.
+
+  **`NOTABLE_GLOW_FLOOR = 0.75` (new)** — the one piece of visual
+  hierarchy this scope was genuinely missing, added in the same pass
+  after the owner asked directly whether "notable" needed its own
+  signal. Before this, every target dimmed identically as the sweep beam
+  passed it (down to `SCOPE_TARGET_FLOOR = 0.38`), so a MAYDAY squawk and
+  a routine regional jet looked the same off-beam — "notable" only ever
+  showed up as TEXT elsewhere on the card. A real notable aircraft (see
+  `flights._notable()`'s own rank tiers) now never dims below 0.75
+  regardless of where the sweep currently is, via `max(scope_glow(...),
+  NOTABLE_GLOW_FLOOR)` — still pushed brighter as the beam passes it,
+  same as everything else, just with a raised off-beam floor.
+
+  **Deliberately kept as a SEPARATE signal from the window ring, not
+  merged into one "brighter" treatment** — asked and answered explicitly
+  this session: a window aircraft and a notable aircraft (heavy,
+  helicopter, MAYDAY, low-and-close) are different KINDS of interesting
+  — one is about where the OWNER happens to be looking, one is about
+  what the aircraft itself IS — and collapsing both into brightness alone
+  would recreate the exact ambiguity ("why is this one different?") that
+  prompted the icon redesign in the first place. The window ring stays a
+  categorical shape+color marker; `NOTABLE_GLOW_FLOOR` is a categorical
+  brightness marker; an aircraft that is BOTH shows both signals at once
+  rather than either overriding the other. Confirmed the "rotating sweep
+  beam" itself (`scope_glow()`) is working as intended and untouched —
+  that's the mode's continuous heartbeat animation, a real, separate
+  question the owner asked and confirmed before any of the above was
+  built, not something this pass changed.
+
+  **Verified**: `render_audit.py`/`fold_audit.py` both clean.
+  `NOTABLE_GLOW_FLOOR > SCOPE_TARGET_FLOOR` confirmed programmatically
+  (0.75 > 0.38 — the floor is genuinely brighter than the routine dim
+  state, not a no-op). Real panel restarted, confirmed healthy (a real
+  non-black, error-free `flights` frame via `/api/frame`).
+
   **DEAD RECKONING (2026-08-08)** — real user feedback after watching the
   radar scope: aircraft only visibly moved once per ADS-B poll (`flights.
   FEED` refreshes every `flights.POSITION_REFRESH` = 15s), sitting frozen
