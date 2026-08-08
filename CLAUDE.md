@@ -1382,11 +1382,26 @@ appends them to the menu automatically.
     correctly drops out. `render_audit.py`/`fold_audit.py` both clean.
     Real panel restarted and confirmed healthy (`/api/window` returns
     the real config including the new `max_nm` key; a real non-black,
-    error-free `flights` frame pulled via `/api/frame`). **No real
-    aircraft were in range to confirm the cap against genuinely live
-    traffic this session** — the same honest gap every other flights
-    feature has hit this session; flagged for next time real traffic
-    crosses the cone at a range that would exercise the cutoff.
+    error-free `flights` frame pulled via `/api/frame`).
+
+  - **LIVE-TRAFFIC CONFIRMATION (2026-08-08, follow-up session).** Real
+    aircraft were in range this time — 8 tracked, including 5 that sat
+    INSIDE the real bearing cone but beyond the new cap (`NJM998` at
+    32.8nm, `CNS976` at 24.7nm, `N7085G` at 12.2nm, `N5191J` at 18.1nm,
+    `JBU2474` at 8.3nm, just barely over the 8.0nm line) — exactly the
+    scenario the fix exists for. Under the OLD bearing-only logic every
+    one of those five would have shown the window ring right now; with
+    the cap, all five correctly stayed unmarked. Traffic moved (real
+    motion, not a single static sample) and a later poll caught two real
+    aircraft genuinely entering `in_window: True` at 5.9nm and 6.2nm —
+    both correctly inside the cap. Confirmed both in a live
+    `FlightEngine.frame()` render (not just the boolean flag): a real
+    in-window aircraft (`CNS976`, that session's live snapshot) showed
+    all 4 expected `WINDOW_RING` pixels `(190, 110, 255)` exactly, at
+    the correct offsets under its icon. The 8nm default itself is still
+    the owner's call once they've watched a few real ones cross it in
+    person — nothing here changes that, this only confirms the
+    MECHANISM is doing the right thing with real numbers.
 
   **RADAR-SCOPE ICONS REDRAWN (2026-08-08)** — real feedback on an
   actual rendered screenshot of the live panel, not a described
@@ -1460,6 +1475,35 @@ appends them to the menu automatically.
   (0.75 > 0.38 — the floor is genuinely brighter than the routine dim
   state, not a no-op). Real panel restarted, confirmed healthy (a real
   non-black, error-free `flights` frame via `/api/frame`).
+
+  - **LIVE-TRAFFIC CONFIRMATION (2026-08-08, follow-up session).** Real
+    traffic in range this time, covering every icon kind at once: 3 real
+    helicopters (`N220SG`, `N267AW`, `N3055Y`, all real R44s), a real
+    bizjet, real GA Cessnas, and real airliners including a heavy
+    (`AAL1991`). Verified two ways, not just "it ran without error":
+    (1) a synthetic 8x zoom sent for direct visual review and approved
+    as designed (the design-approval pass, before this live check);
+    (2) THIS session, pixel-level ASCII dumps of real crops taken from a
+    single self-consistent `FlightEngine.frame()` render (position
+    computed and pixels read from the exact same tick — an earlier
+    attempt that mixed a fresh engine's computed positions with the
+    separately-running live service's independently-timed frame produced
+    a clearly wrong crop, caught and corrected before trusting it,
+    worth remembering as a real methodology trap for any future
+    position-matched pixel verification). Both real helicopter crops
+    (`N267AW`, `N3055Y`) show a genuinely CONNECTED horizontal rotor bar
+    with a vertical mast beneath it in the raw pixel grid — not
+    scattered points, confirming the fix for the original "violet blob"
+    complaint holds on real hardware, not just the synthetic mockup.
+    `NOTABLE_GLOW_FLOOR`'s exact math confirmed pixel-for-pixel against
+    a real notable LOW-altitude aircraft: rendered color `(191, 67, 52)`
+    is precisely `int(0.75 × (255, 90, 70))` — the real ALT_BANDS LOW
+    color at exactly the 0.75 floor, truncated the same way `int()`
+    already does everywhere else in this rendering pipeline. A real
+    notable HEAVY aircraft (`AAL1991`) showed a color BRIGHTER than its
+    own floor at that instant, confirming `max(scope_glow(...),
+    NOTABLE_GLOW_FLOOR)` correctly lets the sweep push a notable
+    aircraft past its floor rather than clamping it there.
 
   **DEAD RECKONING (2026-08-08)** — real user feedback after watching the
   radar scope: aircraft only visibly moved once per ADS-B poll (`flights.
