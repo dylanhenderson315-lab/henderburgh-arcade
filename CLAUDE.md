@@ -2440,10 +2440,12 @@ any specific real organization's mark.
   views, which predate the universal `sport` key. **MLB/baseball is
   deliberately absent from both** — it already carries `draw_diamond()`/
   `draw_outs()` as its real identity mark in the body, and a second
-  glyph in the header would be redundant. **Tennis is skipped** — no
-  live tennis renderer exists yet to attach an icon to (task #19, still
-  pending per the per-sport renderer table below); noted here explicitly
-  rather than silently omitted.
+  glyph in the header would be redundant. **Tennis was skipped at the
+  time this section was written** — no live tennis renderer existed yet
+  to attach an icon to (task #19). Tennis shipped 2026-08-08 (see the
+  TENNIS section below) and `draw_icon_tennis`/`SPORT_ICONS["tennis"]`
+  were added in that same pass, closing this gap; this note is kept for
+  history rather than silently rewritten.
 - **Header wiring**: `draw_header()` gained an optional `icon` callable,
   drawn to the left of the title with the title's own budget shrinking
   to make room. Wired into `_frame_universal_generic()` (the fallback
@@ -2494,6 +2496,140 @@ for football/basketball. The NFL/NHL icons will render through
 the first time either league is actually live; worth a real spot-check
 then.
 
+### Tennis — task #19, the last per-sport MAIN renderer (2026-08-08)
+
+Blocked since 2026-08-01 on "no live match to verify against"; unblocked
+this session against real live/finished WTA National Bank Open and
+Warsaw T-Mobile Polish Open matches, both confirmed live.
+
+**The universal header (`sports.FEED.get_universal()`'s underlying
+endpoint) DOES include tennis** — 6 real WTA matches confirmed live this
+session — but a `pre`-state match has literally no score/linescores
+fields on its competitors. Confirmed empty-until-live, not a missing
+field. **The real source of truth is the dedicated per-tour scoreboard**,
+`sports.SCOREBOARD_URL.format(path="tennis/atp")` /
+`path="tennis/wta"` — the same `SCOREBOARD_URL` template every other
+sport already uses, just a different path suffix.
+
+**The shape is completely different from every other sport this module
+parses** — confirmed live, not assumed. One `event` here is a whole
+TOURNAMENT (e.g. "National Bank Open"), closer to `mma.py`'s "one event =
+the whole CARD" precedent than to `_parse_event()`'s flat team-sport
+shape. `groupings[]` adds one more nesting level MMA doesn't have — the
+DRAW category (Men's Singles / Women's Singles / Women's Doubles) — and
+each grouping's `competitions[]` are the individual matches.
+`sports._parse_tennis_match()` follows `mma._parse_card()`'s structural
+precedent, not `_parse_event()`.
+
+**`linescores` entries are `{value, tiebreak (optional), winner}`** — NOT
+the `{value, displayValue, period, winner}` shape an earlier speculative
+note in this project once carried before anyone had pulled a live
+payload; that note is now corrected. `value` is games won in that set (a
+float, e.g. `7.0`), `tiebreak` is only present when that set went to a
+breaker — and **both competitors carry their OWN tiebreak points**
+(confirmed live: winner `tiebreak: 7`, loser `tiebreak: 5` on the same
+set, matching ESPN's own real finished-match note text "7-6 (7-5)"
+exactly), not a single shared value as an earlier draft of this note
+assumed. `sports._parse_tennis_sets()` keeps both; `engines.py`'s
+`_tennis_set_line()` combines both competitors' per-set lists into one
+real "7-6(7-5) 3-6 6-1" string at the RENDER layer (a display decision,
+not an I/O one).
+
+**Doubles uses a different competitor shape than singles** — also
+confirmed live, not assumed. Singles carries `athlete` (one player);
+doubles carries `roster` (`roster.athletes[]`,
+`roster.displayName`/`shortDisplayName` for the pair — confirmed against
+a real doubles match, Brooks/Haverlag). `sports._tennis_competitor_name()`
+handles both; an unrecognised shape degrades to an empty name, never a
+guess.
+
+**No live (in-progress) match was available to verify live in-game point
+score fields against this session** — every real match checked was `pre`
+or `post`. Built correctly against the real PRE/POST shapes actually
+seen; an `in`-state match renders the real set-by-set score so far with
+no live point score, because no field for one was ever observed to
+confirm a name for — matching this project's "ship correct but honestly
+unverified" pattern already used elsewhere (NHL goal detector, MMA
+finish detector).
+
+**Pinned player**, golf's exact precedent: `sports.load_tennis_player()`/
+`save_tennis_player()` store a name in the same `sports_config.json`
+(key `tennis_player`, preserves every other key on write);
+`/api/sports/tennis_player` and a new control-panel card set it.
+`sports.find_pinned_tennis_player()` is the same forgiving exact/surname/
+substring match `find_pinned_golfer()` uses, preferring a LIVE match over
+a finished/upcoming one when the same name resolves to more than one
+real match. `SportsEngine.PANEL_TENNIS` follows `PANEL_GOLF`'s exact
+shape in `_build_panels()`/`_frame_for_view()` — its own panel slot, not
+sharing one, so it cannot be crowded out. `_frame_tennis_pinned()` leads
+with the player's name, opponent, and real set score — "where is MY
+player" applied to a head-to-head sport instead of a leaderboard.
+
+**Tennis is DROPPED from the header-derived event list and REPLACED**
+with the dedicated fetch inside `get_universal()` — keeping both would
+either duplicate a match or show the header's useless empty-until-live
+copy alongside the real one.
+
+**`SportsEngine.SPORT_RENDERERS["tennis"]`** — two name rows, then the
+combined set-by-set score on its OWN line at scale 1 (never scale 2 —
+CLAUDE.md's own layout rule: tennis set scores are 126px at scale 2 on a
+64px panel, this is the exact sport that rule was written about), the
+draw (class_label), then real match state. Y-cursor throughout, not
+fixed rows. `SportsEngine.SPORT_DETAIL_RENDERERS["tennis"]` adds full
+names (`fit_person` on `full` instead of `abbr`), real venue/court, the
+tournament name, the draw, and a finished match's real `notes[]` summary
+line — the same "context the main view has no room for" pattern
+soccer/golf/baseball's detail views already established.
+
+**Tiebreak brackets** reuse the `(`/`)` glyphs already added to
+`_FONT3x5` in an earlier session specifically for this — confirmed
+present before use rather than re-added.
+
+**A tennis header icon was added** (`engines.draw_icon_tennis`, a ball
+outline with two offset dots for the seam, distinct from soccer's single
+centred dot) — `SPORT_ICONS["tennis"]` was explicitly documented as
+"skipped, no renderer to attach it to yet" before this session; now that
+a real renderer exists, the icon is wired in too, closing that
+previously-flagged gap in the same pass rather than leaving it stale.
+
+**Verified**: `.venv/bin/python -c "import sports, engines"` clean.
+`render_audit.py`/`render_audit.py sports` both clean (0 modes failed;
+only pre-existing-class `TRUNCATED` warnings on long names, same
+non-fatal category every other sport already has). `fold_audit.py` clean
+(0 feeds not folding) — added a NEW permanent tennis coverage case
+(`fold_audit.py`'s "sports tennis match" check, replaying a real WTA
+payload with canaries injected through `_parse_tennis_match()`), per this
+project's own standing rule that a fold belongs inside the boundary
+function and needs its own audit case, not just a clean live check.
+Fetched real live data directly: 610 real matches parsed cleanly across
+both tours in one session (ATP + WTA combined), including a real
+completed match (Nicolas Mejia d. Marco Trungelliti, National Bank Open,
+7-6(7-5) 3-6 6-1) and a real doubles match (Brooks/Haverlag vs.
+Falkowska/Smith, Warsaw Polish Open). Drove `SportsEngine` directly
+against the warmed real feed: the main ticker renderer and the expanded-
+detail renderer both produced real non-black frames off a real tennis
+event. **Live-verified on the real physical panel**: restarted
+`com.henderburgh.arcade`, pinned Nicolas Mejia via the real
+`/api/sports/tennis_player` endpoint, confirmed `/api/sports/config`
+resolved the real match (`vs M. TRUNGELLITI`, state `post`, "NATIONAL
+BANK OPEN PRESENTED BY ROGERS"), switched to `sports` mode and pulled a
+real `/api/frame` — a real non-black frame (878 lit px) with a distinct
+header/name/VS-line/set-score/footer layout matching
+`_frame_tennis_pinned()`'s design, confirmed by direct pixel-grid dump,
+not just a byte count. Panel restored to `ambient` and the player
+unpinned afterward.
+
+**Honestly unverified**: live in-progress point-score fields (see above
+— no live match existed this session to observe one), and the pinned
+player/main-ticker/detail-renderer paths were confirmed on the real
+panel or via direct engine-driving against warmed real data, but not
+all three simultaneously on the physical panel in one pass (the ticker
+and detail renderer were verified by driving `SportsEngine` directly,
+matching the same "engine calls FEED, no panel needed" verification
+method this project's own CLAUDE.md names as the standard one). Worth a
+real spot-check of the ticker/detail views on the physical panel next
+time a live match is in progress.
+
 ### Per-sport MAIN renderers (IN PROGRESS — started 2026-08-01)
 
 **Why**: one generic renderer had to satisfy every sport at once, so every
@@ -2519,7 +2655,7 @@ when adding one.
 | football | not started — **NFL/NCAAF are off-season, no live data to verify against** |
 | basketball | not started — NBA off-season; verify against **WNBA**. Still no live WNBA game as of 2026-08-01 (checked again — both games each day so far have already finished by the time this was checked) |
 | soccer | **done** — form strings, ESPN-formatted clock, penalty shootouts (verified live). Layout uses a y-cursor after the audit caught the divider/clock overlapping the second team |
-| tennis | not started — still no live match as of 2026-08-01. **Confirmed real**: header events carry `linescores`, one entry per SET with `value`/`displayValue`/`period`/`winner` (checked against a real finished match, J. Pegula d. D. Shnaider 7-5 6-4) — this is the field the set-by-set grid needs, but it has not been rendered against a LIVE match, only a finished one glimpsed while checking the shape |
+| tennis | **done (2026-08-08)** — task #19, the last sport on this table. Set-by-set score line, tiebreak brackets, pinned-player view. See the TENNIS section below |
 | golf | **done** — 6-row leaderboard, movement arrows (sign verified: negative = climbed the leaderboard) |
 
 ### Big-moment celebration — SHARED INFRASTRUCTURE done, per-sport detection IN PROGRESS (started 2026-08-02)
@@ -3138,6 +3274,7 @@ same discipline as the main-renderer seam.
 | baseball | **done** — same diamond/outs/count/arrow language as the main row, plus room the main row doesn't have: both teams' full records, series status, venue, broadcast |
 | soccer | **done** — full record with points ("7-5-5, 26 PTS", no room on the compact row), venue, broadcast, series, note, shootout at full size. Verified live against two real MLS matches |
 | golf | **done** — full tournament name, round status, venue, broadcast (the deep leaderboard the main view already provides isn't repeated). Verified against the real finished Rocket Classic |
+| tennis | **done (2026-08-08)** — full names, real venue/court, real `notes[]` finished-match summary, the DRAW. See the TENNIS section below |
 | mma / others | not started — main renderer exists for MMA but no card was available to verify against at build time (zero events, no live/upcoming card in the window checked) |
 
 **Two real bugs found building baseball's detail view, both from
