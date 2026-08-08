@@ -8207,6 +8207,36 @@ class SportsEngine(Browsable, BigMomentSource):
         # feed are ADOPTED, not fired on, so opening ambient after a
         # card already finished doesn't replay it.
         self._seen_mma_done = None
+        # Poll throttle for the per-game big-moment detectors
+        # (_detect_mlb_home_run / _detect_nfl_touchdown / _detect_nhl_goal /
+        # _detect_basketball_clutch_shot / _detect_soccer_goal). Each of
+        # those calls a real network fetch (sports._fetch_*_plays /
+        # fetch_new_soccer_goals) that was gated ONLY on "favorite's game
+        # is live", not on time -- and _detect_big_moments() runs from
+        # tick(), which for SportsEngine fires every tick_rate (0.05s, see
+        # arcade_server._game_frame()'s `now - last_tick >= eng.tick_rate`
+        # gate). That combination meant a live favorite game was refetching
+        # its own SUMMARY_URL up to 20x/second, unthrottled -- found during
+        # the 2026-08-08 polling-load audit (CLAUDE.md's "Cut redundant
+        # per-league polling" task). Same cadence as
+        # sports.WINPROB_REFRESH (20s) -- that constant already governs a
+        # background poll of the exact same SUMMARY_URL for the exact same
+        # game, so these detectors match its pace instead of inventing a
+        # separate one.
+        self._detector_last_poll = {}
+
+    def _detector_due(self, key):
+        """True at most once per sports.WINPROB_REFRESH seconds for a given
+        detector `key`, and always true the first time. Keeps the
+        per-game big-moment detectors (HR/TD/goal/clutch/soccer-goal) from
+        re-hitting SUMMARY_URL on every tick while a favorite's game is
+        live -- see the _detector_last_poll comment in __init__."""
+        now = time.time()
+        last = self._detector_last_poll.get(key, 0.0)
+        if now - last < sports.WINPROB_REFRESH:
+            return False
+        self._detector_last_poll[key] = now
+        return True
 
     # ---- input -----------------------------------------------------------
     def has_content(self):
@@ -9601,6 +9631,8 @@ class SportsEngine(Browsable, BigMomentSource):
         event_id = fg.get("event_id")
         if not event_id:
             return
+        if not self._detector_due("mlb_hr"):
+            return
         hrs = sports._fetch_home_run_plays("MLB", event_id)
         ids = {h["id"] for h in hrs}
         if self._seen_home_runs is None:
@@ -9656,6 +9688,8 @@ class SportsEngine(Browsable, BigMomentSource):
         event_id = fg.get("event_id")
         if not event_id:
             return
+        if not self._detector_due("nfl_touchdown"):
+            return
         tds = sports._fetch_touchdown_plays(league, event_id)
         ids = {t["id"] for t in tds}
         if self._seen_nfl_touchdowns is None:
@@ -9705,6 +9739,8 @@ class SportsEngine(Browsable, BigMomentSource):
             return
         event_id = fg.get("event_id")
         if not event_id:
+            return
+        if not self._detector_due("nhl_goal"):
             return
         goals = sports._fetch_goal_plays("NHL", event_id)
         ids = {g["id"] for g in goals}
@@ -9772,6 +9808,8 @@ class SportsEngine(Browsable, BigMomentSource):
             return
         event_id = fg.get("event_id")
         if not event_id:
+            return
+        if not self._detector_due("basketball_clutch"):
             return
         clutch = sports._fetch_clutch_plays(league, event_id)
         ids = {c["id"] for c in clutch}
@@ -10157,6 +10195,11 @@ class SportsEngine(Browsable, BigMomentSource):
             self._soccer_goal_seen = set()
             sports.fetch_new_soccer_goals(fav["league"], fg["event_id"],
                                            self._soccer_goal_seen)
+            self._detector_last_poll["soccer_goal"] = time.time()
+            return
+
+        if not self._detector_due("soccer_goal"):
+            return
 
         goals = sports.fetch_new_soccer_goals(fav["league"], fg["event_id"],
                                                self._soccer_goal_seen)

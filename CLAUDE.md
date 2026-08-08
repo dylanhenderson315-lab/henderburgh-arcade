@@ -2202,29 +2202,40 @@ orphaned), `cast` (phone browser -> panel), WLED ambient backgrounds,
 itself — the phone is just a dpad+buttons controller for it), `boot`
 (curtain-parting logo intro).
 
-## Polling load (checked 2026-07-30, no action needed yet)
+## Polling load (re-audited 2026-08-08 — task #21, "Cut redundant per-league polling" — see the full audit below the Sports coverage section; numbers here are REAL, measured this session, not estimates)
 
 Every feed only polls while its mode has been read in the last
 `IDLE_STOP` (120s), and only one mode renders to the panel at a time — so
 steady-state load is whichever single mode is currently selected, with a
-brief (≤120s) overlap right after switching modes while the previous
+brief (≤12 0s) overlap right after switching modes while the previous
 feed's thread hasn't idled out yet. Real per-mode request rates:
 
 - ticker: 1 batched call/60s (crypto) + 1 call per stock symbol/60s.
 - satellite: 1 call/12s (position) + 1 call/900s (pass prediction).
 - flights: 1 call/15s (position) + up to 4 adsbdb lookups/refresh, capped.
-- sports: **7 ESPN calls/20s** (one per configured league) ≈ 0.35 req/s
-  while active, plus 1 more call/20s only when the pinned favorite's game
-  is actually live (win probability).
+- sports: **the old "7 ESPN calls/20s" figure (2026-07-30) is stale on
+  two counts** — it assumed a flat per-league poll and a 7-league
+  config, neither true today. `sports_config.json` currently configures
+  **4** leagues (NFL/NBA/MLB/NHL), and `_interval_for()`'s existing
+  LIVE/IDLE/EMPTY tiering (`SCOREBOARD_REFRESH_LIVE`=20s / `_IDLE`=300s /
+  `_EMPTY`=1800s) already backs a league off hard once it has nothing
+  live *today*. Measured live this session (2026-08-08, MLB in season,
+  NFL/NBA/NHL all off-season): **MLB polled at the 20s LIVE tier, NFL/
+  NBA/NHL each backed off to the 1800s EMPTY tier** — real total ≈ 1
+  call/20s + 3 calls/1800s, not 7 calls/20s. Win probability adds 1 more
+  call/20s, only while the pinned favorite's own game is live (unchanged
+  by this audit — still the only source of win-prob/count/down-distance,
+  see the dependency map below). **Tennis is a separate cadence**
+  (`_refresh_tennis()`, not part of the `LEAGUE_PATHS` loop at all),
+  same LIVE/IDLE/EMPTY tiers, measured this session at the 20s LIVE tier
+  (real ATP/WTA action in progress) — 2 calls (ATP+WTA) at that cadence
+  when live. **Per-game big-moment detector summary calls** (MLB HR,
+  NFL/NCAAF TD, NHL goal, soccer goal, basketball clutch) are a further,
+  separate, narrower category (one live favorite-game only) — a real
+  bug in their cadence was found and fixed this session, see below.
 - news: 1 call/300s.
 - weather: 1 obs call/600s + 1 alerts call/120s (gridpoint cached ~daily).
 - audio_sync: zero request cost — a blocking UDP socket, not polling.
-
-- blog: 1 call/300s.
-- gameday (UFC): **1 call** per poll for the WHOLE card — 20s while a fight
-  is live, 120s if a card exists today, 1800s otherwise. Fight statistics
-  add 2 calls (one per fighter) but only for the single fight on screen,
-  and only while it is live or just finished.
 
 None of this is a real load on the Mac (all network-I/O-bound, sleeping
 threads).
@@ -3538,6 +3549,113 @@ been watching for it.
   games** (2026-08-01, evening slate) -- exact pixel match on the real
   panel. The earlier synthesized-state sweep is now backed by a live
   check; no gap remains.
+
+### Task #21 audit: "Cut redundant per-league polling" — CLOSED, no per-league-poll code change (2026-08-08)
+
+Full audit of whether `SportsFeed`'s per-league scoreboard poll
+(`_refresh_scoreboards()`, looping `LEAGUE_PATHS`) is redundant with the
+universal header feed. **Conclusion: it is not redundant for any
+currently-configured league, no cut was made to that loop, and this is a
+legitimate "audited, confirmed not redundant" close** — but the audit
+found and fixed a real, separate, unthrottled-polling bug in the
+big-moment detectors (see below), which is the actual change that came
+out of this pass.
+
+**Dependency map — which per-league-only fields are genuinely only
+available from the per-league scoreboard poll, checked against every
+`LEAGUE_PATHS` entry and every renderer/detector that reads it:**
+
+| field | only in per-league poll? | who reads it |
+|---|---|---|
+| `situation` (MLB balls/strikes count, football down/distance) | **yes** — confirmed absent from `get_universal()`'s header payload across a full slate, both this session and 2026-08-01 | baseball's live count row, football's down-and-distance row (`tick()`'s `by_id` join in `SportsEngine.tick()`, engines.py ~L8402) |
+| win probability | **yes**, and only for NFL/NBA/MLB — NHL's and EPL's summary endpoint has no `winprobability` key at all, confirmed live both sessions | `SportsFeed._refresh_win_prob()` / `self.data["win_prob"]` |
+| baserunners (`onFirst`/`onSecond`/`onThird`) | **no** — MLB's universal-header event carries these at the top level (`onFirst`/`outsText`), a DIFFERENT shape than the per-league `situation.onFirst`, confirmed in the "Sports coverage — UNIVERSAL" section above | baseball's diamond/outs renderer already reads the universal-header shape, not the per-league one, for this field |
+| scores, records, venue, broadcast, series/note | **no** — the universal header carries all of it | every `SPORT_RENDERERS`/`SPORT_DETAIL_RENDERERS` entry |
+
+Every currently-configured league (NFL, NBA, MLB, NHL — `DEFAULT_LEAGUES`
+and the live `sports_config.json`) has at least one renderer/detector
+that depends on `situation` or win-probability, so **no league in the
+current config is safe to drop from the per-league loop.** `EPL`/`NCAAF`/
+`NCAAB` are configurable-but-not-currently-configured; win-prob is
+confirmed absent for EPL specifically (so EPL's per-league poll earns its
+keep only for `situation`, still real), and NCAAF/NCAAB both have real
+win-prob per 2026-08-01's own check, so none of the 7 `LEAGUE_PATHS`
+entries is dead weight if ever enabled.
+
+**Item 4 (tiered refresh tightness) — already as tight as proposed,
+confirmed with real data, not code review alone.** The suggested
+optimization ("skip polling a league the universal header already shows
+as empty today") is functionally already what `_interval_for()` does:
+measured live this session, NFL/NBA/NHL (all off-season, zero events)
+had each already backed off to the 1800s EMPTY tier from their own prior
+poll, while MLB (in season, 15 live/scheduled games) stayed at the 20s
+LIVE tier. The only gap between that and a universal-header-driven skip
+is the FIRST poll of a fresh process for an empty league (one call before
+the existing backoff kicks in) — not worth adding a second inference
+path (and a second place for the universal feed's different league-
+keying to drift from `LEAGUE_PATHS`, see the "keyed by the older
+`sports.LEAGUE_PATHS` codes" note above) to save one request every 30
+minutes per idle league.
+
+**The real finding: an unthrottled polling bug in the per-game big-moment
+detectors, a different category from the per-league loop (per this
+task's own scope note) but uncovered by the same "get a real request-
+volume picture" step.** `SportsEngine.tick_rate = 0.05` (engines.py), and
+`arcade_server._game_frame()` calls `eng.tick()` every time
+`now - last_tick >= tick_rate` — i.e. up to 20x/second. `tick()` calls
+`self._detect_big_moments()` unconditionally every tick, and 5 of the 6
+registered `BIG_MOMENT_DETECTORS` (`mlb_hr`, `nfl_touchdown`, `nhl_goal`,
+`basketball_clutch`, `soccer_goal`) called their real network fetch
+(`sports._fetch_*_plays` / `fetch_new_soccer_goals`, all hitting
+`SUMMARY_URL`) gated ONLY on "is the favorite's game state=='in'", not on
+time. **A live favorite game was refetching its own game summary up to
+20x/second**, not the "narrowly scoped per-game call" every one of these
+functions' own docstrings claimed. (Golf's detector and MMA's finish
+detector were checked too and do NOT have this bug: golf reads
+`self.golf_move`, already computed by the throttled background feed
+thread, and MMA's fetch only fires once per newly-`post` event id, not
+every tick — no fix needed for either.)
+
+**Fix**: `SportsEngine.__init__` gained `self._detector_last_poll = {}`
+and a `_detector_due(key)` gate (engines.py, next to the `_seen_*`
+baseline state), reusing `sports.WINPROB_REFRESH` (20s) as the cadence —
+deliberately the SAME interval the background feed already uses to poll
+the identical `SUMMARY_URL` for the identical game for win probability,
+rather than inventing a new number. Each of the 5 detectors now checks
+`self._detector_due(...)` immediately before its fetch call and returns
+early if not due; the one-shot seen-set baseline logic is unchanged, so
+a game already in progress still doesn't replay old plays. Soccer's
+detector additionally had its own redundant double-fetch removed (it
+called `fetch_new_soccer_goals()` twice back-to-back on the tick a new
+game is adopted — once to seed the baseline, once immediately after to
+check for "new" goals that had zero chance of existing yet since the
+baseline was just set from the same data); it now seeds and returns.
+
+**Measured, not estimated**: a synthetic burst of 20 rapid calls to
+`_detect_mlb_home_run()` (simulating 1 second at `tick_rate`) triggered
+**1** real fetch before the throttle existed it would have been 20; after
+the fix it is confirmed 1 (test script, not shipped, run this session).
+**Real before/after per-detector-second cost while a favorite's game is
+live: before = up to 20 req/s per active detector (up to 100 req/s if
+somehow all 5 were simultaneously eligible, though in practice at most 1-2
+are for a given favorite/sport); after = 1 req per `WINPROB_REFRESH`
+(20s) per active detector**, matching the cadence every docstring in
+sports.py already claimed but the code didn't enforce.
+
+**Verified before shipping**: `.venv/bin/python -c "import sports,
+engines"` clean; `render_audit.py sports` — 0 modes failed (same
+pre-existing tennis-name-truncation warnings as before, unrelated);
+`fold_audit.py` — 0 feeds not folding. Real live data pulled this
+session (2026-08-08): MLB `situation` (count) present on 10/15 real
+games, win-probability path unchanged and untouched, football's
+down-distance join in `tick()` unchanged and untouched — none of the
+per-league-poll-dependent features were touched by this fix, only the
+per-game detector fetch cadence.
+
+**No code change to `_refresh_scoreboards()`/`LEAGUE_PATHS`/
+`_interval_for()` itself** — confirmed correct and confirmed not
+redundant, closing task #21 as audited-and-kept rather than forced into
+an unwarranted cut.
 
 ### Two-axis navigation (2026-08-01)
 
