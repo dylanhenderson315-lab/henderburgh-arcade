@@ -5,11 +5,11 @@ Same shape as market.py/satellite.py/flights.py, deliberately: all I/O lives
 here so the mode that draws it stays pure.
 
 One keyless source, ESPN's public (undocumented) site API:
-  * site.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard
+  * site.web.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard
     -- today's games across a whole league in one call. Used for the
     rotating ticker AND for the pinned team's score/clock -- cheap, one
     call per league per refresh.
-  * site.api.espn.com/apis/site/v2/sports/{sport}/{league}/summary?event=ID
+  * site.web.api.espn.com/apis/site/v2/sports/{sport}/{league}/summary?event=ID
     -- per-game detail. This is the ONLY place win probability lives; it
     is NOT in the scoreboard payload for any of the four leagues (checked
     live against real games before writing this). Only fetched for the
@@ -83,8 +83,15 @@ DEFAULT_LEAGUES = ["NFL", "NBA", "MLB", "NHL"]
 SOCCER_LEAGUES = {code for code, path in LEAGUE_PATHS.items()
                   if path.startswith("soccer/")}
 
-SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
-SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/summary?event={event_id}"
+# site.api.espn.com started returning a blanket Akamai 403 ("Access Denied",
+# AkamaiGHost) on EVERY path from this network -- not a UA/header block,
+# confirmed by replaying the same request with full browser headers and a
+# referer and still getting denied. site.web.api.espn.com serves the exact
+# same JSON shape for every endpoint below (scoreboard, summary, the golf
+# field, the universal header) -- checked live for all four before
+# switching -- so this is a hostname swap, not a new integration.
+SCOREBOARD_URL = "https://site.web.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
+SUMMARY_URL = "https://site.web.api.espn.com/apis/site/v2/sports/{path}/summary?event={event_id}"
 
 # ESPN's site API is undocumented and unofficial: no published rate
 # limit, no terms covering this use, no support channel. `ambient` mode
@@ -1129,7 +1136,7 @@ FEED = SportsFeed()
 # the risk CLAUDE.md flags as the project's top standing concern.
 #
 # This is the endpoint that drives espn.com's own top scoreboard bar:
-#     site.api.espn.com/apis/v2/scoreboard/header
+#     site.web.api.espn.com/apis/v2/scoreboard/header
 # One request returned 43 live/relevant events across 11 leagues in 7 sports
 # when this was written -- golf (PGA + LPGA), MLB, WNBA, three soccer
 # competitions, PFL, PLL lacrosse, ATP and WTA tennis.
@@ -1157,7 +1164,7 @@ FEED = SportsFeed()
 # Everything below normalises those into one shape WITHOUT inventing fields:
 # anything a given sport does not provide stays None.
 # =============================================================================
-HEADER_URL = "https://site.api.espn.com/apis/v2/scoreboard/header"
+HEADER_URL = "https://site.web.api.espn.com/apis/v2/scoreboard/header"
 
 HEADER_REFRESH_LIVE = 25.0     # something is actually in progress
 HEADER_REFRESH_IDLE = 180.0    # events exist but none live
@@ -1397,7 +1404,7 @@ def golfer_move(prev, cur):
 # and ONLY for tours that currently have a leaderboard -- never
 # speculatively, and never for the whole field when the header already
 # answered the question.
-GOLF_FIELD_URL = "https://site.api.espn.com/apis/site/v2/sports/golf/{tour}/scoreboard"
+GOLF_FIELD_URL = "https://site.web.api.espn.com/apis/site/v2/sports/golf/{tour}/scoreboard"
 GOLF_FIELD_REFRESH = 60.0
 
 

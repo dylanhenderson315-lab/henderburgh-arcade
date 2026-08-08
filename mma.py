@@ -5,7 +5,7 @@ Same shape as sports.py/flights.py/satellite.py: all I/O lives here so the
 engine that draws it stays pure and testable without a network or a panel.
 
 ONE endpoint, and it is unusually kind to us:
-    site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard
+    site.web.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard
 A single request returns the ENTIRE card -- every fight, its status, its
 result. A 14-fight card therefore costs exactly one request per poll, not
 fourteen. That matters here because CLAUDE.md's top standing risk is ESPN
@@ -101,7 +101,7 @@ import urllib.request
 
 import paneltext
 
-SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard"
+SCOREBOARD_URL = "https://site.web.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard"
 SCOREBOARD_DATED = SCOREBOARD_URL + "?dates={day}"
 
 # One request returns the whole card, so the live tier is genuinely cheap:
