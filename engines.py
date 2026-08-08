@@ -1305,6 +1305,30 @@ SCOPE_R = 23
 # about a target when the beam hits it.
 SCOPE_TARGET_FLOOR = 0.38
 
+# NOTABLE brightness floor (2026-08-08) -- the one piece of visual
+# hierarchy this scope was missing. Before this, EVERY target dimmed the
+# same way as the sweep passed it (down to SCOPE_TARGET_FLOOR), so a
+# MAYDAY squawk and a routine airliner read identically off-beam --
+# "notable" only showed up as TEXT elsewhere on the card, never on the
+# scope itself. A real notable aircraft (see flights._notable()'s own
+# rank tiers) now never dims below this floor, regardless of where the
+# sweep currently is -- still modulated brighter as the beam passes it,
+# same as everything else, just with a higher off-beam baseline.
+#
+# Deliberately NOT the same signal as the window ring. The owner asked
+# directly whether "in window" and "notable" should collapse into one
+# "brighter" treatment or stay visually distinct -- they stay distinct
+# on purpose: a window aircraft and a heavy/helicopter are different
+# KINDS of interesting (one is about where YOU happen to be looking,
+# one is about what the aircraft itself IS), and collapsing both into
+# brightness would recreate the exact ambiguity that prompted this fix
+# in the first place -- two different reasons to look would read as the
+# same "this one's brighter" cue with no way to tell why. The window
+# ring stays a categorical shape+color marker; NOTABLE_GLOW_FLOOR is a
+# categorical brightness marker; a window aircraft that is ALSO notable
+# correctly shows both at once rather than either overriding the other.
+NOTABLE_GLOW_FLOOR = 0.75
+
 
 def scope_xy(bearing_deg, r_frac, cx=SCOPE_CX, cy=SCOPE_CY, radius=SCOPE_R):
     """(bearing, normalised radius) -> pixel. The ONE place the polar->screen
@@ -1430,58 +1454,95 @@ def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, big=False
     constants) and rotated to `heading_deg` (real ADS-B track, not
     guessed) using the identical fwd/right rotation convention
     `FlightEngine._draw_plane_icon` uses for the DETAIL card -- one
-    rotation math, two scales, not two independently-invented ones.
-    `heading_deg is None` falls back to a fixed "up" orientation rather
-    than an uncertainty ring (unlike the DETAIL icon): at 1-2px spread,
-    a dim ring around a target this small would read as clutter, not
-    signal, and the DETAIL card already carries the honest
+    rotation math, shared across scales, not independently invented per
+    context. `heading_deg is None` falls back to a fixed "up" orientation
+    rather than an uncertainty ring (unlike the DETAIL icon): at 1-2px
+    spread, a dim ring around a target this small would read as clutter,
+    not signal, and the DETAIL card already carries the honest
     heading-unknown treatment for whichever aircraft is actually
     selected.
+
+    REDESIGNED 2026-08-08 after real feedback: the four kinds only
+    differed by SIZE before this (same cross, scaled), which is why they
+    didn't read as different categories at 3-5px -- and the helicopter
+    was 9 disconnected `put_px` dots with no connecting stroke, which is
+    why it read as a violet blob rather than a shape (confirmed against
+    a real rendered screenshot, not just described). Every kind below is
+    now a genuinely different SILHOUETTE FAMILY, not a scaled copy of
+    one shape, and every stroke is connected -- no shape here is drawn as
+    loose unconnected points:
+      - GA:       a single stroke -- a lone dash, no wings at all.
+      - BIZJET:   a small cross with the wing set AFT of centre (closer
+                  to the tail than the nose), a real structural cue most
+                  business jets share (low, rear-mounted wing).
+      - AIRLINER: a wide cross, wing centred on the fuselage -- the
+                  "biggest, most symmetric" silhouette, matching a
+                  widebody/narrowbody's actual proportions best.
+      - HELI:     a connected T -- a horizontal rotor bar that stays
+                  screen-level (drawn fixed, only mirrored left/right by
+                  which way the aircraft is facing, never rotated to
+                  heading -- a helicopter's rotor disk doesn't visually
+                  "point" anywhere) sitting over a short vertical mast
+                  with one tail-boom pixel kicked out behind it. The
+                  rotor bar staying perfectly horizontal while every
+                  fixed-wing icon rotates with real heading is itself a
+                  recognition cue over time, not just the shape alone.
+    Still 2 strokes (or fewer) per icon, same budget this project
+    already proved safe against a real lag complaint earlier this
+    session -- this redesign changes SHAPE, not stroke COUNT.
     """
-    # HELICOPTER stays a fixed 2D SIDE-VIEW sprite (mirrored left/right
-    # only, not rotated -- a side view can't face any other way).
-    # Everything else is a real TOP-DOWN silhouette, rotated to actual
-    # heading, since that's the natural "looking down at the radar"
-    # view for a fixed-wing aircraft.
     col = (int(color[0] * glow), int(color[1] * glow), int(color[2] * glow))
     theta = math.radians(heading_deg if heading_deg is not None else 0.0)
     xi, yi = int(round(x)), int(round(y))
     scale = 1.25 if big else 1.0
 
     if kind == SCOPE_ICON_HELI:
+        # Fixed screen-space T, mirrored only -- see the docstring above
+        # for why this deliberately does NOT rotate with heading.
         face_right = math.sin(theta) >= 0
-
-        def px(dx, dy):
-            put_px(buf, xi + (dx if face_right else -dx), yi + dy, col)
-
-        for dx, dy in [(0, 0), (0, 1), (-2, -2), (-1, -2), (0, -2), (1, -2), (2, -2),
-                       (-2, 2), (-3, 3)]:
-            px(dx, dy)
-        if big:
-            px(2, -1)
+        fx = 1 if face_right else -1
+        span = int(round(3 * scale))
+        mast_top = -2
+        mast_bot = int(round(2 * scale))
+        draw_line(buf, xi - span, yi + mast_top, xi + span, yi + mast_top, col)
+        draw_line(buf, xi, yi + mast_top, xi, yi + mast_bot, col)
+        # Tail boom kicks out BEHIND the facing direction -- a real
+        # helicopter's tail trails away from its nose, so this one pixel
+        # is what actually tells left-facing from right-facing at a
+        # glance, not just the mirrored rotor bar (which is symmetric).
+        put_px(buf, xi - fx * (span - 1), yi + mast_bot, col)
         return
 
-    # Top-down cross: ONE fuselage stroke, ONE wing stroke -- simplified
-    # from an earlier 6-stroke version (thickened fuselage, swept wing
-    # lines, a tailplane) that cost more per-frame render work than it
-    # was worth and looked busier than the pixel budget could justify.
-    # Two clean strokes, sized per kind, reads as a plane without the
-    # clutter or the extra draw_line calls.
+    # Every fixed-wing kind still shares ONE rotation convention (the
+    # DETAIL card uses the same fwd/right math) -- only the STROKE
+    # LAYOUT differs per kind now, not just a size multiplier on one
+    # shared layout.
     fwd = (math.sin(theta), -math.cos(theta))
     right = (math.cos(theta), math.sin(theta))
 
     def pt(fx, fy):
         return (x + fx * fwd[0] + fy * right[0], y + fx * fwd[1] + fy * right[1])
 
-    nose_fx, wing_fy = {
-        SCOPE_ICON_AIRLINER: (3.2, 2.6),
-        SCOPE_ICON_BIZJET:   (2.6, 1.7),
-        SCOPE_ICON_GA:       (2.0, 1.0),
+    if kind == SCOPE_ICON_GA:
+        # A lone dash -- no wing stroke at all. "Less drawn" is the
+        # point: the smallest, simplest real silhouette on this scope,
+        # deliberately not a shrunk copy of the cross family below.
+        nose_fx = 2.2 * scale
+        a, b = pt(nose_fx, 0), pt(-nose_fx, 0)
+        draw_line(buf, a[0], a[1], b[0], b[1], col)
+        return
+
+    nose_fx, wing_fy, wing_fx = {
+        # wing_fx is where the wing stroke sits along the fuselage axis,
+        # relative to the fuselage's own centre (0 = centred on the
+        # aircraft, negative = set back toward the tail).
+        SCOPE_ICON_AIRLINER: (3.2, 2.6, 0.0),
+        SCOPE_ICON_BIZJET:   (2.6, 1.5, -0.9),
     }[kind]
-    nose_fx, wing_fy = nose_fx * scale, wing_fy * scale
+    nose_fx, wing_fy, wing_fx = nose_fx * scale, wing_fy * scale, wing_fx * scale
     a, b = pt(nose_fx, 0), pt(-nose_fx, 0)
     draw_line(buf, a[0], a[1], b[0], b[1], col)
-    a, b = pt(0, -wing_fy), pt(0, wing_fy)
+    a, b = pt(wing_fx, -wing_fy), pt(wing_fx, wing_fy)
     draw_line(buf, a[0], a[1], b[0], b[1], col)
 
 
@@ -7162,8 +7223,16 @@ class FlightEngine(Browsable, BigMomentSource):
             # dot -- see draw_scope_aircraft()'s own honesty note on how
             # distinctly each kind actually reads at this pixel density.
             kind = self._ac_kind(ac)
+            # NOTABLE_GLOW_FLOOR: see its own module-level docstring for
+            # why this is a SEPARATE signal from the window ring above,
+            # not a merged one. max(), not replace -- the sweep can still
+            # push a notable aircraft brighter than the floor as it
+            # passes, this only raises the OFF-beam baseline.
+            glow = scope_glow(brg, self.sweep)
+            if ac.get("notable"):
+                glow = max(glow, NOTABLE_GLOW_FLOOR)
             draw_scope_aircraft(buf, x, y, ac.get("track_deg"), kind, mark_col,
-                                glow=scope_glow(brg, self.sweep), big=(sel or matched))
+                                glow=glow, big=(sel or matched))
 
         draw_scope_home(buf, cx=cx, cy=cy)
         # Tried an alternating text legend ("<>=HOME +=MYR") same session,
