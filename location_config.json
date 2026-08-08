@@ -6,5 +6,9 @@
     "code": "MYR",
     "lat": 33.679699,
     "lon": -78.928299
+  },
+  "window": {
+    "center_deg": 296.0,
+    "fov_deg": 80.0
   }
 }

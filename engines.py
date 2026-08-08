@@ -1336,6 +1336,22 @@ def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, big=False
     draw_line(buf, a[0], a[1], b[0], b[1], col)
 
 
+def draw_window_ring(buf, x, y, color):
+    """A small 4-point diamond ring around an in-window aircraft's blip --
+    the SIMPLE version of the window-filter visual treatment (see
+    flights.py's window-filter note): a 1px ring at a fixed radius, drawn
+    UNDER the aircraft icon so the icon's own shape is never obscured.
+    Deliberately not heading-oriented or scaled by distance -- at this
+    pixel density (a handful of px between blips) a plain fixed diamond
+    is the difference a real "which of these am I supposed to notice"
+    flag needs, not a design system of its own. A genuinely designed
+    treatment (glow animation, distinct icon family, etc.) is a bigger
+    call the owner should make deliberately, not guess at here."""
+    xi, yi = int(round(x)), int(round(y))
+    for dx, dy in ((0, -3), (0, 3), (-3, 0), (3, 0)):
+        put_px(buf, xi + dx, yi + dy, color)
+
+
 def draw_scope_airport(buf, x, y, color, glow=1.0):
     """A small runway-strip glyph -- two parallel end-cap ticks joined by
     a short bar, unmistakably 'a landing strip' rather than a generic
@@ -5861,6 +5877,10 @@ class FlightEngine(Browsable, BigMomentSource):
     ATC = (255, 170, 60)      # warm amber, distinct from PLANE blue / ROUTE yellow -- reads as "radio"
     ATC_PAGE_LINES = 7        # lines per page -- see _frame_atc_log()'s y-budget comment
     ATC_MATCH = (80, 235, 130)  # bright green -- a confirmed real-ident match, visually unmistakable
+    WINDOW_RING = (190, 110, 255)  # violet -- distinct from every ALT_BANDS icon color,
+                                    # ATC_MATCH's green, AND the (255,255,255) "selected"
+                                    # white, so "in the window" is never confused with
+                                    # "radio-matched" or "currently selected"
                                  # from the general-log amber (never the same color as "just data")
     ATC_PAGE_TICKS = 90       # ~4.5s per page, long enough to actually read one before it turns
 
@@ -6466,6 +6486,12 @@ class FlightEngine(Browsable, BigMomentSource):
             # keeps drawing regardless of match status.
             matched = ac.get("ident") and ac["ident"] == self.atc_match_ident
             mark_col = self.ATC_MATCH if matched else ((255, 255, 255) if sel else col)
+            # WINDOW FILTER (2026-08-07): a small ring under the icon for
+            # any aircraft currently visible out the configured window --
+            # see flights.in_window()/draw_window_ring()'s own notes.
+            # Drawn BEFORE the aircraft icon so the ring never covers it.
+            if ac.get("in_window"):
+                draw_window_ring(buf, x, y, self.WINDOW_RING)
             # PART 3: a real, heading-oriented icon instead of a plain
             # dot -- see draw_scope_aircraft()'s own honesty note on how
             # distinctly each kind actually reads at this pixel density.

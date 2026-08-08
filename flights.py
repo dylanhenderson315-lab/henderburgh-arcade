@@ -112,6 +112,108 @@ def save_airport(code, lat, lon):
     return data.get("airport")
 
 
+# ---- window filter (2026-08-07) ------------------------------------------
+# Prioritize/flag aircraft currently visible out ONE specific real window,
+# measured with a phone compass held at that window: centre bearing 296deg,
+# 80deg total field of view (roughly 256deg -> 336deg). Stored in the SAME
+# shared location_config.json as `airport` -- a window's bearing is a
+# LOCATION fact tied to where the panel/owner actually is, exactly the
+# reasoning that already put `airport` there instead of a new file. Default
+# values below are the real measured numbers, seeded into the config on
+# first save so the mode has a real window from the start rather than an
+# invented one -- but everything is re-readable/settable without a code
+# edit from here on, per the config-driven convention this project holds
+# every owner-specific value to.
+WINDOW_CENTER_DEG_DEFAULT = 296.0
+WINDOW_FOV_DEG_DEFAULT = 80.0
+
+
+def load_window():
+    """The configured window cone as {"center_deg", "fov_deg"}. Malformed
+    or missing data falls back to the real measured defaults above (never
+    a guessed value) -- same "safe default on first run" shape as
+    satellite.load_location()."""
+    path = satellite.CONFIG_PATH
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text()) or {}
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            data = {}
+    win = data.get("window")
+    if isinstance(win, dict):
+        try:
+            center = float(win["center_deg"]) % 360.0
+            fov = float(win["fov_deg"])
+            if 0.0 < fov <= 360.0:
+                return {"center_deg": center, "fov_deg": fov}
+        except (KeyError, TypeError, ValueError):
+            pass
+    return {"center_deg": WINDOW_CENTER_DEG_DEFAULT, "fov_deg": WINDOW_FOV_DEG_DEFAULT}
+
+
+def save_window(center_deg, fov_deg):
+    """Persist the window cone. PRESERVES every key this function does not
+    own (notably `airport`, and `lat`/`lon`/`label` -- the identical lesson
+    satellite.save_location()/save_airport() already had to learn: a writer
+    that rebuilds the whole document silently wipes a sibling feature's
+    config the first time this one is touched)."""
+    path = satellite.CONFIG_PATH
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text()) or {}
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            data = {}
+    data["window"] = {"center_deg": float(center_deg) % 360.0,
+                      "fov_deg": float(fov_deg)}
+    path.write_text(json.dumps(data, indent=2))
+    return data["window"]
+
+
+def in_window(bearing_deg, center_deg, fov_deg):
+    """True if `bearing_deg` (real bearing FROM home TO the aircraft --
+    i.e. `dir_deg`, the exact same bearing every scope projection in this
+    module already uses, NOT `track_deg`, the aircraft's own heading)
+    falls inside the window cone. Angular wrap-around formula exactly as
+    specified -- already correct, not re-derived here."""
+    if bearing_deg is None:
+        return False
+    return abs(((bearing_deg - center_deg + 180) % 360) - 180) <= (fov_deg / 2)
+
+
+# Soft-priority boost applied to a window aircraft's sort rank (see the
+# sort key in _fetch_positions below). `_notable()` ranks are small
+# integers spaced AT LEAST 1 apart (0 for routine, 2/3/4/5 for the real
+# notable criteria) -- 0.5 is deliberately HALF that minimum spacing, so
+# the boost can NEVER push a window aircraft across a notable-rank tier
+# boundary; it can only break a tie WITHIN a tier (nudging a window
+# aircraft ahead of an equally-notable non-window one, or ahead of
+# routine non-window traffic when both are otherwise rank 0).
+#
+# Verified against a real live 8-aircraft `flights.FEED.get()` snapshot
+# on 2026-08-07 (window centre=296, fov=80, so window = 256deg-336deg):
+#   VIR36VL  dir 283.6  notable HEAVY(3)  IN WINDOW  -> adjusted 3.5
+#   SWA1065  dir 245.1  notable LOW(3)    not window -> adjusted 3.0
+#   TIV685   dir 269.8  notable HIGH(2)   IN WINDOW  -> adjusted 2.5
+#   N610CT   dir 275.0  notable None(0)   IN WINDOW  -> adjusted 0.5
+#   JBU483   dir 324.6  notable None(0)   IN WINDOW  -> adjusted 0.5
+#   N157JR   dir 223.7  notable None(0)   not window -> adjusted 0.0
+#   FFT1785  dir 352.4  notable None(0)   not window -> adjusted 0.0
+#   N773TA   dir 349.3  notable None(0)   not window -> adjusted 0.0
+# Resulting order: VIR36VL, SWA1065, TIV685, N610CT, JBU483, N157JR,
+# FFT1785, N773TA. This confirms the intended interaction: a window+
+# routine aircraft (N610CT/JBU483) ranks above ALL non-window routine
+# traffic regardless of distance, but still ranks below SWA1065 -- a
+# real notable(rank 3) aircraft that isn't even in the window. VIR36VL
+# (window AND notable, same rank tier as SWA1065) wins the tie against
+# SWA1065, the intended "boost breaks ties within a tier" behaviour --
+# not a window aircraft leapfrogging a strictly higher notable tier
+# (which never happens: the emergency-squawk tier, rank 5, stays 1.5
+# clear of the highest possible boosted rank, 3.5).
+WINDOW_BOOST = 0.5
+
+
 def bearing_distance(lat1, lon1, lat2, lon2):
     """(bearing_deg, distance_nm) from point 1 to point 2.
 
@@ -399,6 +501,9 @@ def _notable(ac, phase=None):
 def _fetch_positions(lat, lon):
     url = POSITION_URL.format(lat=lat, lon=lon, radius_nm=RADIUS_NM)
     data = _get_json(url)
+    window = load_window()   # cheap local config read, same cost class as
+                              # every other per-refresh config check here
+                              # (e.g. satellite's own CONFIG_CHECK reload)
     out = []
     for ac in data.get("ac") or []:
         # .get(key, default) only supplies the default when the key is
@@ -410,6 +515,7 @@ def _fetch_positions(lat, lon):
             continue          # parked/taxiing clutter, not "in the sky" traffic
         alt = ac.get("alt_baro") if isinstance(ac.get("alt_baro"), (int, float)) else None
         phase, rate = _phase(ac, alt=alt)
+        dir_deg = ac.get("dir")
         out.append({
             "ident": _ident(ac),
             # Raw ICAO24 hex -- the one field ADS-B guarantees is stable
@@ -439,17 +545,29 @@ def _fetch_positions(lat, lon):
             "gs_kt": ac.get("gs"),
             "track_deg": ac.get("track"),
             "dist_nm": ac.get("dst"),
-            "dir_deg": ac.get("dir"),
+            "dir_deg": dir_deg,
             "phase": phase,
             "vrate_fpm": rate,
             "notable": _notable(ac, phase=phase),
+            # WINDOW FILTER (2026-08-07) -- true if this aircraft's real
+            # bearing FROM home (dir_deg, not track_deg) currently falls
+            # inside the configured window cone. Exposed so FlightEngine
+            # can give it distinct visual treatment with zero I/O of its
+            # own -- see draw_scope_aircraft's window-ring call site.
+            "in_window": in_window(dir_deg, window["center_deg"], window["fov_deg"]),
         })
-    # Most notable first, then nearest. Sorting purely by distance means
-    # the mode almost always leads with a routine regional jet, because
-    # "closest" and "interesting" are rarely the same aircraft -- a
-    # wide-body or a helicopter a few miles further out is the one worth
-    # looking up for.
-    out.sort(key=lambda a: (-(a["notable"][1] if a["notable"] else 0),
+    # Most notable first, then nearest -- ADDITIVELY adjusted by the
+    # window boost (WINDOW_BOOST above), never replacing this ranking.
+    # Sorting purely by distance means the mode almost always leads with
+    # a routine regional jet, because "closest" and "interesting" are
+    # rarely the same aircraft -- a wide-body or a helicopter a few miles
+    # further out is the one worth looking up for; a window aircraft is
+    # the same idea applied to "worth looking up for because it's
+    # literally visible out the window right now".
+    def _rank(a):
+        base = a["notable"][1] if a["notable"] else 0
+        return base + (WINDOW_BOOST if a["in_window"] else 0.0)
+    out.sort(key=lambda a: (-_rank(a),
                             a["dist_nm"] if a["dist_nm"] is not None else 1e9))
     return out[:MAX_TRACKED]
 

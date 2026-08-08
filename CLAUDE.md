@@ -847,6 +847,78 @@ appends them to the menu automatically.
     arrow's real-panel appearance remains verified only against captured
     ORD data, not local traffic. The LOW+phase escalation is likewise
     still unverified live. Check again next session.
+
+  **WINDOW FILTER (2026-08-07)** — prioritize/flag aircraft currently
+  visible out one specific real window overlooking the golf course,
+  measured with a phone compass held at the window: centre bearing
+  296°, 80° total FOV (256°→336°).
+
+  - **Confirmed field, not assumed**: the bearing every scope projection
+    in this project already uses (`scope_xy(brg, ...)`, the compass tag
+    on the DETAIL card) is `dir_deg` — sourced from ADS-B's `dir` field
+    at `flights._fetch_positions()`, the real bearing FROM home TO the
+    aircraft. This is NOT `track_deg` (the aircraft's own heading,
+    ADS-B's `track` field, used only for rotating the icon). Checked by
+    grepping every existing `dir_deg` use in `engines.py` before writing
+    any window code, per the owner's explicit instruction to confirm
+    rather than assume.
+  - **Config lives in the shared `location_config.json`**, not a new
+    file — a window's bearing is a LOCATION fact tied to where the
+    panel/owner is, the identical reasoning that already put `airport`
+    there. `flights.load_window()`/`save_window()` mirror
+    `load_airport()`/`save_airport()` exactly, including the
+    merge-preserve write (verified directly: `save_window(296, 80)`
+    followed by reading the file back showed `lat`/`lon`/`label`/
+    `airport` all untouched, `window` added as a sibling key — the same
+    check this file's own recurring-bug note demanded before touching
+    this config a third time). Seeded with the real measured values
+    (296°/80°) rather than left to a code default nobody has to look up.
+  - **Angular test is the given formula, unmodified**:
+    `flights.in_window()` — `abs(((dir_deg - center + 180) % 360) - 180)
+    <= fov/2`.
+  - **Soft-priority boost, additive on top of the existing notable+
+    distance ranking, not a replacement.** `WINDOW_BOOST = 0.5`, added
+    to an aircraft's notable rank before sorting. Justified by the
+    ranking's own shape rather than picked arbitrarily: `_notable()`
+    ranks are integers spaced **at least 1 apart** (0 routine, 2/3/4/5
+    for real criteria), so a 0.5 boost can never cross a rank tier
+    boundary — it can only break ties within one. Verified against two
+    independent real live `flights.FEED.get()` snapshots on 2026-08-07
+    (window = 256°–336°); the second one (VIR36VL notable-not-window
+    rank 3.0, TIV685 notable-not-window rank 2.0, N610CT/FFT1785/JBU483
+    window-routine rank 0.5, N157JR/SWA4100/N773TA routine-not-window
+    rank 0.0) rendered in exactly that order, with N157JR — closer at
+    8.8nm — correctly ranking BELOW the window-boosted aircraft despite
+    being nearer, while TIV685 (a real notable aircraft, not even in the
+    window) still outranked every window-boosted routine aircraft. Full
+    reasoning and both snapshots are recorded as a comment on
+    `WINDOW_BOOST` in `flights.py`, not just here.
+  - **`in_window` is a real boolean on every aircraft dict**, computed
+    in `flights.py` (zero I/O added to `FlightEngine` — the window
+    config read happens on the feed's own ~15s refresh cadence, the same
+    cost class as `satellite.py`'s own periodic config re-check).
+  - **Visual treatment shipped, deliberately simple**:
+    `engines.draw_window_ring()` draws a small 4-point diamond ring
+    (violet, `FlightEngine.WINDOW_RING`, chosen distinct from every
+    `ALT_BANDS` icon color, `ATC_MATCH` green, and the `(255,255,255)`
+    "selected" white) under any in-window aircraft's scope icon. A
+    fixed-radius ring rather than a distance/heading-oriented design —
+    at this pixel density a bigger design system would be guessing at
+    something the owner hasn't asked for; flagged as the ceiling of
+    "simple" rather than silently expanded.
+  - **Verified**: `render_audit.py flights` and `render_audit.py flights
+    --strict` both clean (0 CLIPPED/DROPPED/COLLISION; the only
+    TRUNCATED warnings are pre-existing and unrelated to this change).
+    `fold_audit.py` clean (0 feeds not folding — this feature adds no
+    new externally-sourced text). `FlightEngine` driven directly against
+    real live `flights.FEED` data for 40 real ticks with zero exceptions
+    and a non-black rendered frame, confirming `in_window` flows end to
+    end onto real aircraft. **Not yet verified on the real physical
+    panel** — this was built in an isolated git worktree and the live
+    `com.henderburgh.arcade` launchd service runs the separate main
+    checkout, which this worktree cannot deploy into or restart; the
+    real-panel pixel-dump check (`/api/frame`) is the next step once
+    this merges to main.
 - **sports** (`sports.py`/`SportsEngine`, 2026-07-30, expanded same day) —
   NFL/NBA/MLB/NHL/EPL/NCAAF/NCAAB scores via ESPN's free undocumented site
   API. Pinned favorite team (full-screen score, scoring-flash animation,
