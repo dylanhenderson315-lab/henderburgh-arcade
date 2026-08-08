@@ -3061,13 +3061,28 @@ ESPN parsing, no new polling.
   universal feed ever surfaces is what proves this live, not a synthetic
   push.
 
-**NFL touchdown — done (2026-08-08).** Same shape as the MLB home-run
-detector: `sports._fetch_touchdown_plays("NFL", event_id)` +
-`SportsEngine._detect_nfl_touchdown()` (registered as
-`BIG_MOMENT_DETECTORS["nfl_touchdown"]`), own one-shot cursor
+**NFL touchdown — done (2026-08-08), WIDENED TO NCAAF same day.** Same
+shape as the MLB home-run detector: `sports._fetch_touchdown_plays(league,
+event_id)` + `SportsEngine._detect_nfl_touchdown()` (registered as
+`BIG_MOMENT_DETECTORS["nfl_touchdown"]` — the key and method name are kept
+as-is for stability even though the scope now covers NCAAF too; grepped
+the codebase before widening and confirmed the method/key are the only
+places "nfl_touchdown" appears), own one-shot cursor
 `self._seen_nfl_touchdowns`, scoped identically to `_detect_mlb_home_run`
-(only fires for `favorite.league == "NFL"` and `favorite_game.state ==
-"in"`, reuses the same per-game summary endpoint, no new request volume).
+(only fires for `favorite.league in ("NFL", "NCAAF")` and
+`favorite_game.state == "in"`, reuses the same per-game summary endpoint,
+no new request volume).
+
+- **NCAAF widening confirmed live, not assumed**: NCAAF is the same
+  "football" sport family on ESPN's site API — checked a real finished
+  NCAAF game (event 401769072, Alabama @ Indiana, 2026 CFP semifinal)
+  against `_fetch_touchdown_plays("NCAAF", "401769072")` directly: the
+  identical top-level `scoringPlays` key, the identical `type.text`
+  values ("Passing Touchdown", "Rushing Touchdown", "Field Goal Good"),
+  and the same substring-match logic held unchanged — returned exactly 5
+  real touchdowns, all correctly classified, with the game's real field
+  goals correctly excluded. One function now serves both leagues rather
+  than forking a near-duplicate.
 
 - **Payload facts, confirmed live against a real finished game** (event
   401873271, Panthers @ Cardinals): NFL's summary endpoint carries scoring
@@ -3132,6 +3147,105 @@ shape again: `sports._fetch_goal_plays("NHL", event_id)` +
   failed/0 not-folding) after this change; `import sports, engines`
   clean. The first real live NHL goal the pinned-favorite feed ever
   surfaces is what proves this live, not a synthetic push.
+
+**Basketball clutch shot (NBA/NCAAB) — done (2026-08-08).** The sixth
+per-sport big-moment detector, and the first to cover basketball at all.
+`sports._fetch_clutch_plays(league, event_id)` +
+`SportsEngine._detect_basketball_clutch_shot()` (registered as
+`BIG_MOMENT_DETECTORS["basketball_clutch"]`), own one-shot cursor
+`self._seen_basketball_clutch`, scoped identically to every other
+detector here (`favorite.league in ("NBA", "NCAAB")` and
+`favorite_game.state == "in"`, reuses the same per-game summary endpoint,
+no new request volume).
+
+- **Real schema facts, confirmed live 2026-08-08 against a real
+  live/finished WNBA game** (event 401857125, LV @ MIN — used ONLY as a
+  real schema/logic reference this session; WNBA is NOT reintroduced to
+  `LEAGUE_PATHS` and the detector's league gate excludes it, matching the
+  owner's standing 2026-08-07 WNBA removal decision documented above):
+  basketball's per-game summary endpoint has **no `scoringPlays` key at
+  all** — the real key is `plays` (382 real entries in that game, a full
+  play-by-play list, not just scoring plays), and a scoring entry carries
+  `scoringPlay: true` (93 real scoring plays in that one game).
+- **"Any scoring play" is deliberately NOT the trigger** — basketball
+  scores far too often for that to mean anything (roughly one scoring
+  play every 30 real seconds of game clock in the sample checked). The
+  real, derivable signal built instead: a CLUTCH SHOT, a real scoring
+  play that is (a) in the final period-or-later for that league's real
+  convention, (b) inside a real clock threshold, and (c) a real tie or
+  lead change computed from actual consecutive scores.
+- **NBA quarters vs. NCAAB halves — confirmed live, not guessed.**
+  `FINAL_PERIOD_BY_LEAGUE = {"NBA": 4, "NCAAB": 2}`. Checked against a
+  real finished NCAAB game (event 401825568): every play's
+  `period.number` topped out at 2, with `period.displayValue` reading
+  "1st Half"/"2nd Half", never "Quarter" — a genuinely different real
+  convention from the WNBA/NBA 4-quarter game also checked, not an
+  assumption carried over from football/hockey's period counts.
+  Overtime periods (5+ for NBA, 3+ for NCAAB) are covered for free by the
+  same `>=` comparison, no separate branch needed.
+- **`clock.displayValue` is NOT uniformly raw seconds, contrary to an
+  earlier assumption going into this build — checked programmatically
+  across all 382 real plays in the reference game, not assumed from one
+  sample.** For most of a period it's the familiar `"M:SS"` form
+  ("9:43", "10:00" — 336 of 382 real plays); only once the real clock
+  drops under one minute remaining does ESPN switch to a bare
+  decimal-seconds string with no colon ("43.5", "18.1", "0.0" — the
+  other 46, every single one confirmed inside the final minute of its
+  period). `sports._clock_seconds_remaining()` parses both forms
+  correctly; a string matching neither returns `None` so the caller
+  skips it rather than mis-parsing a play as clutch-eligible.
+- **`CLUTCH_WINDOW_SECONDS = 120.0`** — the final 2 minutes of the final
+  period/half. A stated judgment call, not a measured fact (there is no
+  ESPN field that marks a moment "clutch"), reasoned the same way
+  `flights.WINDOW_MAX_NM_DEFAULT` was reasoned about: this is the
+  common broadcast/fan notion of "clutch time" (the point announcers
+  start saying it out loud), short enough to stay rare against the ~90
+  real scoring plays a full game produces.
+- **The tie/lead-change test is a real before/after score comparison,
+  never an invented confidence number** — walks backward through the
+  same real `plays` list to the previous play carrying a score, compares
+  that margin's sign against this play's resulting margin. Same "place
+  comparison" category of derived-but-real signal `golfer_move()`'s
+  LEAD/LOST LEAD detection already uses for golf.
+- **Verified against real live data, not synthesized**: replaying the
+  exact detection logic against the real reference game's real 93
+  scoring plays found **0 qualifying clutch plays** — checked and
+  confirmed this is the honestly correct answer, not an untested path:
+  the real game was never within a tie/lead-change margin during the
+  final 2 minutes of its 4th quarter (margin stayed 4+ points the whole
+  window, confirmed by printing every real 4th-quarter scoring play's
+  before/after score). A second real WNBA game checked the same way
+  (Indiana @ Chicago) also correctly found 0 qualifying plays, same
+  reason (never close late). A synthetic POSITIVE control (a fabricated
+  late go-ahead three-pointer inserted into a realistic play sequence)
+  confirmed the detector DOES fire correctly when a real qualifying
+  shape is present — proving the 0-count above is a true negative, not a
+  detector that can never fire. One-shot cursor logic (adopt-then-diff,
+  no double-fire) was driven directly through `SportsEngine` with a
+  mocked fetch, mirroring every other detector's own verification here.
+- Text: line1 = the real score line (same
+  `f"{away_abbr} {away_score}, {home_abbr} {home_score}"` shape every
+  other detector uses). line2 = the real ESPN play text (folded). Color =
+  home team color, falling back to away, falling back to `(160, 60, 220)`
+  — a violet/purple chosen deliberately over an orange fallback (a
+  basketball is itself orange, which would collide with NFL's own
+  `(255, 100, 40)` fallback), reading as an arena-lights/NBA-branding
+  hue and staying visually distinct from every other sport's fallback
+  already in use (NFL orange, NHL blue, MLB gold).
+- `sport="basketball"` threads through `_set_big_moment()` into
+  `_backdrop_sports()` exactly like every other sport, reusing the
+  existing `SPORT_ICONS["basketball"]` icon from the earlier per-sport-
+  icons pass — no new icon plumbing needed.
+- **Honestly unverified**: no live NBA/NCAAB game existed this session
+  (both leagues showed only `pre` games on their real scoreboards) — the
+  fetch/detection logic above is what's verified, against a real WNBA
+  game used purely as a schema/logic reference, not an actual live-fire
+  on the real pinned-favorite feed. Same "ship correct but honestly
+  unverified" precedent as `_detect_nhl_goal()`/`_detect_mma_finish()`.
+  `render_audit.py sports` and `fold_audit.py` both clean before and
+  after; `import sports, engines` clean. The first real live NBA/NCAAB
+  clutch shot the pinned-favorite feed ever surfaces is what proves this
+  live, not a synthetic push.
 
 **WNBA big-moment detection — REMOVED (2026-08-07), owner preference, not
 a bug.** A WNBA big-play detector was built 2026-08-02 (per-game
