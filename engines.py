@@ -8192,6 +8192,9 @@ class SportsEngine(Browsable, BigMomentSource):
         # Seen-play cursor for _detect_nhl_goal() -- identical one-shot
         # idiom to _seen_home_runs above.
         self._seen_nhl_goals = None
+        # Seen-play cursor for _detect_basketball_clutch_shot() --
+        # identical one-shot idiom to _seen_home_runs above.
+        self._seen_basketball_clutch = None
         # State for _detect_soccer_goal -- the per-game "seen" set, keyed
         # off the currently-watched event_id so a game change starts
         # clean instead of replaying goals already shown (same reasoning
@@ -9723,6 +9726,81 @@ class SportsEngine(Browsable, BigMomentSource):
                              tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="hockey")
 
     BIG_MOMENT_DETECTORS["nhl_goal"] = _detect_nhl_goal
+
+    def _detect_basketball_clutch_shot(self):
+        """Basketball "clutch shot" detector for NBA/NCAAB -- same shape
+        as the other big-moment detectors, different signal.
+
+        Scoped EXACTLY like sports._fetch_win_prob(): only the pinned
+        favorite's own game, and only while it is genuinely `state ==
+        "in"` -- never the whole universal feed.
+
+        "Any scoring play" is deliberately NOT the trigger here, unlike
+        home runs/touchdowns/goals -- basketball scores constantly (93
+        real scoring plays in one real game checked this session), so a
+        celebration on every made basket would be noise, violating this
+        project's own repeated "don't flash on the mundane case" rule
+        (golf's EAGLE/BIRDIE/LEAD-only firing, soccer's real-goal-only
+        firing). See sports._fetch_clutch_plays()'s own docstring for the
+        full real-schema facts and the exact clutch definition: final
+        period-or-later (league-specific convention, NBA quarters vs
+        NCAAB halves), inside CLUTCH_WINDOW_SECONDS of real game clock,
+        and a real tie-or-lead-change by comparing this play's score
+        margin against the previous scoring play's margin.
+
+        Seen-play tracking lives on THIS instance
+        (`_seen_basketball_clutch`), same one-shot idiom as
+        `_seen_home_runs`/`_seen_nfl_touchdowns`/`_seen_nhl_goals`: the
+        first read adopts the current set without firing, and only IDs
+        not already in that set are new.
+
+        No live NBA/NCAAB game existed to verify the live-fire path
+        against this session (both leagues showed only `pre` games) --
+        the fetch/detection LOGIC was verified against a real live/
+        finished WNBA game's real play-by-play as a schema/logic
+        reference only (WNBA stays out of scope here, matching the
+        `_fetch_clutch_plays()` league gate), same "ship correct but
+        honestly unverified live-fire" precedent as `_detect_nhl_goal()`/
+        `_detect_mma_finish()`.
+        """
+        favorite = self.data.get("favorite")
+        fg = self.data.get("favorite_game")
+        league = favorite.get("league") if favorite else None
+        if not favorite or league not in ("NBA", "NCAAB"):
+            return
+        if not fg or fg.get("state") != "in":
+            return
+        event_id = fg.get("event_id")
+        if not event_id:
+            return
+        clutch = sports._fetch_clutch_plays(league, event_id)
+        ids = {c["id"] for c in clutch}
+        if self._seen_basketball_clutch is None:
+            self._seen_basketball_clutch = ids     # first read: adopt, don't replay
+            return
+        new_ids = ids - self._seen_basketball_clutch
+        self._seen_basketball_clutch = ids
+        if not new_ids:
+            return
+        # Only the most recent new one matters -- _set_big_moment is a
+        # one-slot queue anyway, so firing on more than one would just
+        # overwrite itself.
+        newest = max((c for c in clutch if c["id"] in new_ids), key=lambda c: c["id"])
+        home, away = fg["home"], fg["away"]
+        line1 = f"{away['abbr']} {away['score']}, {home['abbr']} {home['score']}"
+        # Neutral fallback distinct from every other sport's fallback
+        # already in use (NFL orange (255,100,40), NHL blue (40,160,255),
+        # MLB gold (255,200,40)): a basketball is itself orange, which
+        # would collide with NFL's fallback, so this deliberately picks a
+        # cool violet/purple instead -- an arena-lights color association
+        # (common NBA-team branding hue) that reads as basketball-
+        # appropriate while staying visually distinct from every other
+        # sport's fallback already in use here.
+        color = home.get("color") or away.get("color") or (160, 60, 220)
+        self._set_big_moment("CLUTCH", line1, newest["text"], color,
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="basketball")
+
+    BIG_MOMENT_DETECTORS["basketball_clutch"] = _detect_basketball_clutch_shot
 
     def _detect_mma_finish(self):
         """MMA finish detector for the SHARED big-moment celebration.

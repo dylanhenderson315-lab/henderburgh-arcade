@@ -571,6 +571,151 @@ def _fetch_goal_plays(league, event_id):
     return out
 
 
+# How many seconds of real clock remain in the period for a scoring play
+# to even be CONSIDERED clutch. A judgment call, not a measured fact --
+# there is no ESPN field that says "this moment was clutch", so this is
+# reasoned the same way WINDOW_MAX_NM_DEFAULT (flights.py) was reasoned
+# about: the final 2 minutes of the final period/half is the common
+# broadcast/fan notion of "clutch time" in basketball (it's the point
+# announcers start saying it out loud), and it is short enough that it
+# stays rare relative to the ~90 real scoring plays a full game produces
+# (see _fetch_clutch_plays()'s own docstring for the real count observed
+# this session). Config-driven would be reasonable future work but this
+# project's other per-sport thresholds (golf's EAGLE/BIRDIE-only firing)
+# are also plain constants, not configurable, so this matches precedent.
+CLUTCH_WINDOW_SECONDS = 120.0
+
+
+def _clock_seconds_remaining(clock):
+    """Parses a basketball play's `clock.displayValue` into real seconds
+    remaining in the period, or None if unparseable.
+
+    CONFIRMED LIVE 2026-08-08 against a real finished WNBA game (event
+    401857125, LV @ MIN) that the format is NOT uniform, contrary to a
+    naive read of a single sample: for most of a period `displayValue` is
+    "M:SS" ("9:43", "10:00"), but once the real clock drops under one
+    minute remaining, ESPN switches to a bare decimal-seconds string
+    ("43.5", "18.1", "0.0") with no colon at all -- checked programmatically
+    across all 382 real plays in that game (336 colon-form, 46 bare-decimal
+    form, and every bare-decimal one was inside the final minute of its
+    period). Both forms are handled here rather than assuming one; a
+    string matching neither (missing clock, unexpected shape) returns
+    None so a caller can skip it rather than mis-parse a play as
+    clutch-eligible.
+    """
+    dv = (clock or {}).get("displayValue")
+    if not dv:
+        return None
+    try:
+        if ":" in dv:
+            m, s = dv.split(":", 1)
+            return float(m) * 60.0 + float(s)
+        return float(dv)
+    except (TypeError, ValueError):
+        return None
+
+
+# NBA is 4 real quarters; NCAAB is 2 real halves -- CONFIRMED live
+# 2026-08-08 against a real finished NCAAB game (event 401825568): every
+# play's `period.number` tops out at 2 with `period.displayValue` reading
+# "1st Half"/"2nd Half", never "Quarter". So "final period" is NOT the
+# same literal number across the two leagues -- NBA's final regulation
+# period is 4, NCAAB's is 2. Overtime periods (5+/3+) are naturally
+# covered by the same ">=" comparison without a separate branch.
+FINAL_PERIOD_BY_LEAGUE = {"NBA": 4, "NCAAB": 2}
+
+
+def _fetch_clutch_plays(league, event_id):
+    """Basketball "clutch shot" plays from a game's `plays` play-by-play
+    list, or [] for anything else. Returns a list of {"id": str, "text":
+    str, "awayScore": int, "homeScore": int}, text already
+    paneltext.panel_text()-folded (I/O boundary, same discipline as every
+    other _fetch_*_plays() in this module).
+
+    Basketball's summary payload has NO `scoringPlays` key at all --
+    confirmed live 2026-08-08 against a real finished WNBA game (event
+    401857125, LV @ MIN, used only as a real schema reference; WNBA is
+    NOT a supported league here, see the league check below) -- unlike
+    NFL/NCAAF/NHL. The real key is `plays` (MLB's sibling key, but a full
+    play-by-play list here, not just scoring plays -- 382 real entries in
+    that one game), and a scoring entry is marked `scoringPlay: true`
+    (93 of the 382 were real scoring plays in that game).
+
+    Unlike every other _fetch_*_plays() here, "any scoring play" is
+    deliberately NOT the trigger -- basketball scores far too often for
+    that to mean anything (93 real scoring plays in one real game is
+    roughly one every 30 real seconds of game clock). The real, derivable
+    signal built instead is a CLUTCH SHOT: a real scoring play that is
+    ALL of --
+      (a) in the final period or later for that league's real period
+          convention (see FINAL_PERIOD_BY_LEAGUE -- NBA quarters vs
+          NCAAB halves, confirmed live, not guessed),
+      (b) inside the real clock threshold (CLUTCH_WINDOW_SECONDS, a
+          judgment call -- see that constant's own docstring), and
+      (c) a real TIE or LEAD CHANGE -- this play's resulting
+          away-score-minus-home-score margin has a different sign (or is
+          zero) than the margin immediately BEFORE this play, found by
+          walking backward through the same real `plays` list to the
+          previous play that carried a score. This is a real
+          before/after comparison of real ESPN scores, the same
+          "place comparison" category of derived-but-real signal
+          `golfer_move()`'s LEAD/LOST LEAD detection already uses for
+          golf -- never an invented "confidence" number.
+
+    Same per-game summary endpoint _fetch_win_prob() already uses --
+    deliberately NOT a new endpoint, so the request-volume discipline
+    (only the pinned favorite's own LIVE game, see the caller in
+    engines.py) is the only thing standing between this and the
+    per-league-poll volume risk CLAUDE.md already flags twice.
+    """
+    if league not in ("NBA", "NCAAB"):
+        return []
+    final_period = FINAL_PERIOD_BY_LEAGUE[league]
+    path = LEAGUE_PATHS[league]
+    data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))
+    plays = data.get("plays")
+    if not isinstance(plays, list):
+        return []
+    out = []
+    for i, p in enumerate(plays):
+        if not p.get("scoringPlay"):
+            continue
+        period = p.get("period") or {}
+        if not isinstance(period.get("number"), int) or period["number"] < final_period:
+            continue
+        secs = _clock_seconds_remaining(p.get("clock"))
+        if secs is None or secs > CLUTCH_WINDOW_SECONDS:
+            continue
+        away_score, home_score = p.get("awayScore"), p.get("homeScore")
+        if not isinstance(away_score, (int, float)) or not isinstance(home_score, (int, float)):
+            continue
+        after_margin = away_score - home_score
+        before_margin = 0.0   # honest default: nothing scored yet this game
+        for j in range(i - 1, -1, -1):
+            prev = plays[j]
+            pa, ph = prev.get("awayScore"), prev.get("homeScore")
+            if isinstance(pa, (int, float)) and isinstance(ph, (int, float)):
+                before_margin = pa - ph
+                break
+        # Tie or lead change: the margin's sign flipped, or either side
+        # of the comparison is a genuine 0-0 tie -- a real before/after
+        # score comparison, not a threshold on anything invented.
+        tie_or_change = (after_margin == 0) or (before_margin == 0) or \
+                         ((before_margin > 0) != (after_margin > 0))
+        if not tie_or_change:
+            continue
+        pid = p.get("id")
+        if pid is None:
+            continue
+        out.append({
+            "id": str(pid),
+            "text": paneltext.panel_text(p.get("text") or ""),
+            "awayScore": int(away_score),
+            "homeScore": int(home_score),
+        })
+    return out
+
+
 def _fetch_key_events(league, event_id):
     """One soccer match's play-by-play event log (goals, cards, subs,
     kickoff/halftime/regulation-end markers...) from the summary
