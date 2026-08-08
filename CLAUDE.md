@@ -2630,7 +2630,118 @@ method this project's own CLAUDE.md names as the standard one). Worth a
 real spot-check of the ticker/detail views on the physical panel next
 time a live match is in progress.
 
-### Per-sport MAIN renderers (IN PROGRESS — started 2026-08-01)
+### Football (NFL/NCAAF) and basketball (NBA/NCAAB) — the last two MAIN/DETAIL rows (2026-08-08)
+
+Closes both remaining rows of the per-sport MAIN-renderer table and adds
+their EXPANDED-DETAIL renderers in the same pass, same order tennis just
+established this session.
+
+**Reused, not re-derived**: `sports._situation()`'s `down_distance` field
+already existed (built defensively before this session, never verified
+live) and `engines.situation_line(g)` already existed and was already
+used by `GameDayEngine`'s NFL team view -- both wired directly into
+`_render_football()`/`_render_football_detail()` rather than
+reimplemented. `SPORT_ICONS["football"]`/`["basketball"]` and both
+leagues' `LEAGUE_ICON` entries already pointed at real
+`draw_icon_football`/`draw_icon_basketball` from an earlier icons-only
+pass -- just threaded through `draw_header(..., icon=...)` the same way
+soccer/golf/tennis's renderers already do. `_draw_scoreline()` (shared
+two-row team block, already used by baseball) is reused as-is by both
+new main renderers.
+
+**A real data-provenance fact worth keeping**: `sports._situation()`'s
+output is NOT carried on the universal header event dict
+(`_header_event()`) at all -- confirmed by reading both functions, not
+assumed. It only reaches `SportsEngine`'s events via the per-league-poll
+join already documented in `tick()` (`sports.py`'s per-league
+`_parse_event()` output, joined onto `self.universal` by event id) --
+and that join only runs for the CONFIGURED leagues (`self.leagues`,
+default NFL/NBA/MLB/NHL). So down-and-distance is real and will render
+for NFL, but only when NFL is a configured league AND the header also
+carries that same event id; an unconfigured NCAAF/NCAAB game gets no
+situation enrichment at all, which is the correct degrade, not a bug.
+
+**No possession indicator was built for football**, matching this
+project's own explicit NHL power-play precedent right next to
+`down_distance` in `_situation()`'s docstring ("guessing one would be
+inventing the feature") -- no ESPN field for possession was ever
+confirmed on a real payload this session.
+
+**No bonus/foul-count/timeout display was built for basketball**, same
+reasoning: no live NBA/NCAAB game's `situation` payload was ever
+inspected to confirm a field name, and none of the confirmed fields on
+`_header_event()`/`_situation()` cover it. What `_render_basketball()`
+ACTUALLY adds over `_frame_universal_generic()`: the generic fallback
+never shows a team's record at all (only detail/clock/class_label) and
+sizes its score block for the worst case across every sport (tennis'
+wide strings); the dedicated renderer adds an explicit record line and a
+purpose-built quarter/clock line, using basketball's own numeric-score
+layout. This is honestly closer to "the same layout with a
+purpose-built header" than a from-scratch design, which is the correct,
+non-forced outcome per this task's own instructions given no live
+NBA/NCAAB game existed this session to justify more.
+
+**Verified against real data, not synthetic**:
+- `.venv/bin/python -c "import sports, engines"` clean.
+- `render_audit.py sports` and `fold_audit.py` both clean before and
+  after (0 modes failed, 0 feeds not folding; only the pre-existing
+  tennis `TRUNCATED` warnings, same non-fatal class every other sport
+  already has).
+- **A live WNBA game existed this session** (`sports.HEADER_URL`
+  carried it under `sport == "basketball"`, same universal shape NBA/
+  NCAAB games would use): LV @ MIN, `state: "in"`, period 1, clock
+  "1:47", LV 18 - MIN 22, real records 22-9 / 25-7. Drove
+  `SportsEngine._render_basketball()`/`_render_basketball_detail()`
+  directly against this real live event -- both produced real non-black
+  frames (884px / 1143px lit) with no crash. A second real WNBA game
+  (IND @ CHI, `state: "pre"`, scheduled 3:30 PM EDT) verified the
+  scheduled-state path the same way (719px lit, non-black, no crash).
+- **NFL and NCAAF had zero events on the header endpoint** this session
+  (both aged off -- NFL's one game today was already `state: "post"`,
+  NCAAF is preseason and apparently outside the header's near-term
+  window) -- so there was no live header-shaped football event to pull.
+  Verified instead against the REAL per-league scoreboard, which DOES
+  have them: a real finished NFL game (CAR 33, ARI 30, `state: "post"`,
+  real records 1-0/0-1) and a real scheduled NCAAF game (UNC vs TCU,
+  `state: "pre"`). Reshaped `sports._parse_event()`'s real output into
+  the universal event shape the renderers actually consume (field-name
+  plumbing only -- every value is the real one ESPN returned, nothing
+  invented) and drove `_render_football()`/`_render_football_detail()`
+  directly against both: all four combinations rendered real non-black
+  frames (787-982px lit) with no crash.
+- **Live-panel check**: `com.henderburgh.arcade` was already running
+  (mode `flights`) -- switched to `sports` via `POST /api/mode/sports`,
+  confirmed `state == "sports"` with no `err`, pulled `/api/frame` five
+  times and confirmed real non-black frames each time (922 lit px on one
+  sample) with the engine running against the live warmed feed, then
+  switched back to `flights` (the mode the panel was actually in before
+  this check) and confirmed it returned healthy with no error. Landing
+  the ticker specifically on a football or basketball game on the
+  physical panel in this pass would have required exposing the two-axis
+  browse controls over HTTP, which this project does not do (browse
+  input is physical-cart-driven, not an API endpoint) -- so the direct
+  `SportsEngine`-driving above is what actually exercises both new
+  renderers against real data, matching the project's own stated
+  standard verification method ("engine calls FEED, no panel needed"),
+  same precedent tennis used for the same reason this session.
+
+**Honestly unverified**: live in-game down-and-distance ACTUALLY
+appearing on the physical panel (no NFL/NCAAF game was `state == "in"`
+anywhere this session -- both real events checked were `post`/`pre`),
+and a live basketball clock/quarter rendering on the physical panel
+specifically for NBA/NCAAB (the live basketball verification above used
+a real live WNBA game via direct engine-driving, not NBA/NCAAB, and not
+on the physical panel). Built correctly against every real shape that
+WAS available (finished NFL, scheduled NCAAF, live+scheduled WNBA under
+the shared `basketball` sport key) -- worth a real spot-check the next
+time an NFL/NCAAF game or an NBA/NCAAB game is actually live.
+
+Commits: `_render_football`/`_render_football_detail` and
+`SPORT_RENDERERS`/`SPORT_DETAIL_RENDERERS["football"]` in one commit,
+`_render_basketball`/`_render_basketball_detail` and their registry
+entries in a second, this write-up last -- see git log for hashes.
+
+### Per-sport MAIN renderers (DONE — started 2026-08-01, closed 2026-08-08)
 
 **Why**: one generic renderer had to satisfy every sport at once, so every
 layout decision was made for the WORST CASE across seven of them. The tell
@@ -2652,11 +2763,13 @@ when adding one.
 |---|---|
 | baseball | **done** — diamond/outs/count/half-inning on the main row |
 | mma | **done** — weight class primary, records per fighter, card position |
-| football | not started — **NFL/NCAAF are off-season, no live data to verify against** |
-| basketball | not started — NBA off-season; verify against **WNBA**. Still no live WNBA game as of 2026-08-01 (checked again — both games each day so far have already finished by the time this was checked) |
+| football | **done (2026-08-08)** — quarter/clock, down-and-distance via `situation_line()` when live and present, records/broadcast footer. Closes this table. See the FOOTBALL/BASKETBALL section below |
+| basketball | **done (2026-08-08)** — quarter/clock, records/broadcast footer; deliberately minimal (no bonus/foul/timeout display, no confirmed field for one). See the FOOTBALL/BASKETBALL section below |
 | soccer | **done** — form strings, ESPN-formatted clock, penalty shootouts (verified live). Layout uses a y-cursor after the audit caught the divider/clock overlapping the second team |
-| tennis | **done (2026-08-08)** — task #19, the last sport on this table. Set-by-set score line, tiebreak brackets, pinned-player view. See the TENNIS section below |
+| tennis | **done (2026-08-08)** — task #19, unblocked earlier the same session as football/basketball. Set-by-set score line, tiebreak brackets, pinned-player view. See the TENNIS section below |
 | golf | **done** — 6-row leaderboard, movement arrows (sign verified: negative = climbed the leaderboard) |
+
+**This table is now fully closed** — every sport this module tracks has its own MAIN renderer.
 
 ### Big-moment celebration — SHARED INFRASTRUCTURE done, per-sport detection IN PROGRESS (started 2026-08-02)
 
@@ -3275,6 +3388,8 @@ same discipline as the main-renderer seam.
 | soccer | **done** — full record with points ("7-5-5, 26 PTS", no room on the compact row), venue, broadcast, series, note, shootout at full size. Verified live against two real MLS matches |
 | golf | **done** — full tournament name, round status, venue, broadcast (the deep leaderboard the main view already provides isn't repeated). Verified against the real finished Rocket Classic |
 | tennis | **done (2026-08-08)** — full names, real venue/court, real `notes[]` finished-match summary, the DRAW. See the TENNIS section below |
+| football | **done (2026-08-08)** — full records, venue, broadcast, series/note, down-and-distance. See the FOOTBALL/BASKETBALL section below |
+| basketball | **done (2026-08-08)** — full records, venue, broadcast, series/note; no bonus/foul/timeout row, same honest gap as the main renderer |
 | mma / others | not started — main renderer exists for MMA but no card was available to verify against at build time (zero events, no live/upcoming card in the window checked) |
 
 **Two real bugs found building baseball's detail view, both from
