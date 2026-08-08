@@ -5845,6 +5845,30 @@ class FlightEngine(Browsable, BigMomentSource):
         # arbitrary one (see flights.py's own 213-aircraft sample note).
         return SCOPE_ICON_AIRLINER
 
+    @staticmethod
+    def _hangar_kind(type_code):
+        """Which sprite kind a THE HANGAR entry gets -- same four
+        SCOPE_ICON_* buckets `_ac_kind()` uses for the live scope, but
+        keyed on the real ICAO `type` code alone (a persisted Hangar
+        entry has no live ADS-B `category` field to read, only `type`).
+        Uses flights.HANGAR_HELI_TYPES/HANGAR_AIRLINER_TYPES/BIZJET_TYPES
+        -- all three seeded ONLY from the real 198 entries already in
+        hangar_log.jsonl (see flights.py's own comment on that table for
+        the full audit trail). Anything not positively identified in one
+        of those three sets -- including a genuinely unmatched real type
+        code, or no type broadcast at all -- silently falls back to GA,
+        per the owner's explicit decision: Hangar's real population
+        already skews GA/light, so that is the honest statistical
+        default, not a guess and not a distinct 'unknown' mark."""
+        t = (type_code or "").strip().upper()
+        if t in flights.HANGAR_HELI_TYPES:
+            return SCOPE_ICON_HELI
+        if t in flights.HANGAR_AIRLINER_TYPES:
+            return SCOPE_ICON_AIRLINER
+        if t in flights.BIZJET_TYPES:
+            return SCOPE_ICON_BIZJET
+        return SCOPE_ICON_GA
+
     def __init__(self):
         self.score = 0
         self.reset()
@@ -6690,16 +6714,34 @@ class FlightEngine(Browsable, BigMomentSource):
         e = self.hangar_entries[idx]
         draw_header(buf, e.get("reg") or "UNKNOWN", self.HANGAR, right_tag=f"{idx + 1}/{n}")
 
+        # Static, non-rotating sprite -- owner decision #3: the Hangar is
+        # browsed one entry at a time (same interaction pattern as the
+        # flight DETAIL card, never more than one sprite drawn per
+        # frame), so it's safe to reuse THAT card's 3-stroke budget
+        # (`_draw_plane_icon`, one fuselage line + one wing line + one
+        # tailplane line + a nose pip) rather than the radar scope's
+        # tighter 2-stroke budget -- the same "only one draws per frame"
+        # reasoning that already makes the DETAIL card safely thicker
+        # than the scope. `heading_deg=None` reuses that method's
+        # existing fixed "up" orientation + dim uncertainty ring, since a
+        # persisted Hangar entry has no live heading to draw -- no new
+        # static-bitmap code path needed. Kind comes from `_hangar_kind()`
+        # (owner decision #2's real-seeded lookup table), falling back to
+        # GA for anything unmatched (owner decision #1) rather than a
+        # distinct "unknown" mark.
+        self._draw_plane_icon(buf, WIDTH // 2, 19, None, self.HANGAR,
+                              kind=self._hangar_kind(e.get("type")))
+
         # Real, readable type name (flights.ICAO_TYPE_NAMES -- same
         # static reference table the DETAIL card already uses), falling
         # back honestly to "TYPE UNKNOWN" for the small real fraction of
         # aircraft that never broadcast a type code.
         typ = flights._type_name(e.get("type")) or "TYPE UNKNOWN"
-        draw_text_centered(buf, 19, fit_text(typ, WIDTH - 4), self.INK)
+        draw_text_centered(buf, 31, fit_text(typ, WIDTH - 4), self.INK)
 
         airline = e.get("airline")
         if airline:
-            draw_text_centered(buf, 27, fit_text(airline, WIDTH - 4), self.INK_DIM)
+            draw_text_centered(buf, 38, fit_text(airline, WIDTH - 4), self.INK_DIM)
 
         # Repeat visitors get the SAME green treatment as an ATC
         # confidence-match -- "this one's been here before" is the
@@ -6707,7 +6749,7 @@ class FlightEngine(Browsable, BigMomentSource):
         times = e.get("times_seen") or 1
         seen_col = self.ATC_MATCH if times > 1 else self.INK_DIM
         seen_txt = f"SEEN {times}X" if times > 1 else "FIRST SIGHTING"
-        draw_text_centered(buf, 40, fit_text(seen_txt, WIDTH - 4), seen_col)
+        draw_text_centered(buf, 45, fit_text(seen_txt, WIDTH - 4), seen_col)
 
         age = max(0.0, time.time() - (e.get("first_seen") or 0))
         draw_text_centered(buf, 52, fit_text(f"{self._fmt_age_long(age)} AGO", WIDTH - 4),

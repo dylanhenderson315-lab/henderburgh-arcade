@@ -349,6 +349,76 @@ BIZJET_TYPES = {
     "CL30", "CL35", "CL60",                              # Challenger
     "H25B", "HA4T",                                      # Hawker
     "PC24",                                               # Pilatus PC-24
+    # ---- added 2026-08-07, THE HANGAR bucket table build -------------
+    # Confirmed against a REAL local sighting in hangar_log.jsonl (unlike
+    # every entry above, which was general knowledge with no local
+    # confirmation until this table gained one -- see HANGAR_*_TYPES
+    # below for the rest of that story). Added here rather than a
+    # separate table because they are the same real thing this set
+    # already exists to describe (a business jet ICAO type designator),
+    # just ones that happened to be confirmed by this session instead of
+    # the original build.
+    "GLEX",   # Bombardier Global Express -- real hangar entries N8762M, N843FF
+    "FA10",   # Dassault Falcon 10 -- real hangar entry N707CX
+    "HDJT",   # HondaJet (Honda HA-420) -- real hangar entry N420NJ
+    "E35L",   # Embraer Legacy 600 -- real hangar entry N650LY
+    "E545",   # Embraer Legacy 450 -- real hangar entries N411FX, N413FX
+}
+
+# ---- THE HANGAR's type -> bucket lookup, 2026-08-07 -----------------------
+# Built for hangar.py's static per-entry sprite (owner decision #3: the
+# Hangar is browsed one aircraft at a time, so it can afford the DETAIL
+# card's 3-stroke budget, not the scope's tighter 2-stroke one -- see
+# engines.py's FlightEngine._hangar_kind()/_draw_plane_icon() call site).
+#
+# SEEDED ONLY FROM THE 198 REAL TYPE CODES ALREADY IN hangar_log.jsonl ON
+# DISK (owner decision #2) -- every code below was read directly out of
+# that file (68 distinct real values, one seen as `null` on 4 entries),
+# not invented from general aviation knowledge the way the ORIGINAL
+# BIZJET_TYPES table above admittedly was (its own docstring says so).
+# Every code assigned a bucket here is one this session could positively
+# identify from real, specific type-designator knowledge (e.g. "A320" is
+# unambiguously an Airbus A320 narrowbody airliner, "SR22" is
+# unambiguously a Cirrus SR22 GA single) -- nothing here is a guess at
+# what a code MIGHT be. Anything not confidently identifiable is left
+# OUT of every bucket on purpose: `FlightEngine._hangar_kind()` falls
+# back to GA for anything not in one of these sets (or BIZJET_TYPES
+# above), per owner decision #1 -- the honest statistical default,
+# matching the live radar scope's own "default to majority bucket"
+# convention, not a distinct "unknown" mark. Two real seen codes were
+# deliberately left unmapped for exactly this reason: `GA6C` (no
+# confident real-world match) and `HUNT` (a Hawker Hunter jet warbird --
+# real, but fits none of the four buckets honestly) -- both correctly
+# render as GA rather than a guess.
+HANGAR_HELI_TYPES = {
+    "R44",    # Robinson R44 -- real hangar entries N3055Y, N118YL, N267AW, N220SG
+    "AS65",   # Airbus/Eurocopter AS365 Dauphin -- real hangar entry "6540"
+}
+
+HANGAR_AIRLINER_TYPES = {
+    # Real narrowbody/widebody jet airliners seen in hangar_log.jsonl --
+    # same "large real jet transport" bucket the live scope's _ac_kind()
+    # already maps ADS-B category A3/A4/A5 onto, just identified here by
+    # real ICAO type code instead of a live category field (the Hangar's
+    # persisted entries don't carry `category`, only `type`).
+    "A319", "A320", "A321",           # Airbus A320 family
+    "A20N", "A21N",                   # Airbus A320neo family
+    "A333", "A35K",                   # Airbus A330-300 / A350-1000
+    "B737", "B738", "B38M",           # Boeing 737NG / MAX
+    "B712",                            # Boeing 717-200
+    "B788", "B789",                    # Boeing 787
+    "BCS3",                            # Airbus A220-300
+    "CRJ9",                            # Bombardier CRJ900 regional jet
+    "E145", "E75L",                    # Embraer regional jets
+    "AT73",                            # ATR 72 regional turboprop airliner
+    "SH36",                            # Shorts SD3-60 -- real hangar entry N688AN, AIR CARGO CARRIERS
+    # Large military jet/turboprop transports -- no dedicated bucket for
+    # these exists (this project's 4-bucket set is deliberately not
+    # expanded, see CLAUDE.md), and physically they are the same "big,
+    # heavy, multi-engine transport" class the airliner bucket already
+    # exists to describe, not a GA aircraft by any honest reading.
+    "C17",    # Boeing C-17 Globemaster III -- real hangar entries 99-0062, 08-8190
+    "C30J",   # Lockheed C-130J Super Hercules -- real hangar entry 166472
 }
 # Tags are kept to 7 characters because draw_header fits its right tag to
 # 30px (7 glyphs) and SILENTLY truncates past that -- "HELICOPTER" became
