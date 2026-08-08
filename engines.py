@@ -6034,6 +6034,171 @@ class FlightEngine(Browsable, BigMomentSource):
         # arbitrary one (see flights.py's own 213-aircraft sample note).
         return SCOPE_ICON_AIRLINER
 
+    # Dead-reckoning duration cap -- 2x the real poll cadence
+    # (flights.POSITION_REFRESH, ~15s). If a real poll is late/stalled,
+    # extrapolation freezes at this ceiling rather than projecting an
+    # aircraft further and further into an increasingly unreliable future
+    # on stale velocity data -- same "an honest gap beats a lie" principle
+    # as the selection-loss-on-range-exit handling above.
+    DR_MAX_MULT = 2.0
+
+    def _update_dead_reckoning(self, ac_list, new_poll, t_ref):
+        """Render-side position extrapolation between real ADS-B polls.
+
+        WHY: flights.FEED refreshes every ~15s (flights.POSITION_REFRESH);
+        without this, every aircraft on the scope sits frozen at its last-
+        polled bearing/distance and teleports once per poll -- real user
+        feedback was that this reads as static/jumpy, not "live". Every
+        aircraft dict already carries REAL gs_kt (ground speed, kt) and
+        track_deg (real heading) from ADS-B -- this is physics-based
+        estimation from observed real velocity, not invented motion, the
+        same category of derived-but-real inference flights._phase()
+        already does for CLIMB/DESCEND/CRUISE classification, just
+        continuous instead of discrete.
+
+        ZERO NEW I/O: pure math over ac_list, which tick() already read
+        from flights.FEED.get() this same call.
+
+        MATH: dist_nm/dir_deg (real, ADS-B bearing-FROM-home convention,
+        confirmed against every other scope_xy() use in this project) are
+        converted to a local nm-plane position matching scope_xy()'s own
+        0=N-up/clockwise convention (x = cx + r*sin(bearing), y = cy -
+        r*cos(bearing)): x_nm = dist_nm*sin(dir_deg), y_nm =
+        dist_nm*cos(dir_deg) (north = +y). On a REAL poll (new_poll=True,
+        detected by tick() from flights.FEED.get()'s own `age` signal
+        going down -- no second I/O source needed), this real position
+        becomes the new dead-reckoning REFERENCE for that aircraft, keyed
+        by the SAME identity `_sel_key()` selection already uses (hex
+        preferred, ident fallback) -- the real poll always wins, no
+        blending toward it.
+
+        EVERY tick (not just on a poll), if gs_kt/track_deg are BOTH real
+        (neither None -- honest degrade otherwise: hold the last known
+        REAL position, extrapolate nothing), advance from the reference:
+        speed_nm_per_sec = gs_kt / 3600, dx = speed_nm_per_sec *
+        sin(track_deg) * elapsed, dy = speed_nm_per_sec * cos(track_deg) *
+        elapsed, elapsed clamped to [0, DR_MAX_MULT * POSITION_REFRESH].
+        Recomputed dist_nm/dir_deg from the advanced (x_nm+dx, y_nm+dy)
+        are stashed on the aircraft dict as `_ext_dist_nm`/`_ext_dir_deg`
+        for _frame_scope()'s icon position ONLY -- every other read of
+        `dist_nm`/`dir_deg` (text fields, sorting, notability) still sees
+        the real polled values untouched, so nothing ever displays a
+        number that isn't literally what ADS-B reported.
+
+        No explicit outward clamp at RADIUS_NM's rim is needed:
+        _scope_r_frac() already clamps r_frac to [0, 1] via
+        `min(1.0, dist_nm / RADIUS_NM)` before the sqrt, exactly the same
+        handling a real near-rim aircraft already gets -- an extrapolated
+        aircraft drawn past the rim just draws AT the rim, matching
+        existing behaviour rather than inventing new edge-of-scope
+        handling.
+
+        BOUNDED: self._dr is rebuilt to only the keys currently in
+        `ac_list` every call -- an aircraft that leaves RADIUS_NM (already
+        dropped by tick()'s SELECTION-LOSS CHECK for selection, same
+        underlying list) has its dead-reckoning state cleaned up here too,
+        never accumulating.
+        """
+        live_keys = set()
+        for ac in ac_list:
+            key = self._sel_key(ac)
+            if key is None:
+                continue
+            dist_nm = ac.get("dist_nm")
+            dir_deg = ac.get("dir_deg")
+            if not isinstance(dist_nm, (int, float)) or dir_deg is None:
+                continue          # no real position fix at all -- nothing to seed
+            live_keys.add(key)
+            if new_poll or key not in self._dr:
+                x_nm = dist_nm * math.sin(math.radians(dir_deg))
+                y_nm = dist_nm * math.cos(math.radians(dir_deg))
+                self._dr[key] = {"x_nm": x_nm, "y_nm": y_nm, "t_ref": t_ref}
+
+        for key in list(self._dr):
+            if key not in live_keys:
+                del self._dr[key]
+
+        now = time.time()
+        for ac in ac_list:
+            key = self._sel_key(ac)
+            ref = self._dr.get(key)
+            if ref is None:
+                continue
+            gs = ac.get("gs_kt")
+            trk = ac.get("track_deg")
+            if not isinstance(gs, (int, float)) or trk is None:
+                continue          # honest degrade -- hold last known real position
+            elapsed = now - ref["t_ref"]
+            elapsed = max(0.0, min(elapsed, self.DR_MAX_MULT * flights.POSITION_REFRESH))
+            speed_nm_s = gs / 3600.0
+            dx = speed_nm_s * math.sin(math.radians(trk)) * elapsed
+            dy = speed_nm_s * math.cos(math.radians(trk)) * elapsed
+            x_nm, y_nm = ref["x_nm"] + dx, ref["y_nm"] + dy
+            ac["_ext_dist_nm"] = math.hypot(x_nm, y_nm)
+            ac["_ext_dir_deg"] = math.degrees(math.atan2(x_nm, y_nm)) % 360.0
+
+    # Real flown-path trail -- ~5min of real polls at flights.POSITION_
+    # REFRESH (~15s): 20 * 15s = 300s. Bounded per aircraft, evicted the
+    # moment an aircraft leaves the tracked list (see _update_trail()).
+    TRAIL_MAX_POINTS = 20
+
+    def _update_trail(self, ac_list, new_poll):
+        """Bounded per-aircraft REAL flown-path history, for the "show the
+        path it's flown" feature -- keyed by the SAME `_sel_key()` identity
+        as selection and dead reckoning above, reusing that exact x_nm/
+        y_nm local-plane representation rather than a second scheme.
+
+        Sampled ONLY on a REAL poll refresh (`new_poll`), never per render
+        tick -- a trail built from the dead-reckoned/extrapolated icon
+        position above would compound estimation error into a feature
+        whose entire point is showing where the aircraft REALLY was, not
+        where physics guesses it might be between polls.
+
+        BOUNDED the same way every other keyed cache in this project is
+        (THE HANGAR, self._dr above): capped at TRAIL_MAX_POINTS real
+        samples per aircraft, and rebuilt to only the keys currently in
+        `ac_list` every call -- an aircraft that leaves range or hasn't
+        been seen in a while has its trail dropped here, never
+        accumulating unbounded.
+        """
+        live_keys = set()
+        for ac in ac_list:
+            key = self._sel_key(ac)
+            if key is None:
+                continue
+            live_keys.add(key)
+            if not new_poll:
+                continue          # only sample real polls, not every render tick
+            dist_nm = ac.get("dist_nm")
+            dir_deg = ac.get("dir_deg")
+            if not isinstance(dist_nm, (int, float)) or dir_deg is None:
+                continue          # no real position fix -- nothing to record
+            x_nm = dist_nm * math.sin(math.radians(dir_deg))
+            y_nm = dist_nm * math.cos(math.radians(dir_deg))
+            pts = self._trail.setdefault(key, [])
+            pts.append((x_nm, y_nm))
+            if len(pts) > self.TRAIL_MAX_POINTS:
+                del pts[0]
+        for key in list(self._trail):
+            if key not in live_keys:
+                del self._trail[key]
+
+    def _trail_points_px(self, key, cx, cy, r):
+        """Real trail history for one aircraft, converted to scope pixel
+        coordinates through the SAME sqrt-scaled projection every other
+        scope element uses (`_scope_r_frac()` + `scope_xy()`) -- a trail
+        drawn on a different scale than the live icon would visibly
+        mismatch it."""
+        out = []
+        for x_nm, y_nm in (self._trail.get(key) or []):
+            dist_nm = math.hypot(x_nm, y_nm)
+            brg = math.degrees(math.atan2(x_nm, y_nm)) % 360.0
+            frac = self._scope_r_frac(dist_nm)
+            if frac is None:
+                continue
+            out.append(scope_xy(brg, frac, cx=cx, cy=cy, radius=r))
+        return out
+
     @staticmethod
     def _hangar_kind(type_code):
         """Which sprite kind a THE HANGAR entry gets -- same four
@@ -6196,6 +6361,31 @@ class FlightEngine(Browsable, BigMomentSource):
         # doesn't flash on every type already logged the moment this
         # code ships.
         self._seen_hangar_types = None
+        # DEAD RECKONING (2026-08-08) -- see _update_dead_reckoning()'s own
+        # docstring for the full picture. self._dr maps sel_key -> {x_nm,
+        # y_nm, t_ref}: the local flat-plane position AT THE LAST REAL POLL
+        # and the real wall-clock time it was observed. Bounded the same
+        # way every other keyed cache in this project is -- rebuilt to only
+        # the keys currently in range every tick, see _update_dead_
+        # reckoning()'s own cleanup pass.
+        self._dr = {}
+        # Previous tick's `age` (seconds since the real ADS-B snapshot was
+        # fetched) -- the freshness signal flights.FlightFeed.get() already
+        # returns. `age` increases smoothly with real wall time between
+        # polls and drops back down the instant a genuinely new snapshot
+        # lands, so "age went DOWN since last tick" is a reliable, zero-
+        # extra-I/O way to detect a real poll without adding a second
+        # signal. None until the first real read.
+        self._dr_age_prev = None
+        # REAL FLOWN-PATH TRAIL (2026-08-08) -- see _update_trail()'s own
+        # docstring. self._trail maps sel_key -> a list of REAL observed
+        # (x_nm, y_nm) local-plane positions, one per real poll refresh --
+        # reuses the exact identity keying and local-plane representation
+        # _dr (dead reckoning) above already established, deliberately not
+        # a second scheme. Bounded to TRAIL_MAX_POINTS per aircraft and
+        # rebuilt to only currently-tracked keys every tick, same
+        # discipline as _dr and every other keyed cache in this project.
+        self._trail = {}
 
     # ---- input -----------------------------------------------------------
     def has_content(self):
@@ -6211,6 +6401,43 @@ class FlightEngine(Browsable, BigMomentSource):
         THE ONE place this lookup happens, so selection, auto-cycle, and
         ATC correlation all agree on what "the same aircraft" means."""
         return ac.get("hex") or ac.get("ident")
+
+    @staticmethod
+    def _route_status(route, airport):
+        """DEPARTING/ARRIVING/None -- the owner's own framing: "a plane
+        myrtle-to-wherever means departing, wherever-to-myrtle means
+        arriving." Compares the flight's REAL resolved origin/dest airport
+        code (adsbdb, IATA preferred/ICAO fallback, see _fetch_route())
+        against the configured home airport code. No route or no
+        configured home airport -> None, never guessed.
+
+        The common case is neither matching -- most tracked traffic is
+        passing near home, not to/from it -- so that's left unlabeled
+        (TRANSIT has no badge) rather than forcing a label onto the
+        majority case, same "no badge for the mundane case" rule flight
+        phase CRUISE already follows.
+
+        HONEST LIMITATION: `flights.load_airport()` stores only ONE code
+        form (whatever the owner configured, e.g. MYR/IATA), not both
+        IATA and ICAO. adsbdb's route field prefers IATA too, so this
+        matches correctly in the common case, but a route that only
+        resolved an ICAO code (e.g. "KMYR") against an IATA-configured
+        home ("MYR") would false-negative to TRANSIT rather than
+        DEPARTING/ARRIVING -- a real format-mismatch gap, not fabricated
+        past by guessing a conversion.
+        """
+        if not route or not airport:
+            return None
+        home = (airport.get("code") or "").upper()
+        if not home:
+            return None
+        origin = (route.get("origin") or "").upper()
+        dest = (route.get("dest") or "").upper()
+        if origin and origin == home:
+            return "DEPARTING"
+        if dest and dest == home:
+            return "ARRIVING"
+        return None
 
     @classmethod
     def _find_by_key(cls, aircraft, key):
@@ -6337,6 +6564,22 @@ class FlightEngine(Browsable, BigMomentSource):
         self._scroll_tick()
         self.route_scroll += 0.5   # same per-tick speed every other marquee in this project uses
         self.data = flights.FEED.get()
+        # DEAD RECKONING poll-boundary detection -- see
+        # _update_dead_reckoning()'s own docstring. `age` (seconds since
+        # flights.FEED's cached snapshot was actually fetched) increases
+        # smoothly with real wall time between polls and drops back down
+        # the instant a genuinely new snapshot lands, so a decrease is a
+        # reliable "a real poll just landed" signal with zero extra I/O.
+        # `t_ref` anchors dead-reckoning to the real fetch time
+        # (now - age), not merely "now", so the elapsed-time math below
+        # stays accurate even though this tick may run a little after the
+        # actual poll landed.
+        _age = self.data.get("age")
+        _now = time.time()
+        _new_poll = (_age is not None) and (
+            self._dr_age_prev is None or _age < self._dr_age_prev)
+        self._dr_age_prev = _age
+        _t_ref = (_now - _age) if _age is not None else _now
         self.airport = flights.load_airport()
         # THE HANGAR -- read every tick, same as every other FEED here
         # (hangar.LOG.get() is a pure in-memory read, never blocks).
@@ -6453,6 +6696,17 @@ class FlightEngine(Browsable, BigMomentSource):
                 self.atc_hold = 0
                 self.atc_page = (self.atc_page + 1) % len(self.atc_pages)
         ac_list = ac_list_now
+        # DEAD RECKONING -- pure math over ac_list, zero new I/O. Must run
+        # AFTER ac_list is final (this tick's real snapshot) and BEFORE
+        # _frame_scope() reads _ext_dist_nm/_ext_dir_deg off each aircraft
+        # dict. See _update_dead_reckoning()'s own docstring for the math.
+        self._update_dead_reckoning(ac_list, _new_poll, _t_ref)
+        # REAL FLOWN-PATH TRAIL -- pure math over ac_list, zero new I/O,
+        # same "after ac_list is final, before _frame_scope() reads it"
+        # placement as dead reckoning immediately above. See
+        # _update_trail()'s own docstring for why it samples only on a
+        # real poll (_new_poll), never every tick.
+        self._update_trail(ac_list, _new_poll)
         # Flash on the NEAREST aircraft changing -- that is the "something
         # new is overhead" moment, not merely the list reordering.
         self.pulse.note(ac_list[0]["ident"] if ac_list else None)
@@ -6666,6 +6920,55 @@ class FlightEngine(Browsable, BigMomentSource):
         draw_scope_crosshair(buf, cx=cx, cy=cy, radius=r)
         draw_scope_sweep(buf, self.sweep, cx=cx, cy=cy, radius=r)
 
+        # FEATURE 1 + 2/3: the currently SELECTED aircraft's real flown
+        # path, and a real route-bearing ray toward wherever it's real
+        # origin/destination airport actually is. Deliberately only the
+        # ONE selected aircraft, never all 8 -- this project already hit
+        # and fixed a real lag complaint from over-drawing this exact
+        # scope earlier this session (6 strokes -> 2 per aircraft icon);
+        # drawing every aircraft's trail every frame would reopen it.
+        # Both are context layers (same tier as the coastline/airport
+        # marker), drawn before the aircraft loop so the live icon paints
+        # over them, never the reverse.
+        if self.sel_key not in (None, self.AIRPORT_KEY):
+            sel_ac = next((a for a in aircraft if self._sel_key(a) == self.sel_key), None)
+            if sel_ac is not None:
+                # Trail: dim/muted version of the aircraft's own real
+                # altitude-band color -- reads as "history", stays
+                # visually secondary to the bright live icon.
+                trail_pts = self._trail_points_px(self.sel_key, cx, cy, r)
+                if len(trail_pts) >= 2:
+                    base_col = self._alt_color(sel_ac.get("alt_ft"))
+                    trail_col = tuple(c // 3 for c in base_col)
+                    for (x0, y0), (x1, y1) in zip(trail_pts, trail_pts[1:]):
+                        draw_line(buf, x0, y0, x1, y1, trail_col)
+                # Route-bearing ray(s): only when a real route resolved
+                # AND adsbdb gave real coordinates for the end(s) being
+                # drawn -- no route, no guessed ray, ever. "Departing
+                # means show where it's headed, arriving means show where
+                # it came from, transit shows both" -- the ray toward the
+                # end that ISN'T home is the informative one; a ray back
+                # to home when departing FROM home would be redundant.
+                route = sel_ac.get("route")
+                if route:
+                    status = self._route_status(route, self.airport)
+                    if status == "DEPARTING":
+                        ends = [("dest_lat", "dest_lon")]
+                    elif status == "ARRIVING":
+                        ends = [("origin_lat", "origin_lon")]
+                    else:
+                        ends = [("origin_lat", "origin_lon"), ("dest_lat", "dest_lon")]
+                    home_lat, home_lon, _hlbl = satellite.FEED.get_location()
+                    for lat_k, lon_k in ends:
+                        lat, lon = route.get(lat_k), route.get(lon_k)
+                        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+                            brg, _nm = flights.bearing_distance(home_lat, home_lon, lat, lon)
+                            # Short ray, not a full rim-to-rim line -- a
+                            # handful of pixels of real bearing, cheap and
+                            # secondary to the live traffic it's context for.
+                            rx, ry = scope_xy(brg, 0.42, cx=cx, cy=cy, radius=r)
+                            draw_line(buf, cx, cy, rx, ry, (60, 110, 80))
+
         # Airport first, UNDER the aircraft: it is context, not traffic,
         # and a plane on final should never be hidden by the runway it is
         # heading for.
@@ -6687,8 +6990,19 @@ class FlightEngine(Browsable, BigMomentSource):
                 draw_scope_airport(buf, x, y, port_col, glow=scope_glow(brg, self.sweep))
 
         for ac in aircraft:
-            frac = self._scope_r_frac(ac.get("dist_nm"))
-            brg = ac.get("dir_deg")
+            # DEAD RECKONING (2026-08-08): the ICON POSITION only uses the
+            # extrapolated dist/bearing when _update_dead_reckoning() set
+            # one this tick (real gs_kt/track_deg were both present) --
+            # falls back to the real polled dist_nm/dir_deg otherwise
+            # (honest degrade, or simply the tick a fresh poll just
+            # landed on). Every other read of this aircraft dict --
+            # text fields, sorting, notability, window/ATC logic --
+            # still uses the real values; only this x/y is smoothed, so
+            # the window ring and selection ring (drawn at this same x,y
+            # below) track the smoothed icon automatically.
+            dist_nm = ac.get("_ext_dist_nm", ac.get("dist_nm"))
+            brg = ac.get("_ext_dir_deg", ac.get("dir_deg"))
+            frac = self._scope_r_frac(dist_nm)
             if frac is None or brg is None:
                 continue          # no position fix -- plot nothing, guess nothing
             x, y = scope_xy(brg, frac, cx=cx, cy=cy, radius=r)
@@ -7098,9 +7412,19 @@ class FlightEngine(Browsable, BigMomentSource):
         # A notable tag replaces the position counter in the header: what
         # makes this aircraft worth noticing is more useful than which
         # index it is, and the dots at the bottom already show position.
+        # FEATURE 3: DEPARTING/ARRIVING (see _route_status()'s own
+        # docstring) takes priority over both when it applies -- "is this
+        # plane leaving or arriving" is the most immediately useful real
+        # fact about it when it's true, and reuses the header's existing
+        # right_tag slot rather than adding a new row (this card's
+        # vertical budget is already fully audited, see the comment
+        # above). The common TRANSIT case (neither matches) falls through
+        # to the existing notable/position behavior unchanged.
         note = ac.get("notable")
+        route_status = self._route_status(ac.get("route"), self.airport)
+        right_tag = route_status or (note[0] if note else f"{idx + 1}/{len(aircraft)}")
         draw_header(buf, ident, self.pulse.mix(col),
-                    right_tag=(note[0] if note else f"{idx + 1}/{len(aircraft)}"),
+                    right_tag=right_tag,
                     stale=bool(self.data.get("age") and self.data["age"] > 60))
 
         # Heading-oriented icon, the visual centerpiece -- colour-coded by
@@ -7201,6 +7525,20 @@ class FlightEngine(Browsable, BigMomentSource):
                 route_line = f"> {d_city}"
             else:
                 route_line = codes
+            # FEATURE 2: real country context, appended rather than given
+            # its own fixed row -- this card's vertical budget is fully
+            # audited already (see the comment at the top of this block;
+            # CLAUDE.md is explicit that fixed offsets have caused real
+            # collision bugs here more than once). Piggybacking on the
+            # ALREADY-marquee-safe route line means a longer string can
+            # never collide with anything: it either fits at scale 1 or
+            # scrolls, exactly like the route line already does on its
+            # own. Destination country preferred (matches the
+            # destination-first city preference above); falls back to
+            # origin's when only that one resolved.
+            country = route.get("dest_country") or route.get("origin_country")
+            if country:
+                route_line = f"{route_line} - {country}"
             # NEVER TRUNCATED -- scrolls instead when it's wider than the
             # panel, same marquee `draw_marquee` already uses for news/
             # ticker, rather than cutting the destination name short.
