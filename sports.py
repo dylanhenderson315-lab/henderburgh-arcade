@@ -64,6 +64,15 @@ LEAGUE_PATHS = {
     "EPL": "soccer/eng.1",
     "NCAAF": "football/college-football",
     "NCAAB": "basketball/mens-college-basketball",
+    # Same real path _WNBA_PATH (below) already uses for the big-moment
+    # detector's per-game summary fetch -- added here too so WNBA can
+    # finally be SET as the pinned favorite, which is the one thing that
+    # was missing to make _detect_wnba_big_play() reachable in practice
+    # (load_config()/set_favorite() both reject any league outside this
+    # dict). Deliberately NOT added to DEFAULT_LEAGUES below -- that
+    # would poll it by default for every install; this only makes it
+    # CHOOSABLE, same as every other non-default league already here.
+    "WNBA": "basketball/wnba",
 }
 DEFAULT_LEAGUES = ["NFL", "NBA", "MLB", "NHL"]
 
