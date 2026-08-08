@@ -9346,6 +9346,125 @@ class SportsEngine(Browsable, BigMomentSource):
             draw_text_centered(buf, y, fit_text(tag, WIDTH - 6),
                                self.LIVE if ev["live"] else self.INK_DIM)
 
+    def _render_football(self, buf, ev):
+        """NFL/NCAAF. Closes the last row of the MAIN-renderer table.
+
+        Reuses `_draw_scoreline()` as-is (same two-row team block every
+        other team-sport renderer uses) and the module-level
+        `situation_line()` for down-and-distance -- both already existed
+        and already worked, this just wires them into a dedicated
+        renderer instead of leaving football on the generic fallback.
+
+        `situation_line()` prefers `sit["down_distance"]`
+        (`sports._situation()`'s `downDistanceText`, folded at the I/O
+        boundary in sports.py) -- present on the event dict ONLY when
+        `state == "in"` AND the per-league scoreboard join in tick() ran
+        for this event's league (NFL/NBA are in DEFAULT_LEAGUES; NCAAF/
+        NCAAB only if configured). No live NFL/NCAAF game existed this
+        session to confirm the field actually renders -- see CLAUDE.md's
+        FOOTBALL section for the honest verification status. If it's
+        genuinely absent, `situation_line()` returns "" and nothing is
+        drawn -- no fabricated down-and-distance.
+
+        No possession indicator: no ESPN field for one was ever confirmed
+        on a real payload, matching `_situation()`'s own documented NHL
+        power-play precedent ("guessing one would be inventing the
+        feature"). Not built.
+        """
+        accent = self._sport_accent(ev)
+        pos, total = self._league_position(ev)
+        draw_header(buf, ev["league_name"] or "FOOTBALL", accent,
+                    right_tag=f"{pos}/{total}",
+                    stale=bool(self.data.get("age") and self.data["age"] > 300),
+                    icon=SPORT_ICONS.get(ev.get("sport")))
+        self._draw_league_rail(buf, ev)
+        self._draw_scoreline(buf, ev, 11, accent)
+
+        draw_divider(buf, 36)
+        y = 40
+        if ev["live"]:
+            period, clock = ev.get("period"), ev.get("clock") or ""
+            line = f"Q{period} {clock}".strip() if period else clock
+            if line:
+                draw_text_centered(buf, y, fit_text(line, WIDTH - 6), self.LIVE)
+                y += 7
+            dd = situation_line(ev)
+            if dd:
+                draw_text_centered(buf, y, fit_text(dd, WIDTH - 6), self.INK)
+                y += 7
+        else:
+            draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 6),
+                               self.INK_DIM)
+            y += 7
+
+        # Records when the live-state rows leave room -- same "series,
+        # else records" fallback baseball's main row already established.
+        foot = ev.get("series") or ""
+        if not foot:
+            recs = [c.get("record") for c in ev["competitors"][:2] if c.get("record")]
+            foot = " / ".join(recs) if len(recs) == 2 else ""
+        if foot and y <= HEIGHT - 5:
+            draw_text_centered(buf, y, fit_text(foot, WIDTH - 6), self.INK_DIM)
+            y += 7
+        bc = ev.get("broadcast")
+        if bc and y <= HEIGHT - 5:
+            draw_text_centered(buf, y, fit_text(bc, WIDTH - 6), self.INK_DIM)
+
+    def _render_basketball(self, buf, ev):
+        """NBA/NCAAB. The more standard of this session's two sports --
+        no bases/downs/sets, just teams, scores, records and a clock.
+
+        What this ACTUALLY adds over `_frame_universal_generic()`: the
+        generic fallback never shows a team's record at all (only
+        detail/clock/class_label), and its two-row score block scales
+        the team block for the WORST case across every sport (tennis'
+        wide string scores) rather than basketball's own numeric one.
+        This renderer is genuinely closer to "the same layout with a
+        purpose-built header" than to a from-scratch design -- an honest
+        outcome per this task's own instructions, not a forced one.
+
+        Deliberately NOT built: a bonus/foul-count/timeouts display. No
+        live NBA/NCAAB game existed this session to confirm a real ESPN
+        field name for any of those, and no such field was found on the
+        confirmed `situation`/header shapes this module already parses
+        (see sports._situation()'s docstring: the only fields ever
+        confirmed there are baseball's and NFL's). Guessing one would be
+        inventing the feature, the same standing rule `_situation()`'s
+        own NHL power-play precedent already documents.
+        """
+        accent = self._sport_accent(ev)
+        pos, total = self._league_position(ev)
+        draw_header(buf, ev["league_name"] or "BASKETBALL", accent,
+                    right_tag=f"{pos}/{total}",
+                    stale=bool(self.data.get("age") and self.data["age"] > 300),
+                    icon=SPORT_ICONS.get(ev.get("sport")))
+        self._draw_league_rail(buf, ev)
+        self._draw_scoreline(buf, ev, 11, accent)
+
+        draw_divider(buf, 36)
+        y = 40
+        if ev["live"]:
+            period, clock = ev.get("period"), ev.get("clock") or ""
+            line = f"Q{period} {clock}".strip() if period else clock
+            if line:
+                draw_text_centered(buf, y, fit_text(line, WIDTH - 6), self.LIVE)
+                y += 7
+        else:
+            draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 6),
+                               self.INK_DIM)
+            y += 7
+
+        foot = ev.get("series") or ""
+        if not foot:
+            recs = [c.get("record") for c in ev["competitors"][:2] if c.get("record")]
+            foot = " / ".join(recs) if len(recs) == 2 else ""
+        if foot and y <= HEIGHT - 5:
+            draw_text_centered(buf, y, fit_text(foot, WIDTH - 6), self.INK_DIM)
+            y += 7
+        bc = ev.get("broadcast")
+        if bc and y <= HEIGHT - 5:
+            draw_text_centered(buf, y, fit_text(bc, WIDTH - 6), self.INK_DIM)
+
     # Populated as each sport gets its own renderer. Empty here means
     # every sport still takes the generic path, so this step changes
     # nothing on screen -- it only creates the seam.
@@ -9355,6 +9474,8 @@ class SportsEngine(Browsable, BigMomentSource):
         "soccer": _render_soccer,
         "golf": _render_golf,
         "tennis": _render_tennis,
+        "football": _render_football,
+        "basketball": _render_basketball,
     }
 
     # ---- per-sport EXPANDED-detail dispatch -------------------------------
@@ -10065,6 +10186,136 @@ class SportsEngine(Browsable, BigMomentSource):
             draw_text_centered(buf, y, fit_text(note, WIDTH - 8), self.INK_DIM, x_min=3)
 
     SPORT_DETAIL_RENDERERS["tennis"] = _render_tennis_detail
+
+    def _render_football_detail(self, buf, ev):
+        """Football's EXPANDED view. Same y-cursor discipline as every
+        other detail renderer here, deliberately -- baseball's detail
+        view had a real, verified cursor-overshoot bug on this exact
+        seam (the footer never rendered because the cursor advanced more
+        than the live-state row actually drew); a fixed offset here would
+        repeat it the moment down-and-distance is present vs. absent.
+
+        Adds over the main row: full records (not truncated to fit
+        beside the score), venue, broadcast, and series/note when
+        present -- the same "context the main view has no room for"
+        pattern golf/soccer/baseball's own detail renderers established.
+        """
+        accent = self._sport_accent(ev)
+        draw_event_frame(buf, 1.0 if ev["live"] else 0.35, accent, accent)
+
+        tag = self._state_tag(ev)
+        head = ev.get("league_name") or "FOOTBALL"
+        if tag:
+            head = f"{head}  {tag}"
+        draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
+                           self.LIVE if ev["live"] else color_on_dark(accent), x_min=3)
+
+        comps = ev["competitors"]
+        y = 11
+        for c in comps[:2]:
+            bar = c.get("color") or self.INK_DIM
+            for by in range(10):
+                for bx in (3, 4):
+                    put_px(buf, bx, y + by, bar)
+            sc = c.get("score")
+            sc_txt = "" if sc is None else str(sc)
+            col = self.WIN if c.get("winner") else self.HERO_INK
+            avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
+            draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
+            if sc_txt:
+                draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
+            y += 11
+            rec = c.get("record")
+            if rec:
+                draw_text3x5(buf, 8, y, fit_text(rec, WIDTH - 12), self.INK_DIM)
+            y += 6
+
+        y += 1
+        if ev["live"]:
+            period, clock = ev.get("period"), ev.get("clock") or ""
+            line = f"Q{period} {clock}".strip() if period else clock
+            if line:
+                draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.LIVE, x_min=3)
+                y += 7
+            dd = situation_line(ev)
+            if dd:
+                draw_text_centered(buf, y, fit_text(dd, WIDTH - 8), self.INK, x_min=3)
+                y += 7
+        else:
+            draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8),
+                               self.INK_DIM, x_min=3)
+            y += 7
+
+        foot_lines = [x for x in (ev.get("series"), ev.get("venue"),
+                                  ev.get("broadcast"), ev.get("note")) if x]
+        for line in foot_lines:
+            if y > HEIGHT - 5:
+                break
+            draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.INK_DIM, x_min=3)
+            y += 7
+
+    SPORT_DETAIL_RENDERERS["football"] = _render_football_detail
+
+    def _render_basketball_detail(self, buf, ev):
+        """Basketball's EXPANDED view. Same shape as football's detail
+        renderer minus down-and-distance -- full records, venue,
+        broadcast, series/note. No bonus/foul/timeout display, same
+        honest gap as the main renderer (see `_render_basketball()`'s
+        docstring): no confirmed ESPN field name for any of those, and
+        guessing one is exactly what this project's "never invent" rule
+        forbids.
+        """
+        accent = self._sport_accent(ev)
+        draw_event_frame(buf, 1.0 if ev["live"] else 0.35, accent, accent)
+
+        tag = self._state_tag(ev)
+        head = ev.get("league_name") or "BASKETBALL"
+        if tag:
+            head = f"{head}  {tag}"
+        draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
+                           self.LIVE if ev["live"] else color_on_dark(accent), x_min=3)
+
+        comps = ev["competitors"]
+        y = 11
+        for c in comps[:2]:
+            bar = c.get("color") or self.INK_DIM
+            for by in range(10):
+                for bx in (3, 4):
+                    put_px(buf, bx, y + by, bar)
+            sc = c.get("score")
+            sc_txt = "" if sc is None else str(sc)
+            col = self.WIN if c.get("winner") else self.HERO_INK
+            avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
+            draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
+            if sc_txt:
+                draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
+            y += 11
+            rec = c.get("record")
+            if rec:
+                draw_text3x5(buf, 8, y, fit_text(rec, WIDTH - 12), self.INK_DIM)
+            y += 6
+
+        y += 1
+        if ev["live"]:
+            period, clock = ev.get("period"), ev.get("clock") or ""
+            line = f"Q{period} {clock}".strip() if period else clock
+            if line:
+                draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.LIVE, x_min=3)
+                y += 7
+        else:
+            draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8),
+                               self.INK_DIM, x_min=3)
+            y += 7
+
+        foot_lines = [x for x in (ev.get("series"), ev.get("venue"),
+                                  ev.get("broadcast"), ev.get("note")) if x]
+        for line in foot_lines:
+            if y > HEIGHT - 5:
+                break
+            draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.INK_DIM, x_min=3)
+            y += 7
+
+    SPORT_DETAIL_RENDERERS["basketball"] = _render_basketball_detail
 
     def _frame_for_view(self):
         if self.detail is not None:
