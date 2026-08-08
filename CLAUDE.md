@@ -779,6 +779,82 @@ appends them to the menu automatically.
     checks a few seconds apart, caught live by the device's own poller
     mid-verification -- not a fabricated before/after.
 
+  **THE HANGAR gets a real sprite icon, 2026-08-07.** Until this
+  session, every Hangar entry was text-only -- no aircraft icon, unlike
+  the radar scope and the flight DETAIL card. This closes that gap,
+  building on a design already researched and approved by the owner
+  across three explicit decisions before any code was written:
+
+  1. **Unknown/unmatched Hangar type codes silently render the generic
+     GA icon** -- not a distinct "unknown" mark. Hangar's real
+     population already skews GA/light, so this is the honest
+     statistical default, matching the live scope's own existing
+     "default to majority bucket when unclassifiable" convention
+     (`FlightEngine._ac_kind()`'s own no-category fallback).
+  2. **A NEW type→bucket lookup table, seeded ONLY from the 198 real
+     type codes already in `hangar_log.jsonl` on disk** -- not general
+     aviation knowledge. This closes the exact honesty gap
+     `BIZJET_TYPES` admits to in its own docstring (built from general
+     knowledge, never confirmed against a real local sighting).
+     `flights.HANGAR_HELI_TYPES` (2 real codes: R44, AS65) and
+     `flights.HANGAR_AIRLINER_TYPES` (real narrowbody/widebody/regional
+     jets plus two large military transports -- C17, C30J -- which have
+     no dedicated bucket in this project's deliberately-unexpanded
+     4-bucket set but are honestly closer to "large heavy transport"
+     than GA) are new. Five real bizjet codes not previously in
+     `BIZJET_TYPES` were folded into that existing table instead of a
+     separate one (GLEX, FA10, HDJT, E35L, E545 -- Bombardier Global
+     Express, Falcon 10, HondaJet, Embraer Legacy 600/450, all confirmed
+     against real Hangar registrations). **Two real seen codes were
+     deliberately left unmapped** because neither could be positively
+     identified: `GA6C` (no confident real-world match) and `HUNT` (a
+     real Hawker Hunter jet warbird, but fits none of the four buckets
+     honestly) -- both correctly fall through to GA per decision #1
+     rather than being guessed into a wrong bucket.
+  3. **The sprite reuses the flight DETAIL card's 3-stroke budget**
+     (`FlightEngine._draw_plane_icon()`, unmodified), not the radar
+     scope's tighter 2-stroke one -- safe because the Hangar is browsed
+     one aircraft at a time (`_frame_hangar()` already only ever draws
+     the single entry at `hangar_idx`), the identical "only one sprite
+     draws per frame" reasoning that already lets the DETAIL card be
+     thicker than the scope. `FlightEngine._hangar_kind(type_code)` is
+     the new classifier (parallel to `_ac_kind()`, but keyed on the
+     real ICAO `type` string alone -- a persisted Hangar entry has no
+     live ADS-B `category` field to read). The sprite is drawn with
+     `heading_deg=None`, reusing `_draw_plane_icon()`'s EXISTING fixed
+     "up" orientation + dim uncertainty ring (confirmed present and
+     already used by the DETAIL card for heading-unknown aircraft
+     before relying on it here -- no new static-bitmap code path was
+     written).
+  - **Layout**: the icon sits at `(WIDTH//2, 19)` between the header and
+    the existing text rows, which shifted down (type 19→31, airline
+    27→38, seen 40→45, age 52→52 unchanged) to make room without
+    colliding with the icon's ~9px reach.
+  - **Radar scope (`draw_scope_aircraft()`) and the flight DETAIL card's
+    OWN call site (`_frame_detail`'s heading-oriented use) are
+    completely unmodified** -- this only adds a new call site inside
+    `_frame_hangar()`.
+  - **Verified**: `render_audit.py`/`fold_audit.py` both clean before
+    and after (0 mode failures, 0 unfolded feeds). Direct pass over all
+    223 real Hangar entries currently on disk (`hangar.LOG.get()`) with
+    `render_audit.Audit`'s own instrumentation: 0 collisions, 0 clipped
+    pixels, 0 overflow, 0 dropped glyphs. Real classification spot-check
+    against named real entries: `N293NV`/A320 → AIRLINER, `N3055Y`/R44 →
+    HELI, `N803SD`/C25B → BIZJET, `N434CD`/SR22 → GA, `N641BW`/GA6C →
+    GA (unmatched fallback), `N346AX`/HUNT → GA (unmatched fallback).
+    Bucket distribution across the real live collection: 136 AIRLINER,
+    47 GA, 35 BIZJET, 5 HELI. **Live-verified on the real physical
+    panel**: `com.henderburgh.arcade` restarted to pick up the code,
+    switched to `flights` mode and paged through the Hangar view via
+    the real `/api/press/up` and `/api/press/right` input path, and a
+    direct `/api/frame` pixel dump confirmed a real drawn sprite (a
+    fuselage line, wingspan line, tailplane, and the dim heading-unknown
+    ring) at two different real Hangar entries, not just header/text --
+    e.g. one dump showed the ring/cross pattern centered at
+    `(32, 19)` exactly matching `_draw_plane_icon()`'s expected reach,
+    with 533-607 real non-black pixels on frame, zero errors. Panel
+    restored to `ambient` afterward.
+
   **PERFORMANCE — measured before building, not assumed:**
   | workload | cost | vs 50ms frame budget |
   |---|---|---|
