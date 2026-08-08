@@ -1109,6 +1109,222 @@ appends them to the menu automatically.
     problem found. Next session: re-check both once celestrak is
     reachable and/or a real aircraft is in the window.
 
+  **PLANE-IN-WINDOW TAKEOVER (2026-08-08)** — the highest-priority event
+  in the whole Arcade: when a real aircraft enters the configured window
+  cone (the same cone `satellite.in_window()`/`load_window()`/
+  `save_window()` already implement, moved to `satellite.py` earlier this
+  session — see WINDOW FILTER, ROUND 2 above), it pauses whatever is
+  running and takes over the display for up to ~15s (or until dismissed),
+  then lands on a ceremonial Hangar-style detail card for that aircraft.
+
+  **Two takeover patterns already existed in this project and this is
+  deliberately built as ONE of them, not the other.** The severe-weather
+  takeover (`arcade_server._severe_alert_frame()`) composites over
+  whatever the current mode already rendered, applied AFTER everything
+  in the render loop — it never swaps `self.mode` and never captures
+  input, so the mode underneath keeps running and keeps receiving button
+  presses. That does not fit "pauses whatever is running" + "dismissible
+  via any button press, lands on a specific detail card when it ends" —
+  there is no real mode underneath to own that press. GAME DAY
+  (`GameDayEngine`) IS a real mode swap (`arcade_server.set_mode
+  ("gameday")`), fully owns input, and hands the panel back on its own
+  via the `.launch` attribute hand-off `BootEngine`/`MenuEngine` already
+  established. **`PlaneWatchEngine` copies the GAME DAY pattern
+  verbatim**: registered in `engines.ENGINES` like `gameday`, deliberately
+  NOT in `PLAYABLE`/`MenuEngine.NATIVE_GAMES`/`AmbientEngine.SEQUENCE`
+  (force-triggered, never chosen from a menu or a rotation, its
+  `has_content()` always `False`). The severe-weather takeover's own
+  unconditional post-composite step still covers a plane-in-window frame
+  for free, exactly like it already does for games/gameday/mirror/
+  anything else — verified this stayed true after the change rather than
+  assumed (no new precedence code was added or needed).
+
+  **Detection lives entirely in `flights.py`, on the existing background
+  poll thread — zero new I/O, zero new poll cadence.** `FlightFeed`
+  already stamps a real `in_window` boolean on every aircraft dict (via
+  `satellite.in_window()`, unchanged); this only DIFFS that flag against
+  last cycle using the exact one-shot adopt-then-diff idiom every other
+  detector in this project uses (`_seen_home_runs`/`_seen_squawks`/etc.):
+  `FlightFeed._seen_window` is `None` until the first real refresh, which
+  ADOPTS whatever's already in the window without firing (a device
+  already running with a window aircraft parked at the edge must not
+  take over the panel the instant this code ships) — only a genuinely
+  NEW membership counts as "just entered".
+  - `flights.FEED.pop_window_takeover_batch()` — ONE-SHOT (consumed, not
+    peeked, same "pop don't peek-forever" discipline as
+    `BigMomentSource.pop_big_moment()`), real full aircraft dicts (not
+    just keys), sorted PRIMARY by real `dist_nm` ascending (closest
+    first, the owner's explicit spec) and SECONDARY by real notability
+    rank descending as a tiebreak — matching `_notable()`'s own rank
+    field, not a second ranking scheme.
+  - `flights.FEED.push_pending_detail(key)` / `pop_pending_detail()` —
+    the one-shot "which aircraft to land on" hand-off. `set_mode()`
+    always constructs `ENGINES[base]()` with ZERO args (confirmed by
+    reading it before writing any of this), so there is no way to pass
+    "which aircraft" directly through a mode switch — this is the same
+    one-shot-queue idiom `pop_big_moment()` already established, applied
+    to a different payload (a selection key instead of a celebration
+    dict). `PlaneWatchEngine` calls `push_pending_detail()` right before
+    setting `.launch = "flights"`; `FlightEngine.reset()` consumes it
+    (never peeks) to pre-set `self.sel_key`, jump straight to
+    `VIEW_DETAIL`, and mark the arrival as ceremonial
+    (`self._ceremonial_key`) instead of landing on the plain scope.
+  - Both keyed by `flights._ac_key()` (hex preferred, ident fallback) —
+    a new module-level helper that mirrors
+    `engines.FlightEngine._sel_key()` EXACTLY, so the feed and the engine
+    agree on what "the same real aircraft" means without a second
+    identity scheme.
+
+  **`PlaneWatchEngine`** (`engines.py`, new): constructed with zero args
+  (`ENGINES["planewatch"]` in the dict, same shape as `"gameday"`),
+  pulls its own batch from `flights.FEED.pop_window_takeover_batch()` in
+  `reset()` — reading already-cached feed state, the same "engine calls
+  FEED" boundary every other engine here respects, not new I/O.
+  - **Cycling**: closest-first/notable-secondary (the batch's own sort
+    order), `HOLD_TICKS_PER_AC` (90 ticks, ~4.5s) per aircraft, an
+    overall `TOTAL_CEILING_TICKS` (300 ticks, ~15s) safety cap. With
+    enough aircraft that strict per-aircraft holds would exceed the
+    ceiling, per-aircraft hold time is COMPRESSED (`TOTAL_CEILING_TICKS
+    // n`, floored at `HOLD_TICKS_MIN` ≈ 2s) rather than truncating the
+    cycle early or letting it run over — every aircraft that entered
+    together gets at least a look. A **single-aircraft batch holds until
+    dismissed or the ceiling** (`per_ac_ticks = None`), per the owner's
+    explicit "if only one remains, stay on it" — no pointless self-loop.
+  - **Dismissal**: `input()` on ANY press, or the ceiling running out (or
+    cycling past the last aircraft in a multi-aircraft batch), hands off
+    to flights' detail card for WHICHEVER aircraft is currently shown —
+    `push_pending_detail(key)` then `.launch = "flights"`.
+  - **The takeover screen** (`frame()`): a large filled hero silhouette
+    (`draw_hero_silhouette()`, new), "IN VIEW" status, registration
+    (prominent, falling back to `ident`), readable type name
+    (`flights.ICAO_TYPE_NAMES`, already existed), distance + altitude
+    (real, from the aircraft dict), and a soft first-sighting ring
+    (`draw_first_sighting_ring()`, new) drawn UNDER the silhouette only
+    when the real Hangar entry's `times_seen == 1` — read from
+    `hangar.LOG.get()`, real data, never guessed; no Hangar entry (no
+    broadcast registration, or not recorded yet) means no ring, not a
+    guessed one.
+
+  **Silhouette classification reuses the SAME classifiers this project
+  already has** — `FlightEngine._ac_kind()` for a live-tracked aircraft
+  (real ADS-B `category`), `FlightEngine._hangar_kind()` for a Hangar-log
+  aircraft (real ICAO `type` code) — no third classifier was built.
+  `draw_hero_silhouette()` (`engines.py`, module level, next to
+  `draw_scope_home`) is a NEW drawing routine at a NEW hero scale
+  (filled, not stroked) for the same four `SCOPE_ICON_*` buckets the
+  scope/DETAIL/Hangar icons already use: a filled dart (nose/wingtips/
+  tail, proportions varying per kind the same way the small stroked icon
+  already does) for airliner/bizjet/GA, a filled fuselage oval + rotor
+  disk outline + tail boom for helicopter — geometric only, no real
+  logos/liveries, same IP-avoidance rule as every other icon here. Filled
+  via a plain scanline polygon fill (`_fill_poly()`), which only ever
+  runs for the ONE aircraft shown on a full-screen takeover per frame —
+  a very different cost profile than the scope's up-to-8-icons-per-frame
+  case this project already had a real lag complaint about and fixed
+  (see ICON/PERFORMANCE REVISIT); reasoned about, not assumed free.
+
+  **The rich post-takeover detail card is a DEDICATED renderer**
+  (`FlightEngine._frame_detail_ceremonial()`), not an in-place extension
+  of the ordinary `VIEW_DETAIL` block — the ordinary card's vertical
+  budget is already fully audited with zero spare rows (its own comment
+  says so), so there was no room to layer ceremonial fields in without
+  reopening the exact collision risk that budget exists to avoid.
+  Triggered specifically when `self.sel_key == self._ceremonial_key`
+  (set only by the pending-detail hand-off, cleared the moment a manual
+  `_step()` browses to a different aircraft — verified directly: a
+  single-aircraft list correctly keeps the flag since there's nothing to
+  step to, a two-aircraft list correctly clears it on step). Shows:
+  the same new hero silhouette + first-sighting ring, registration + a
+  REAL collection index (`#N/M` — this aircraft's position by real
+  `first_seen` ascending among the real Hangar collection, out of the
+  real total count; never an invented number, and omitted entirely when
+  there's no real Hangar entry for this registration), type code + full
+  readable name, a status band (real `FIRST SIGHTING` or real `SEEN
+  {times_seen}X`, or an honest neutral `TRACKING` when this aircraft
+  isn't in the Hangar at all — no broadcast registration, or not
+  recorded yet — never a guessed status), real age since first sighting
+  (`hangar.LOG`'s real `first_seen`), and airline when the Hangar entry
+  has one (soft/secondary weight). Y-cursor-ish fixed 7px row cadence
+  landing the last possible row (airline) exactly at `y=59`
+  (`HEIGHT-5`, the real last-legal row for a 5px glyph) — this content
+  has at most three real optional rows, not the open-ended variable
+  content the sports/baseball y-cursor lesson was about, but still only
+  draws the rows that are genuinely populated.
+
+  **Guarded against waking `off`**: the render-loop trigger check
+  (`arcade_server._loop()`) is placed AFTER the existing `mode == "off"`
+  early-continue, so a plane flying by can never wake a panel
+  deliberately released to WLED/Home Assistant lighting — CLAUDE.md's
+  own standing rule that `off` is a deliberate handoff, not a state any
+  feature may override uninvited. Also guarded against re-triggering
+  itself (`mode != "planewatch"`).
+
+  **A real off-by-one CLIPPED bug was found and fixed by instrumenting
+  `put_px` directly against every icon kind and both card layouts** (the
+  project's own established method, since `render_audit.py`'s fixed
+  `TEXT_MODES` list doesn't drive `planewatch` or the pending-detail
+  hand-off path automatically): the takeover screen's distance/altitude
+  row was drawn at `y=60`, one pixel past the real `HEIGHT-5=59`
+  boundary for a 5px glyph — silently clipped the bottom row of every
+  5px character on real hardware. Fixed to `y=59`; re-running the same
+  instrumented sweep across all four silhouette kinds, both hero scales
+  (0.8 ceremonial / 1.1 takeover), both single- and multi-aircraft
+  batches, and all three Hangar-entry states (repeat visitor, first
+  sighting, no entry at all) now shows **zero** clipped pixel writes.
+
+  **A new `/api/window` GET/POST endpoint was added** — checked first
+  and confirmed genuinely missing (per WINDOW FILTER, ROUND 2's own note
+  that no control-panel API touched `load_window()`/`save_window()` at
+  all), same shape as the pre-existing `/api/satellite/location`.
+
+  **Verified**: `.venv/bin/python -c "import flights, satellite, engines,
+  hangar"` clean. `arcade_server.py` checked via `ast.parse()` only
+  (syntax/reference check — importing it directly would construct the
+  live `Arcade` singleton and put a second DDP sender on the panel, the
+  documented panel-lockup hazard; not done). `render_audit.py` and
+  `fold_audit.py` both clean project-wide (0 modes failed, 0 feeds not
+  folding) before and after. `PlaneWatchEngine` driven directly against
+  a real-shaped two-aircraft batch: confirmed closest-first/notable-
+  secondary cycling order, confirmed a single-aircraft batch holds for
+  the full ~15s ceiling without looping, confirmed dismiss-on-any-input
+  pushes the correct pending-detail key and hands off, confirmed natural
+  timeout does the same for whichever aircraft was showing. The flights
+  window-detection logic (adopt-then-diff, one-shot batch pop, one-shot
+  pending-detail pop) was driven directly against a simulated two-refresh
+  sequence: the first refresh correctly ADOPTS without firing, the second
+  correctly returns only the genuinely newly-entered aircraft in the
+  right sort order, and a second pop before another refresh correctly
+  returns empty. The ceremonial hand-off was driven end-to-end through a
+  real `FlightEngine` instance: `pop_pending_detail()` → `reset()` →
+  `VIEW_DETAIL` with `_ceremonial_key` set → `_frame_detail_ceremonial()`
+  renders correctly for a repeat-visitor Hangar entry, a genuine
+  first-sighting entry, and an aircraft with no Hangar entry at all
+  (correctly shows `TRACKING`, not a guessed status).
+
+  **Real panel check**: restarted `com.henderburgh.arcade`, confirmed
+  `/api/window` returns the real configured `{"center_deg": 296.0,
+  "fov_deg": 80.0}`, switched to `flights` mode via `/api/mode/flights`
+  and pulled `/api/frame` — a real non-black, error-free frame (16457
+  live bytes, `err: None`). Panel restored to `ambient` afterward,
+  confirmed healthy.
+
+  **Honestly unverified, and why**: `flights.FEED.get()` returned ZERO
+  real aircraft in range for the whole session (`configured: True`,
+  `aircraft: []`) — the same honest gap WINDOW FILTER/DEAD RECKONING
+  above have already hit repeatedly this project. With no real aircraft
+  in range at all, there is honestly nothing that could enter the window
+  cone this session, so the actual takeover trigger firing on the real
+  panel, the real hero silhouette rendering for a genuinely live
+  aircraft, and the real ceremonial card populated from a genuinely live
+  Hangar lookup are all unverified beyond the direct engine-driving
+  checks above (which use realistic synthetic aircraft dicts, not a
+  fabricated live trigger pushed onto the real service — no such push
+  was made, per this project's own "never invent" rule). Next session
+  with real traffic in range near the configured window (256°–336°):
+  confirm the takeover actually fires from the render loop, watch the
+  cycle/dismiss/hand-off sequence on real hardware, and confirm the
+  ceremonial card against a real Hangar-logged aircraft.
+
   **DEAD RECKONING (2026-08-08)** — real user feedback after watching the
   radar scope: aircraft only visibly moved once per ADS-B poll (`flights.
   FEED` refreshes every `flights.POSITION_REFRESH` = 15s), sitting frozen
