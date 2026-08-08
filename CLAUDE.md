@@ -1984,6 +1984,78 @@ ESPN parsing, no new polling.
   universal feed ever surfaces is what proves this live, not a synthetic
   push.
 
+**NFL touchdown — done (2026-08-08).** Same shape as the MLB home-run
+detector: `sports._fetch_touchdown_plays("NFL", event_id)` +
+`SportsEngine._detect_nfl_touchdown()` (registered as
+`BIG_MOMENT_DETECTORS["nfl_touchdown"]`), own one-shot cursor
+`self._seen_nfl_touchdowns`, scoped identically to `_detect_mlb_home_run`
+(only fires for `favorite.league == "NFL"` and `favorite_game.state ==
+"in"`, reuses the same per-game summary endpoint, no new request volume).
+
+- **Payload facts, confirmed live against a real finished game** (event
+  401873271, Panthers @ Cardinals): NFL's summary endpoint carries scoring
+  plays under a top-level `scoringPlays` array — NOT `plays` (MLB's key)
+  and NOT `keyEvents` (soccer's key, empty for this NFL event); all three
+  were checked on the real payload before picking `scoringPlays`. A
+  touchdown is any entry whose `type.text` CONTAINS the substring
+  "Touchdown" (e.g. "Rushing Touchdown", "Passing Touchdown"), not an
+  exhaustive enum — real ESPN variants like "Return Touchdown" exist that
+  weren't in this one sample, and a substring match covers them without
+  needing updates. Field goals and extra points are excluded by the same
+  check (their `type.text` is "Field Goal Good", no "Touchdown"
+  substring).
+- **Verified against real live data, not synthesized**:
+  `_fetch_touchdown_plays("NFL", "401873271")` run directly against the
+  real event returned exactly 7 real touchdowns, all correctly classified
+  (Corey Kiner, AJ Dillon, Simi Fehoko, Ja'Seem Reed, Anthony Tyus III,
+  Bryson Green, Haynes King), and the 5 real "Field Goal Good" scoring
+  plays in the same payload were correctly excluded — checked against the
+  raw `scoringPlays` list entry-by-entry, not just a count. One-shot
+  cursor logic was then driven directly through `SportsEngine`
+  (`_seen_nfl_touchdowns`): first tick adopts the 7 existing touchdowns as
+  baseline with no fire, a simulated new touchdown (one id popped from
+  the seen set) fires exactly once with the correct score line and real
+  play text, and a second call after consumption returns no fire (no
+  double-fire).
+- This game was already `state: "post"` (finished) by the time this was
+  built, so the parsing/dedupe/scope logic above is what's verified, not
+  a genuinely in-progress favorite game firing the celebration live on
+  panel — same honest caveat MLB's own writeup carries.
+- Text: line1 = `f"{away_abbr} {away_score}, {home_abbr} {home_score}"`
+  from `favorite_game`, same join as MLB. line2 = the real ESPN play text
+  (folded). Color = home team color, falling back to away, falling back
+  to `(255, 100, 40)` (warm orange, distinct from MLB's gold and NHL's
+  blue below).
+
+**NHL goal — built, UNVERIFIED against live data (2026-08-08).** Same
+shape again: `sports._fetch_goal_plays("NHL", event_id)` +
+`SportsEngine._detect_nhl_goal()` (registered as
+`BIG_MOMENT_DETECTORS["nhl_goal"]`), own one-shot cursor
+`self._seen_nhl_goals`, identical scoping to the other two detectors.
+
+- **Real, current data gap, honestly documented, not worked around**: the
+  NHL scoreboard was checked live at build time — all 7 events on it were
+  `state == "pre"` (off-season), zero `in`, so no live NHL `scoringPlays`
+  payload has been observed. Built on the SAME `scoringPlays` shape
+  confirmed live for NFL (above) and structurally identical to MLB's
+  `plays`, since ESPN's site API uses one unified summary-endpoint shape
+  across these team sports — but the exact `type.text` string for a goal
+  is an ASSUMPTION, not a confirmed fact: this checks for the literal
+  string `"Goal"` (exact match, not substring), and if ESPN actually uses
+  a more specific string for some goal types (e.g. a hypothetical
+  "Penalty Shot Goal"), those would NOT currently fire and would need
+  their own handling once a real payload is finally seen. Documented
+  honestly as unconfirmed rather than guessed past, same precedent as
+  the MMA finish detector shipping unverified (see "MMA finish" above).
+- Text/color follow the same pattern: line1 = score line from
+  `favorite_game`, line2 = the real ESPN play text (folded), color = home
+  team color falling back to away falling back to `(40, 160, 255)` (cool
+  blue, ice-appropriate, distinct from the other two fallbacks).
+- `render_audit.py` and `fold_audit.py` both re-run clean (0
+  failed/0 not-folding) after this change; `import sports, engines`
+  clean. The first real live NHL goal the pinned-favorite feed ever
+  surfaces is what proves this live, not a synthetic push.
+
 **WNBA big-moment detection — REMOVED (2026-08-07), owner preference, not
 a bug.** A WNBA big-play detector was built 2026-08-02 (per-game
 play-by-play polling, a late-clock threshold calibrated against two real
