@@ -33,6 +33,7 @@ import weather
 import blog
 import mma
 import gameday
+import notify
 import tic80_core
 import transitions
 
@@ -880,6 +881,72 @@ def draw_alert_frame(alert, ticks, place="", n_alerts=1, cur_alert=0):
         draw_dots(buf, HEIGHT - 6, n_alerts, cur_alert, on=pulse)
     elif place:
         draw_text_centered(buf, HEIGHT - 9, fit_text(place, WIDTH - 10), rim(col, 0.8))
+    return bytes(buf)
+
+
+# =============================================================================
+# HOME ASSISTANT NOTIFY -- normal-priority banner (task #8, 2026-08-08).
+#
+# Deliberately modeled on _severe_alert_frame()'s COMPOSITE-not-mode-swap
+# pattern (drawn over whatever the current mode already rendered, applied
+# post-render, never touches self.mode or input) but visually the OPPOSITE
+# of severe weather's full-bleed 4-edge pulse: a single quiet band pinned
+# to the bottom third, everything above it untouched. Severe weather has
+# to be unmissable because it can be life-safety; a garage-left-open
+# notice is an FYI and should read as one -- reusing the pulse treatment
+# for both would train someone to tune out the panel exactly like
+# CLAUDE.md's own reasoning for restricting severe takeover to
+# Extreme/Severe in the first place.
+#
+# Bottom 20px (HEIGHT-20..HEIGHT-1, ~31% of the panel) is enough for a
+# title row + up to two message rows while leaving the top two-thirds of
+# whatever's underneath fully legible -- "subordinate to whatever's
+# showing", not a second full-screen takeover.
+# =============================================================================
+NOTIFY_NORMAL_COLOR = (80, 190, 255)   # cool blue -- reads "FYI", not "SEVERE"
+NOTIFY_URGENT_COLOR = (255, 170, 40)   # warm amber -- distinct from both the
+                                        # cool normal banner and severe weather's reds
+
+
+def draw_notify_banner(frame, title, message, color, scroll=0.0):
+    """Composite a bottom-third notify banner over an already-rendered
+    frame. `title`/`message` must already be paneltext.panel_text()-folded
+    by the caller (arcade_server.py's /api/notify handler), same rule as
+    every other externally-sourced string reaching this module.
+
+    Returns a NEW bytes object (mirrors draw_alert_frame()'s contract) --
+    `frame` itself is never mutated, so a caller holding a reference to
+    the pre-banner frame elsewhere is unaffected."""
+    buf = bytearray(frame)
+    y0 = HEIGHT - 20   # 44 -- bottom third
+    bg = (0, 6, 16)
+    for y in range(y0, HEIGHT):
+        for x in range(WIDTH):
+            put_px(buf, x, y, bg)
+    for x in range(WIDTH):           # thin accent divider, not a pulse
+        put_px(buf, x, y0, color)
+
+    draw_text_centered(buf, y0 + 3, fit_text(str(title or ""), WIDTH - 6), color)
+
+    msg = str(message or "")
+    lines = wrap_text(msg, WIDTH - 6, max_lines=2)
+    # If wrap_text had to drop trailing words to fit 2 lines, the folded
+    # message doesn't fit the banner's budget -- overflow uses the
+    # project's existing answer for long text (draw_marquee, the same
+    # scrolling tape news/ticker/gameday/flights already use) instead of
+    # inventing a third truncation style.
+    overflow = sum(len(ln.split()) for ln in lines) < len(msg.split())
+    if overflow:
+        draw_marquee(buf, HEIGHT - 8, msg, (220, 230, 255), scroll)
+    elif len(lines) == 1:
+        draw_text_centered(buf, HEIGHT - 8, lines[0], (220, 230, 255))
+    elif lines:
+        # Two real rows: HEIGHT-11 and HEIGHT-5 -- HEIGHT-5=59 is the real
+        # last-legal row for a 5px glyph (the exact off-by-one that
+        # clipped PlaneWatchEngine's distance/altitude row once already;
+        # not repeating it here).
+        draw_text_centered(buf, HEIGHT - 11, lines[0], (220, 230, 255))
+        draw_text_centered(buf, HEIGHT - 5, lines[1], (220, 230, 255))
     return bytes(buf)
 
 
@@ -7866,6 +7933,115 @@ class FlightEngine(Browsable, BigMomentSource):
         return bytes(buf)
 
 
+class NotifyEngine:
+    """URGENT-priority Home Assistant notification takeover (task #8,
+    2026-08-08). Built with the EXACT same shape as PlaneWatchEngine
+    (above) -- read its docstring for the two-takeover-pattern reasoning
+    this project already settled; this is deliberately the SAME pattern
+    (real mode swap, GAME-DAY-style), not the composite-only one
+    (draw_notify_banner(), used instead for normal-priority).
+
+    Zero-arg constructible (set_mode()'s contract), registered in
+    engines.ENGINES["notify"], deliberately NOT added to
+    MenuEngine.NATIVE_GAMES/AmbientEngine.SEQUENCE -- force-triggered only
+    by arcade_server.py's /api/notify handler, never chosen from a menu or
+    a rotation, has_content() always False, same contract every other
+    takeover-only engine here honours.
+
+    HAND-OFF: set_mode() always constructs ENGINES[base]() with ZERO
+    args, so there is no way to pass title/message/color/"which mode to
+    return to" directly through the mode switch. This reuses the IDENTICAL
+    one-shot module-level slot idiom flights.py's push_pending_detail()/
+    pop_pending_detail() already established for PlaneWatchEngine's own
+    hand-off problem (see notify.push_pending()/pop_pending()) -- reset()
+    consumes it (never peeks).
+
+    RETURN MODE is NOT a hardcoded fallback like PlaneWatchEngine's
+    `.launch = "flights"` -- a notification can arrive during literally
+    anything (clock, a game, flights, gameday...), so arcade_server.py's
+    /api/notify handler captures "what was running right before this
+    interrupted it" the same way set_mode() itself already does
+    (`prev = self.mode`) and threads that through the same pending slot.
+    engines.RESTING_MODE is only the fallback for the genuinely
+    unrecoverable case (no prev_mode was captured at all).
+
+    DISMISSAL: any input() press, or the ~15s ceiling (TOTAL_CEILING_TICKS
+    -- same 300-tick/~15s duration as PlaneWatchEngine, for consistency
+    across the project's two force-triggered takeovers), hands back to
+    the captured return mode.
+    """
+
+    name = "notify"
+    tick_rate = 0.05
+
+    TOTAL_CEILING_TICKS = 300     # ~15s -- matches PlaneWatchEngine's own ceiling
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        payload = notify.pop_pending() or {}
+        self.title = str(payload.get("title") or "")
+        self.message = str(payload.get("message") or "")
+        self.color = payload.get("color") or NOTIFY_URGENT_COLOR
+        self.return_mode = payload.get("prev_mode") or RESTING_MODE
+        self.ticks = 0
+        self.scroll = 0.0
+        self.launch = None
+
+    def has_content(self):
+        # Force-triggered only -- never polled by AmbientEngine's rotation,
+        # same contract PlaneWatchEngine/GameDayEngine honour for the same
+        # reason: a takeover cannot take a turn.
+        return False
+
+    def _dismiss(self):
+        self.launch = self.return_mode
+
+    def input(self, cmd):
+        # Any press dismisses -- there is nothing else meaningful to do
+        # with left/right/rotate/drop on a notification, same reasoning
+        # as PlaneWatchEngine.input().
+        self._dismiss()
+
+    def auto(self):
+        pass
+
+    def tick(self):
+        if self.launch:
+            return
+        self.ticks += 1
+        self.scroll += 1.6
+        if self.ticks >= self.TOTAL_CEILING_TICKS:
+            self._dismiss()
+
+    def frame(self):
+        buf = blank()
+        fill(buf, (0, 0, 0))
+        for x in range(WIDTH):
+            put_px(buf, x, 2, self.color)
+            put_px(buf, x, HEIGHT - 3, self.color)
+
+        draw_text_centered(buf, 8, fit_text(self.title, WIDTH - 8), self.color)
+
+        lines = wrap_text(self.message, WIDTH - 8, max_lines=3)
+        overflow = sum(len(ln.split()) for ln in lines) < len(self.message.split())
+        if overflow:
+            draw_marquee(buf, 30, self.message, (220, 230, 255), self.scroll)
+        elif lines:
+            band_top, band_bot = 18, HEIGHT - 12
+            block_h = len(lines) * 8 - 2
+            y0 = band_top + max(0, ((band_bot - band_top) - block_h) // 2)
+            for i, ln in enumerate(lines):
+                draw_text_centered(buf, y0 + i * 8, ln, (220, 230, 255))
+
+        # HEIGHT-9=55 -- footer row, well clear of the real HEIGHT-5=59
+        # last-legal row for a 5px glyph.
+        draw_text_centered(buf, HEIGHT - 9, "PRESS ANY BUTTON", rim(self.color, 0.7))
+        return bytes(buf)
+
+
 class PlaneWatchEngine:
     """PLANE-IN-WINDOW high-priority takeover (2026-08-08).
 
@@ -14394,6 +14570,13 @@ ENGINES = {
     # render loop (see PlaneWatchEngine's own docstring), never chosen
     # from a menu or a rotation.
     "planewatch": PlaneWatchEngine,
+    # HOME ASSISTANT NOTIFY, urgent tier (task #8) -- same shape as
+    # "planewatch"/"gameday": registered so arcade_server.set_mode
+    # ("notify") can construct it with zero args, deliberately NOT added
+    # to MenuEngine.NATIVE_GAMES/AmbientEngine.SEQUENCE. Force-triggered
+    # only by /api/notify (see NotifyEngine's own docstring), never chosen
+    # from a menu or a rotation.
+    "notify": NotifyEngine,
     "menu": MenuEngine,
     "boot": BootEngine,
 }
