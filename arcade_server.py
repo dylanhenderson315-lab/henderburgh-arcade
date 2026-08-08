@@ -50,6 +50,8 @@ import news
 import weather
 import blog
 import brightness
+import notify
+import paneltext
 import transitions
 
 PORT = 7333
@@ -86,6 +88,14 @@ DEFAULT_MODE = "clock"             # resting state; "off" still releases to WLED
 # rather than duplicating the string means the two cannot drift.
 engines.RESTING_MODE = DEFAULT_MODE
 RESUME_GAME = "boot"                # "Turn On" always plays the boot curtain, then the menu
+
+# HOME ASSISTANT NOTIFY, normal-priority banner display window (task #8).
+# ~8-10s: long enough to actually read a short line on a wall panel you
+# glance at rather than stare at, short enough that it never competes with
+# whatever's actually running for more than a few seconds. Picked the
+# middle of that range -- no measured data drove the exact number, same
+# kind of reasoned default as brightness.py's own DEFAULTS.
+NOTIFY_BANNER_SECONDS = 9.0
 FRAME_BYTES = WIDTH * HEIGHT * 3
 CAST_TIMEOUT = 5.0                 # s without a phone frame -> report cast idle
 VIDEOS_DIR = HERE / "videos"
@@ -147,6 +157,14 @@ class Arcade:
         self._bg_capture_active = False  # capture thread owns the panel; hold DDP
         self._bg_last_good = None        # last real peeked ambient frame
         self._bg_fx_check_at = 0.0       # throttle panel fx drift checks
+        # HOME ASSISTANT NOTIFY, normal-priority banner (task #8): mirrors
+        # how severe-weather's own takeover state (_alert_ticks) is tracked
+        # here rather than in a feed module -- a lightweight composite
+        # overlay, not a mode, so it lives on Arcade next to the render
+        # loop that applies it. None when no banner is showing; otherwise
+        # {title, message, color, expires (wall-clock time.time())}.
+        self._notify_banner = None
+        self._notify_scroll = 0.0        # marquee offset for an overflowing banner message
         self.running = True
         # Warm the effects list cache
         try:
@@ -278,6 +296,68 @@ class Arcade:
             backgrounds.stop_live_peek()
             with self.lock:
                 self._bg_capture_needed = False
+
+    def trigger_notify(self, priority, title, message):
+        """Home Assistant notification pass-through (task #8). `title`/
+        `message` must already be paneltext.panel_text()-folded by the
+        caller (do_POST's /api/notify handler) -- this method just routes
+        to whichever of the two existing takeover mechanisms the priority
+        maps to, never draws or fabricates text itself.
+
+        Guarded against waking `off`, same reasoning as the plane-in-
+        window trigger in _loop(): the panel doubling as a house lamp,
+        deliberately released to WLED/Home Assistant lighting, must not be
+        woken by a notification any more than by a plane flying by --
+        `off` is a deliberate hand-off, not a state any feature may
+        override uninvited."""
+        with self.lock:
+            if self.mode == "off":
+                return False
+            color = engines.NOTIFY_URGENT_COLOR if priority == "urgent" \
+                else engines.NOTIFY_NORMAL_COLOR
+            if priority != "urgent":
+                # Lightweight composite overlay -- see _notify_banner_frame().
+                # No mode swap, no input capture; whatever's running keeps
+                # running untouched underneath it.
+                self._notify_banner = {
+                    "title": title, "message": message, "color": color,
+                    "expires": time.time() + NOTIFY_BANNER_SECONDS,
+                }
+                return True
+            # Urgent: real mode swap. Capture "what was running right
+            # before this interrupted it" -- the same `prev = self.mode`
+            # idiom set_mode() itself already uses -- so NotifyEngine hands
+            # back to the ACTUAL previous mode rather than a hardcoded
+            # landing spot. If a notification arrives while one is already
+            # showing, carry that one's own return_mode forward instead of
+            # returning to "notify" itself.
+            prev = self.mode
+            if prev == "notify" and self.engine is not None:
+                prev = getattr(self.engine, "return_mode", None) or engines.RESTING_MODE
+        notify.push_pending({
+            "title": title, "message": message, "color": color, "prev_mode": prev,
+        })
+        self.set_mode("notify")
+        return True
+
+    def _notify_banner_frame(self, frame):
+        """Composite the normal-priority notify banner over `frame` if one
+        is currently in its display window, else return `frame` unchanged
+        and clear stale state. Mirrors _severe_alert_frame()'s own
+        "no extra bookkeeping to clear it" shape: once `expires` passes,
+        the very next call just falls through to clearing it."""
+        banner = self._notify_banner
+        if banner is None:
+            return frame
+        if time.time() >= banner["expires"]:
+            self._notify_banner = None
+            return frame
+        if frame is None:
+            return frame
+        self._notify_scroll += 1.6
+        return engines.draw_notify_banner(
+            frame, banner["title"], banner["message"], banner["color"],
+            scroll=self._notify_scroll)
 
     def _input_allowed(self):
         base = self.mode.split("-")[0]
@@ -841,6 +921,19 @@ class Arcade:
                         frame = backgrounds.composite(
                             bg_frame, frame, threshold=14, bg_gain=gain)
 
+                # HOME ASSISTANT NOTIFY, normal-priority banner (task #8).
+                # Applied BEFORE the severe-weather takeover on purpose --
+                # severe weather is life-safety and has to win outright if
+                # both are somehow active at once; compositing the banner
+                # after it would draw an FYI over a full-bleed severe
+                # alert. Skipped for the "notify" mode itself (the urgent
+                # tier already owns the whole frame; layering the ambient
+                # banner under its own mode would be redundant) and for
+                # None frames (background/off already `continue`d above,
+                # but mirror/video error paths can still hand back None).
+                if frame is not None and mode != "notify":
+                    frame = self._notify_banner_frame(frame)
+
                 # GLOBAL SEVERE-WEATHER TAKEOVER. Applied last, after every
                 # other composite, so it covers whatever was about to be
                 # shown -- a game, a video, a mirror, any mode. Only
@@ -1210,6 +1303,42 @@ class Handler(BaseHTTPRequestHandler):
                 max_nm = float(j["max_nm"]) if "max_nm" in j else None
                 w = satellite.save_window(center, fov, max_nm)
                 self._json({"ok": True, **w})
+            except (ValueError, KeyError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/notify":
+            # HOME ASSISTANT NOTIFICATION PASS-THROUGH (task #8). Payload
+            # mirrors HA's real `notify` service shape: {title, message,
+            # data: {priority}}. The ONE endpoint in this project with a
+            # real auth check -- see notify.py's module docstring for why
+            # a spoofable notify endpoint is worth the exception to the
+            # project's usual trusted-LAN no-auth posture.
+            if not notify.check_token(self.headers.get("X-Arcade-Token")):
+                self._json({"ok": False, "error": "unauthorized"}, 401)
+                return
+            try:
+                j = json.loads(body or b"{}")
+                title = j["title"]
+                if not isinstance(title, str) or not title.strip():
+                    raise ValueError("title required")
+                message = j.get("message", "")
+                # Same "malformed values fall back to defaults" convention
+                # /api/brightness already uses: anything other than the
+                # two recognized values -- missing, wrong type, a typo --
+                # falls back to "normal" rather than rejecting the request
+                # or guessing which tier was meant.
+                data = j.get("data") or {}
+                priority = data.get("priority") if isinstance(data, dict) else None
+                if priority not in ("normal", "urgent"):
+                    priority = "normal"
+                # Fold at the boundary -- the one place external text
+                # enters this endpoint. Never displays anything the real
+                # POST body didn't contain; only ever fit/wrapped, never
+                # fabricated.
+                title_f = paneltext.panel_text(title)
+                message_f = paneltext.panel_text(message)
+                ok = ARCADE.trigger_notify(priority, title_f, message_f)
+                self._json({"ok": ok, "priority": priority,
+                            "title": title_f, "message": message_f})
             except (ValueError, KeyError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/sports/leagues":
