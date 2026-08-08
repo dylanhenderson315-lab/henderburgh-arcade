@@ -1836,64 +1836,31 @@ ESPN parsing, no new polling.
   universal feed ever surfaces is what proves this live, not a synthetic
   push.
 
-**WNBA — done (2026-08-02), with one real, still-open gap.**
-`sports._fetch_wnba_big_plays()` fetches
-`SUMMARY_URL.format(path='basketball/wnba', event_id=...)` (a private
-`_WNBA_PATH` constant — WNBA is deliberately NOT added to
-`LEAGUE_PATHS`/`DEFAULT_LEAGUES`, see below) and returns every
-`scoringPlay: true` play in the FINAL period reached
-(`max(period.number)` across the payload, which already covers OT since
-ESPN numbers OT periods 5, 6... above regulation) whose
-`clock.displayValue` is under **5.0 seconds**
-(`WNBA_BIG_PLAY_CLOCK_SECONDS`).
+**WNBA big-moment detection — REMOVED (2026-08-07), owner preference, not
+a bug.** A WNBA big-play detector was built 2026-08-02 (per-game
+play-by-play polling, a late-clock threshold calibrated against two real
+finished games, one-shot seen/new tracking) but was never reachable in
+practice, since WNBA was never added to `LEAGUE_PATHS`, so it could never
+be set as the pinned favorite team. The owner does not want WNBA
+specifically covered by this project; rather than build a WNBA-specific
+replacement, all of that detector's plumbing was deleted outright:
+`sports.py`'s `WNBA` entry in `LEAGUE_PATHS`, `_WNBA_PATH`,
+`WNBA_BIG_PLAY_CLOCK_SECONDS`, `_clock_seconds()`,
+`_fetch_wnba_big_plays()`, `SportsFeed._refresh_wnba_big_play()` and its
+call site in `_loop()`, the `_wnba_*` instance fields, and
+`pop_wnba_big_play()`; and `engines.py`'s `_detect_wnba_big_play` plus its
+`BIG_MOMENT_DETECTORS["wnba_big_play"]` registration. `render_audit.py`
+and a direct `import sports, engines` both stayed clean after the
+removal — no dead references remain.
 
-- **Threshold is CONFIRMED REAL, not a best guess.** Pulled two real
-  completed WNBA games live on 2026-08-02 (LV @ CHI, event 401857105;
-  NY @ PHX, event 401857106) and found a genuine example to calibrate
-  against: real final-period scoring plays split into two clear
-  clusters — last-possession makes at 3.2s/0.9s/4.2s remaining, versus
-  garbage-time free throws at 12.7s/24.1s/35.4s/43.9s in the same final
-  minute. 5.0s sits cleanly between the two clusters in both real games.
-  The clock field itself needed its own small parser
-  (`sports._clock_seconds()`) — ESPN's `displayValue` is `"M:SS"` above a
-  minute and a bare seconds float (`"3.2"`, `"0.9"`) under it, confirmed
-  against these same real payloads.
-- **On-panel label is "BIG PLAY", not "BUZZER BEATER"** — a deliberately
-  more honest label. All three real qualifying plays found (3.2s/0.9s/
-  4.2s remaining) were clearly still-meaningful late scores, but none
-  actually beat the clock to zero, so "buzzer beater" would overclaim
-  what was really detected.
-- **One-shot seen/new tracking lives in `sports.SportsFeed`** (not the
-  engine): `_wnba_seen`/`_wnba_event_id`, same "adopt the current set on
-  first read of a new game, diff after that" idiom as
-  `GameDayEngine._seen_done`. Verified directly (not just by inspection):
-  first poll of a game adopts both of LV@CHI's real qualifying plays
-  without firing; a second poll of unchanged data fires nothing; a
-  simulated game switch resets the baseline without firing; and forcing
-  only one of the two real plays into the seen set correctly surfaces
-  the other (Sydney Taylor's real 0.9s three) as newly-detected.
-- **Real gap, honestly unresolved rather than worked around**: WNBA
-  cannot currently be set as the pinned favorite team at all.
-  `LEAGUE_PATHS` doesn't include it and both `load_config()` and
-  `set_favorite()` reject any league outside `LEAGUE_PATHS` — confirmed
-  by reading both functions. `SportsFeed._refresh_wnba_big_play()` (the
-  I/O side, cost-scoped identically to `_refresh_win_prob()` — only the
-  pinned favorite's own currently-live game, same discipline as
-  win-probability) is therefore correct but **practically unreachable**
-  until WNBA becomes a pinnable favorite league somewhere else in the
-  project. That is a real, separate piece of work, not part of this
-  detector — not attempted here since widening `LEAGUE_PATHS` to make
-  WNBA choosable for the whole sports mode is a bigger, differently-
-  scoped change than "add one big-moment detector".
-- **Not yet live-verified end-to-end on a real live game**, for the same
-  reason the shared infrastructure above hasn't been: both real WNBA
-  games available at build time were already `post` (finished) — the
-  parsing/threshold logic is confirmed against their full real
-  play-by-play, but firing in real time against a genuinely in-progress
-  game (as opposed to a completed game's full play list) remains
-  unobserved. Verify this the same way the shared infra note above says
-  to verify MLB: with the first real trigger, not a synthetic push — and
-  only once WNBA pinning exists to make it reachable at all.
+The owner's actual ask is broader coverage of tennis, golf, baseball,
+NFL, NHL, and other prime-time sports through the existing pinnable-
+favorite/big-moment system, not a WNBA substitute. Of those: golf and
+baseball already have their own big-moment detectors (see above); NFL
+and NHL are already pinnable via `LEAGUE_PATHS`/`DEFAULT_LEAGUES`, just
+without a dedicated big-moment detector yet (not built here — a real,
+separate piece of work, not in scope for this removal); a real tennis
+renderer remains explicitly deferred, tracked separately (task #19).
 
 ### The celebration system GENERALIZED across all four modes (2026-08-07)
 
@@ -2036,21 +2003,18 @@ dump — no real qualifying flights or satellite event occurred during
 the session to trigger a live TIER_INTERRUPT/TIER_TAKEOVER, honestly
 flagged rather than worked around with a fabricated trigger.
 
-**WNBA added to `LEAGUE_PATHS`** (`sports.py`) in the same pass — the
-one missing piece keeping `_detect_wnba_big_play` (documented above)
-"practically unreachable": `load_config()`/`set_favorite()` both reject
-any league outside this dict, and WNBA was never in it despite
-`_WNBA_PATH` already existing for the detector's own summary fetch.
-Deliberately NOT added to `DEFAULT_LEAGUES` — this makes WNBA
-*choosable*, not polled by default for every install. Verified
-mechanically (`set_favorite("WNBA", ...)` now succeeds and persists
-correctly), then the test change was reverted from `sports_config.json`
-— not this session's call to actually set a real favorite team. **Not
-verified against a real live WNBA game** — ESPN was returning 403 to
-this network for the entire duration of this session (three separate
-checks across two sessions, unchanged), so there was no way to even
-check whether a WNBA game was live, let alone confirm the detector
-fires against one.
+**WNBA was briefly added to `LEAGUE_PATHS` in this same pass, then
+REMOVED again later the same day (see the WNBA removal note above) —
+this paragraph is stale and kept only for the session history.** It had
+been added to make `_detect_wnba_big_play` reachable
+(`load_config()`/`set_favorite()` both reject any league outside
+`LEAGUE_PATHS`), verified mechanically (`set_favorite("WNBA", ...)`
+succeeded and persisted) but never verified against a real live WNBA
+game (ESPN was 403ing this network for the session's duration). On
+direct owner instruction later the same day, WNBA-specific coverage was
+dropped from the project entirely rather than pursued further — see
+"WNBA big-moment detection — REMOVED" above for what was actually
+deleted and why.
 
 **MMA expanded-detail renderer was explicitly SKIPPED this session**,
 not attempted — it was scoped to real live MMA/PFL events only, "don't

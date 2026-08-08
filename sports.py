@@ -64,15 +64,6 @@ LEAGUE_PATHS = {
     "EPL": "soccer/eng.1",
     "NCAAF": "football/college-football",
     "NCAAB": "basketball/mens-college-basketball",
-    # Same real path _WNBA_PATH (below) already uses for the big-moment
-    # detector's per-game summary fetch -- added here too so WNBA can
-    # finally be SET as the pinned favorite, which is the one thing that
-    # was missing to make _detect_wnba_big_play() reachable in practice
-    # (load_config()/set_favorite() both reject any league outside this
-    # dict). Deliberately NOT added to DEFAULT_LEAGUES below -- that
-    # would poll it by default for every install; this only makes it
-    # CHOOSABLE, same as every other non-default league already here.
-    "WNBA": "basketball/wnba",
 }
 DEFAULT_LEAGUES = ["NFL", "NBA", "MLB", "NHL"]
 
@@ -408,98 +399,6 @@ def _fetch_scoreboard(league):
     return out
 
 
-# =============================================================================
-# WNBA big-play detection -- feeds SportsEngine.BIG_MOMENT_DETECTORS'
-# "wnba_big_play" entry. See CLAUDE.md's big-moment section for the shared
-# contract this plugs into (draw_celebration/_set_big_moment/pop_big_moment).
-#
-# WNBA is deliberately NOT in LEAGUE_PATHS/DEFAULT_LEAGUES. Both
-# load_config() and set_favorite() reject any league outside LEAGUE_PATHS,
-# so WNBA cannot be set as the pinned favorite through the current config
-# file or API -- confirmed by reading both functions, not assumed. Adding
-# WNBA to that config-facing dict was out of scope for this detector (it
-# would make WNBA choosable for the whole sports mode, a bigger change than
-# "add one detector"), so this is a private, narrowly-scoped path constant
-# used ONLY here.
-_WNBA_PATH = "basketball/wnba"
-
-# Threshold calibrated against REAL data, not guessed: two real completed
-# WNBA games pulled live on 2026-08-02 (LV @ CHI, event 401857105, and
-# NY @ PHX, event 401857106). Real final-period (4th quarter) scoring plays
-# split into two clear clusters by clock.displayValue:
-#   genuine last-possession makes: 3.2s, 0.9s, 4.2s remaining
-#   garbage-time free throws in the same final minute: 12.7s, 24.1s, 35.4s,
-#     43.9s remaining
-# 5.0s sits cleanly between those two clusters in both real games checked.
-WNBA_BIG_PLAY_CLOCK_SECONDS = 5.0
-
-
-def _clock_seconds(display_value):
-    """WNBA's play-by-play clock.displayValue is 'M:SS' when at least a
-    minute remains, and a bare seconds float ('3.2', '0.9') under a
-    minute -- confirmed against the real final-period plays used to
-    calibrate WNBA_BIG_PLAY_CLOCK_SECONDS above, not assumed. Returns
-    None on anything unparseable rather than guessing 0 -- guessing 0
-    would look exactly like a real buzzer beater."""
-    if not isinstance(display_value, str) or not display_value.strip():
-        return None
-    s = display_value.strip()
-    try:
-        if ":" in s:
-            m, sec = s.split(":", 1)
-            return int(m) * 60 + float(sec)
-        return float(s)
-    except (ValueError, TypeError):
-        return None
-
-
-def _fetch_wnba_big_plays(event_id):
-    """One WNBA game's play-by-play -> every play so far that qualifies as
-    a big play: scoringPlay=True, in the FINAL period actually reached
-    (regular 4th, or an OT period if the game went there -- both are just
-    max(period.number) across the payload, since ESPN numbers OT periods
-    5, 6... above regulation), with clock.displayValue under
-    WNBA_BIG_PLAY_CLOCK_SECONDS. Returns ALL qualifying plays currently in
-    the payload; the caller (SportsFeed._refresh_wnba_big_play) does the
-    one-shot seen/new diffing, same idiom as GameDayEngine._seen_done.
-
-    Label note, not just a data note: what this finds is closer to "big
-    late shot" than literally "buzzer beater" -- see
-    SportsEngine._detect_wnba_big_play()'s docstring for why the on-panel
-    label says BIG PLAY.
-
-    Honest gap: calibrated against two real FINISHED games (see the
-    threshold constant above), not a live one -- there was no live WNBA
-    game available to verify this fires in real time versus just being
-    correct when run against a completed game's full play list."""
-    data = _get_json(SUMMARY_URL.format(path=_WNBA_PATH, event_id=event_id))
-    plays = data.get("plays") or []
-    periods = [p.get("period", {}).get("number") for p in plays
-               if isinstance((p.get("period") or {}).get("number"), int)]
-    if not periods:
-        return []
-    final_period = max(periods)
-    out = []
-    for p in plays:
-        period = p.get("period") or {}
-        if period.get("number") != final_period or not p.get("scoringPlay"):
-            continue
-        pid = p.get("id") or p.get("sequenceNumber")
-        if pid is None:
-            continue
-        secs = _clock_seconds((p.get("clock") or {}).get("displayValue"))
-        if secs is None or secs >= WNBA_BIG_PLAY_CLOCK_SECONDS:
-            continue
-        out.append({
-            "id": pid,
-            "text": paneltext.panel_text(p.get("text")),
-            "score_value": p.get("scoreValue"),
-            "clock": paneltext.panel_text((p.get("clock") or {}).get("displayValue")),
-            "period": paneltext.panel_text(period.get("displayValue")),
-        })
-    return out
-
-
 def _fetch_win_prob(league, event_id):
     """Returns the home team's current win percentage (0..1) or None if
     ESPN doesn't have one for this game/sport. NHL's summary endpoint has
@@ -721,14 +620,6 @@ class SportsFeed:
         self._golf_move_at = 0.0
         self._golf_field = None       # (meta, [competitors]) full-field fallback
         self._golf_field_try = 0.0
-        # WNBA big-play detection -- see _fetch_wnba_big_plays()'s docstring.
-        # One-shot idiom, same shape as GameDayEngine._seen_done: adopt the
-        # current qualifying set on the first read of a given event id
-        # rather than surfacing it as "new", then diff on every poll after.
-        self._wnba_event_id = None
-        self._wnba_seen = set()
-        self._wnba_try = 0.0
-        self._wnba_big_play = None    # one-slot queue, like _pending_big_moment
         self._thread = None
         self._err = None
 
@@ -824,7 +715,6 @@ class SportsFeed:
             self._refresh_universal()
             self._refresh_scoreboards()
             self._refresh_win_prob()
-            self._refresh_wnba_big_play()
             time.sleep(2.0)
 
     def _refresh_universal(self):
@@ -1054,75 +944,6 @@ class SportsFeed:
             with self._lock:
                 self._win_prob = None
 
-    def _refresh_wnba_big_play(self):
-        """Cost-scoped exactly like _refresh_win_prob() above: only ever
-        polls the per-game summary endpoint for the PINNED FAVORITE's own
-        currently-LIVE WNBA game, never every live WNBA game in the
-        universal feed.
-
-        REAL GAP, documented rather than papered over: self.favorite can
-        currently never be {'league': 'WNBA', ...} -- see the module
-        comment above _WNBA_PATH. This method is therefore correct but
-        practically unreachable until WNBA becomes a pinnable favorite
-        league elsewhere in the project (a config change, deliberately
-        not made here). Kept rather than deleted because the fetch/parse
-        logic it calls (_fetch_wnba_big_plays) IS independently verified
-        against two real finished games -- see that function's docstring."""
-        now = time.time()
-        with self._lock:
-            if now - self._wnba_try < WINPROB_REFRESH:
-                return
-            favorite = self.favorite
-            universal = list(self._universal)
-        if not favorite or favorite.get("league") != "WNBA":
-            return
-        game = next(
-            (e for e in universal
-             if e.get("league") == "wnba" and e.get("state") == "in" and
-             favorite["team_abbr"] in
-             {(c.get("abbr") or "") for c in (e.get("competitors") or [])}),
-            None)
-        with self._lock:
-            self._wnba_try = now
-        if not game:
-            with self._lock:
-                self._wnba_event_id = None
-                self._wnba_seen = set()
-            return
-        event_id = game.get("id")
-        with self._lock:
-            is_new_game = event_id != self._wnba_event_id
-            self._wnba_event_id = event_id
-        try:
-            qualifying = _fetch_wnba_big_plays(event_id)
-        except Exception:                               # noqa: BLE001
-            return
-        ids = {p["id"] for p in qualifying}
-        if is_new_game:
-            # First read of this game: adopt the current qualifying set as
-            # the baseline rather than firing on whatever already happened
-            # before this game was even the pinned favorite's live game --
-            # same "never replay on first read" rule as GameDayEngine.
-            with self._lock:
-                self._wnba_seen = ids
-            return
-        with self._lock:
-            seen = self._wnba_seen
-            new_ids = ids - seen
-            self._wnba_seen = ids
-            if new_ids:
-                newest = max((p for p in qualifying if p["id"] in new_ids),
-                             key=lambda p: p["id"])
-                self._wnba_big_play = newest
-
-    def pop_wnba_big_play(self):
-        """One-slot queue, consumed by SportsEngine._detect_wnba_big_play().
-        POP not peek, same contract as SportsEngine._pending_big_moment."""
-        with self._lock:
-            p, self._wnba_big_play = self._wnba_big_play, None
-            return p
-
-
 FEED = SportsFeed()
 
 
@@ -1138,8 +959,8 @@ FEED = SportsFeed()
 # This is the endpoint that drives espn.com's own top scoreboard bar:
 #     site.web.api.espn.com/apis/v2/scoreboard/header
 # One request returned 43 live/relevant events across 11 leagues in 7 sports
-# when this was written -- golf (PGA + LPGA), MLB, WNBA, three soccer
-# competitions, PFL, PLL lacrosse, ATP and WTA tennis.
+# when this was written -- golf (PGA + LPGA), MLB, women's basketball, three
+# soccer competitions, PFL, PLL lacrosse, ATP and WTA tennis.
 #
 # ABSENCE IS FREE, AND THAT IS THE POINT. ESPN only includes a league here
 # when it has something on. There is no "no games today" state to filter out
