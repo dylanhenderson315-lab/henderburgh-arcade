@@ -683,6 +683,16 @@ def _type_name(icao_type):
     return ICAO_TYPE_NAMES.get(t, t) or None
 
 
+def _ac_key(ac):
+    """The stable identity key for one real aircraft dict -- hex (ICAO24)
+    preferred, ident as fallback. Mirrors engines.FlightEngine._sel_key()
+    EXACTLY (hex-then-ident) -- one keying scheme for "the same real
+    aircraft", not a second one invented on this side of the I/O boundary.
+    Used by the window-takeover detector below and by the pending-detail
+    hand-off, both of which need to agree with the engine on identity."""
+    return ac.get("hex") or ac.get("ident")
+
+
 class FlightFeed:
     """Background poller with a last-good cache -- same contract as
     MarketFeed/SatelliteFeed."""
@@ -698,6 +708,59 @@ class FlightFeed:
         self._err = None
         self._route_cache = {}          # callsign -> route dict or None (looked up, no route)
         self._home = satellite.FEED.get_location()   # (lat, lon, label)
+
+        # ---- PLANE-IN-WINDOW TAKEOVER (2026-08-08) --------------------
+        # Real detection of "an aircraft just entered the configured
+        # window cone", built on the `in_window` flag `_fetch_positions()`
+        # already stamps on every aircraft (see satellite.in_window() --
+        # this does NOT re-derive that flag, only reacts to it changing).
+        # Same one-shot adopt-then-diff idiom as `_seen_home_runs`/
+        # `_seen_squawks`/every other detector in this project: None until
+        # the first real refresh, which ADOPTS whatever is already in the
+        # window without firing (a device that's been running with a
+        # window aircraft parked at the edge must not take over the panel
+        # the instant it starts), then only a genuinely NEW membership
+        # counts as "just entered".
+        self._seen_window = None            # set of ac keys in-window as of last refresh
+        self._window_batch = []             # one-shot: newly-entered aircraft, closest-first/notable-secondary
+        self._pending_detail = None         # one-shot: sel_key for FlightEngine to jump straight to on arrival
+
+    def pop_window_takeover_batch(self):
+        """One-shot: real aircraft that JUST entered the configured window
+        cone since the last poll, or [] if nothing new happened. Consumed
+        once -- calling this a second time before another real refresh
+        returns [] -- same "pop, don't peek-forever" discipline as
+        BigMomentSource.pop_big_moment(), so arcade_server's render-loop
+        poll can't re-trigger the same takeover repeatedly.
+
+        Sorted PRIMARY by real distance (dist_nm ascending -- closest
+        first, the owner's explicit spec), SECONDARY by real notability
+        rank descending (a tiebreak among aircraft at similar distance,
+        same `_notable()` rank the main sort already uses elsewhere in
+        this file). Full real aircraft dicts, not just keys -- the
+        takeover screen needs registration/type/distance/altitude/
+        in_window, all of which are already on these dicts."""
+        with self._lock:
+            batch, self._window_batch = self._window_batch, []
+            return batch
+
+    def push_pending_detail(self, key):
+        """One-shot hand-off: PlaneWatchEngine calls this right before
+        setting `.launch = 'flights'` so FlightEngine.reset() can jump
+        straight to VIEW_DETAIL for THIS aircraft instead of landing on
+        the plain scope -- set_mode() always constructs ENGINES[base]()
+        with zero args, so this slot is the only way to pass "which
+        aircraft" across a real mode switch. Same "consumed once" shape
+        as pop_pending_detail() below, mirroring
+        BigMomentSource.pop_big_moment()'s one-shot queue idiom."""
+        with self._lock:
+            self._pending_detail = key
+
+    def pop_pending_detail(self):
+        """Consume (not peek) the pending detail-selection key, or None."""
+        with self._lock:
+            key, self._pending_detail = self._pending_detail, None
+            return key
 
     def get(self):
         """Returns {aircraft: [...], age, home_label, configured, err}.
@@ -805,6 +868,29 @@ class FlightFeed:
             if ac["reg"]:
                 hangar.LOG.record_sighting(
                     ac["reg"], ac["type"], (ac.get("route") or {}).get("airline"))
+
+        # PLANE-IN-WINDOW TAKEOVER -- one-shot "newly entered the window"
+        # detection, hooked into this SAME refresh cycle (zero new I/O,
+        # zero new poll cadence). Reacts to the real `in_window` flag
+        # `_fetch_positions()` already computed above via
+        # satellite.in_window() -- this only diffs it against last cycle.
+        now_in_window = {_ac_key(a) for a in aircraft
+                          if a.get("in_window") and _ac_key(a)}
+        if self._seen_window is None:
+            self._seen_window = now_in_window   # first read: adopt, don't fire
+        else:
+            newly = now_in_window - self._seen_window
+            if newly:
+                entered = [a for a in aircraft if _ac_key(a) in newly]
+                entered.sort(key=lambda a: (
+                    a["dist_nm"] if isinstance(a.get("dist_nm"), (int, float)) else 1e9,
+                    -(a["notable"][1] if a.get("notable") else 0)))
+                with self._lock:
+                    # Most recent batch wins if the previous one was never
+                    # consumed -- same "only the most recent real event
+                    # matters" shape as _set_big_moment()'s one-slot queue.
+                    self._window_batch = entered
+            self._seen_window = now_in_window
 
         with self._lock:
             self._aircraft = aircraft
