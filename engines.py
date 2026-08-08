@@ -1530,6 +1530,115 @@ def draw_scope_home(buf, color=(235, 242, 255), cx=SCOPE_CX, cy=SCOPE_CY):
         put_px(buf, cx + dx, cy + dy, color)
 
 
+# ---- HERO-SCALE FILLED SILHOUETTES (2026-08-08, PLANE-IN-WINDOW takeover) --
+# A NEW rendering treatment of the SAME four kinds `_ac_kind()`/
+# `_hangar_kind()` already classify aircraft into everywhere else in this
+# project (scope icon, DETAIL card icon, Hangar sprite) -- reuses that
+# classification, adds new drawing code at a new bigger, FILLED scale.
+# Geometric only (triangles/ovals via a scanline fill over `put_px`), same
+# "simple original geometry, no real logos/liveries" rule the smaller
+# icons above already follow. Only ONE of these draws per frame (a
+# full-screen takeover shows a single aircraft at a time), a very
+# different cost profile than the scope's up-to-8-icons-per-frame case
+# this project has already had a real lag complaint about and fixed (see
+# the ICON/PERFORMANCE REVISIT note) -- a handful of scanline rows is
+# cheap even done fresh every tick.
+def _fill_poly(buf, pts, color):
+    """Plain scanline polygon fill -- pts is a list of (x, y), assumed to
+    describe a simple (non-self-intersecting) polygon. Used only for the
+    hero silhouettes below, at most once per frame."""
+    ys = [p[1] for p in pts]
+    y0, y1 = int(math.floor(min(ys))), int(math.ceil(max(ys)))
+    n = len(pts)
+    for y in range(y0, y1 + 1):
+        yc = y + 0.5
+        xs = []
+        for i in range(n):
+            ax, ay = pts[i]
+            bx, by = pts[(i + 1) % n]
+            if ay == by:
+                continue
+            if (yc >= ay) != (yc >= by):
+                t = (yc - ay) / (by - ay)
+                xs.append(ax + t * (bx - ax))
+        xs.sort()
+        for i in range(0, len(xs) - 1, 2):
+            x0, x1 = int(round(xs[i])), int(round(xs[i + 1]))
+            for x in range(x0, x1 + 1):
+                put_px(buf, x, y, color)
+
+
+def draw_hero_silhouette(buf, cx, cy, kind, color, scale=1.0):
+    """Large FILLED silhouette for the plane-in-window takeover screen and
+    the ceremonial Hangar detail card -- hero-scale, always facing "up"
+    (this is a portrait/showcase treatment, not a heading-oriented radar
+    icon; heading isn't the point here). Dispatches on the SAME
+    `FlightEngine._ac_kind()`/`_hangar_kind()` buckets used everywhere
+    else, so the shape choice is consistent with the scope/DETAIL/Hangar
+    icons -- just filled and much bigger."""
+    s = scale
+    if kind == SCOPE_ICON_HELI:
+        # Fuselage blob (a small filled oval) + a thin tail boom + a
+        # rotor disk outline overhead -- the one hero shape that stays
+        # unmistakable at any scale, same reasoning as the small scope
+        # icon's own helicopter treatment.
+        rx, ry = 7 * s, 5 * s
+        pts = []
+        for i in range(16):
+            a = i / 16 * 2 * math.pi
+            pts.append((cx + rx * math.cos(a), cy + 4 * s + ry * math.sin(a)))
+        _fill_poly(buf, pts, color)
+        for dy in range(int(-16 * s), int(-4 * s)):
+            put_px(buf, int(round(cx)), int(round(cy + dy)), color)
+        for i in range(20):
+            a = i / 20 * 2 * math.pi
+            put_px(buf, int(round(cx + 15 * s * math.cos(a))),
+                   int(round(cy - 16 * s + 4 * s * math.sin(a))), rim(color, 0.5))
+        for dx in range(int(-3 * s), int(3 * s) + 1):
+            put_px(buf, int(round(cx + dx)), int(round(cy + 9 * s)), color)
+        return
+
+    # Fixed-wing kinds: one filled dart (nose to swept wingtips to tail),
+    # width/length varying per kind -- the same real, deliberate
+    # proportion difference the small scope icon uses, just filled solid
+    # instead of stroked.
+    nose_fy, wing_fy, tail_fx = {
+        SCOPE_ICON_AIRLINER: (16.0, 11.0, 9.0),
+        SCOPE_ICON_BIZJET:   (15.0, 7.0, 8.0),
+        SCOPE_ICON_GA:       (13.0, 4.5, 7.0),
+    }.get(kind, (16.0, 11.0, 9.0))
+    nose_fy, wing_fy, tail_fx = nose_fy * s, wing_fy * s, tail_fx * s
+    nose = (cx, cy - nose_fy)
+    wing_l = (cx - wing_fy, cy + nose_fy * 0.15)
+    wing_r = (cx + wing_fy, cy + nose_fy * 0.15)
+    tail = (cx, cy + tail_fx)
+    _fill_poly(buf, [nose, wing_r, tail, wing_l], color)
+    # Small tailplane, its own thin filled triangle -- reads as a tail
+    # fin without needing a whole second silhouette family.
+    tail_l = (cx - wing_fy * 0.35, cy + tail_fx * 0.7)
+    tail_r = (cx + wing_fy * 0.35, cy + tail_fx * 0.7)
+    _fill_poly(buf, [tail, tail_r, tail_l], color)
+
+
+def draw_first_sighting_ring(buf, cx, cy, color, phase=0.0):
+    """A soft expanding ring under the hero silhouette, for a genuinely
+    first-ever real Hangar sighting only (see hangar.LOG's own real
+    times_seen field -- never guessed). Kept "medium" weight per the
+    owner's spec: one dim ring, animated by `phase` (an engine-owned
+    tick counter, not real-world time -- consistent with every other
+    render-side animation in this project), not a design competing with
+    the hero shape for attention. Reuses `draw_window_ring()`'s own
+    "ring under the icon" placement convention rather than inventing a
+    third one."""
+    r = 20.0 + 6.0 * math.sin(phase)
+    dim = rim(color, 0.35)
+    n = 24
+    for i in range(n):
+        a = i / n * 2 * math.pi
+        put_px(buf, int(round(cx + r * math.cos(a))),
+               int(round(cy + r * math.sin(a))), dim)
+
+
 def draw_marquee(buf, y, text, color, scroll, scale=1, gap="   "):
     """Seamless looping scroller -- the shared tape used by every ticker
     mode. Draws two copies so the wrap has no visible seam."""
@@ -6387,6 +6496,23 @@ class FlightEngine(Browsable, BigMomentSource):
         # discipline as _dr and every other keyed cache in this project.
         self._trail = {}
 
+        # PLANE-IN-WINDOW TAKEOVER hand-off (2026-08-08): PlaneWatchEngine
+        # sets flights.FEED's one-shot pending-detail slot right before
+        # `.launch = "flights"` -- consumed here (never peeked) so this
+        # engine jumps straight to VIEW_DETAIL for THAT aircraft instead
+        # of landing on the plain scope. `_ceremonial_key` marks that this
+        # arrival is a ceremony (richer detail card -- collection index,
+        # FIRST SIGHTING/SEEN xN band, age) rather than an ordinary manual
+        # select; cleared the moment the selection changes to anything
+        # else (see _step()).
+        self._ceremonial_key = None
+        pending = flights.FEED.pop_pending_detail()
+        if pending:
+            self.sel_key = pending
+            self.view = self.VIEW_DETAIL
+            self._auto_detail = True     # don't let the spotlight rotation walk away immediately
+            self._ceremonial_key = pending
+
     # ---- input -----------------------------------------------------------
     def has_content(self):
         """Needs a home location AND at least one aircraft actually in the
@@ -6494,6 +6620,12 @@ class FlightEngine(Browsable, BigMomentSource):
             idx = 0 if direction > 0 else -1   # first press with nothing selected: land on the near edge
         new_idx = (idx + direction) % n
         self.sel_key = targets[new_idx]
+        if self.sel_key != self._ceremonial_key:
+            # A manual step away from the plane-in-window hand-off's
+            # aircraft ends the ceremony -- browsing to a different
+            # aircraft should show the ordinary detail card, not the
+            # richer one meant for the aircraft that was just in view.
+            self._ceremonial_key = None
         # The airport has no DETAIL card (no altitude/route/heading to
         # show) -- landing on it while a per-aircraft detail view is
         # open falls back to the scope rather than trying to render an
@@ -7395,6 +7527,18 @@ class FlightEngine(Browsable, BigMomentSource):
         if idx is None:
             idx = 0   # nothing explicitly selected yet -- default to the top of the list
         ac = aircraft[idx]
+
+        # PLANE-IN-WINDOW ceremonial arrival: this exact aircraft is the
+        # one PlaneWatchEngine just handed off to (see reset()'s pending-
+        # detail consumption) -- show the richer showcase card instead of
+        # the ordinary one. A dedicated renderer, not an in-place
+        # extension: the ordinary card's vertical budget below is already
+        # fully audited with zero spare rows (see its own comment), so
+        # there is no room to layer ceremonial fields into it without
+        # reopening the exact collision risk that budget exists to avoid.
+        if self._ceremonial_key is not None and self.sel_key == self._ceremonial_key:
+            return self._frame_detail_ceremonial(ac)
+
         alt = ac.get("alt_ft")
         col = self._alt_color(alt)
 
@@ -7562,6 +7706,264 @@ class FlightEngine(Browsable, BigMomentSource):
                 draw_text_centered(buf, 59, airline, (86, 94, 116))
         else:
             draw_text_centered(buf, 55, "NO ROUTE DATA", (86, 94, 116))
+        return bytes(buf)
+
+    # ---- PLANE-IN-WINDOW ceremonial detail card (2026-08-08) -----------
+    def _frame_detail_ceremonial(self, ac):
+        """The rich post-takeover showcase: large filled silhouette,
+        registration + real Hangar collection index, type code + name,
+        FIRST SIGHTING/SEEN xN status band, real age since first sighting,
+        airline when known. Real data only -- no Hangar entry for this
+        registration (a real, small honest gap -- see hangar.py's own
+        ~1-2% no-broadcast-registration note) degrades to a neutral
+        "TRACKING" state rather than a guessed status.
+
+        Y-CURSOR layout, not fixed offsets -- CLAUDE.md is explicit that
+        fixed rows have caused real collision bugs repeatedly whenever
+        content varies (which it does here: an entry may or may not have
+        an airline, may be a first sighting or a hundredth)."""
+        buf = blank()
+        fill(buf, self.BG)
+        col = self._alt_color(ac.get("alt_ft"))
+        reg = ac.get("reg")
+        entries = hangar.LOG.get() if reg else []
+        entry = next((e for e in entries if e.get("reg") == reg), None)
+
+        idx_tag = None
+        if entry:
+            # Real ordinal: this aircraft's position by REAL first_seen,
+            # oldest first, out of the real total collection size --
+            # "AIRCRAFT #N OF M", not an invented number.
+            by_first = sorted(entries, key=lambda e: e.get("first_seen") or 0)
+            ordinal = next((i for i, e in enumerate(by_first) if e.get("reg") == reg), None)
+            if ordinal is not None:
+                idx_tag = f"#{ordinal + 1}/{len(entries)}"
+
+        title = reg or (ac.get("ident") or "UNKNOWN")
+        draw_header(buf, title, col, right_tag=idx_tag)
+
+        # Hero silhouette -- same classification as every other icon in
+        # this project (_ac_kind reads live category/type), new filled
+        # drawing routine, new bigger scale.
+        y = 27
+        draw_hero_silhouette(buf, WIDTH // 2, y, self._ac_kind(ac), col, scale=0.8)
+
+        is_first = bool(entry and (entry.get("times_seen") or 1) <= 1)
+        if is_first:
+            draw_first_sighting_ring(buf, WIDTH // 2, y, self.HANGAR, phase=self.ticks * 0.08)
+
+        typ_code = (ac.get("type") or "").strip().upper()
+        typ_name = flights._type_name(typ_code) or "TYPE UNKNOWN"
+        line = (f"{typ_code} {typ_name}" if typ_code and typ_code != typ_name.upper()
+                else typ_name)
+        draw_text_centered(buf, 38, fit_text(line, WIDTH - 4), self.INK)
+
+        # Fixed 7px-row cadence for exactly three possible rows, chosen so
+        # the LAST one (airline, the least likely to be present) lands at
+        # y=59 -- HEIGHT-5, the real last-legal row for a 5px glyph. Not a
+        # "cursor that only advances by what actually drew" in the strict
+        # sense (this content genuinely has at most 3 known rows, unlike
+        # the sports/baseball case CLAUDE.md's y-cursor lesson was about),
+        # but still driven by which rows are ACTUALLY populated below
+        # rather than reserving blank space for a missing one.
+        if entry:
+            times = entry.get("times_seen") or 1
+            if times <= 1:
+                draw_text_centered(buf, 45, "FIRST SIGHTING", self.HANGAR)
+            else:
+                draw_text_centered(buf, 45, fit_text(f"SEEN {times}X", WIDTH - 4), self.ATC_MATCH)
+            age = max(0.0, time.time() - (entry.get("first_seen") or 0))
+            draw_text_centered(buf, 52, fit_text(f"{self._fmt_age_long(age)} AGO", WIDTH - 4),
+                               (86, 94, 116))
+            airline = entry.get("airline")
+            if airline:
+                draw_text_centered(buf, 59, fit_text(airline, WIDTH - 4), (86, 94, 116))
+        else:
+            # Genuinely not in THE HANGAR (no broadcast registration, or
+            # not recorded yet this cycle) -- honest neutral state, never
+            # a guessed FIRST SIGHTING claim.
+            draw_text_centered(buf, 48, "TRACKING", self.INK_DIM)
+        return bytes(buf)
+
+
+class PlaneWatchEngine:
+    """PLANE-IN-WINDOW high-priority takeover (2026-08-08).
+
+    ARCHITECTURE, stated explicitly because this project already has TWO
+    different takeover patterns that solve different problems and this
+    one deliberately copies only ONE of them:
+
+    - The severe-weather takeover (arcade_server._severe_alert_frame())
+      COMPOSITES over whatever the current mode already rendered, applied
+      AFTER everything in the render loop. It never swaps `self.mode` and
+      never captures input -- the mode underneath keeps running and keeps
+      receiving button presses. That does not fit "dismissible via any
+      button press, lands on a specific detail card when it ends", because
+      there is no real mode underneath to own that press or that hand-off.
+    - GAME DAY (GameDayEngine) is a REAL mode swap
+      (arcade_server.set_mode("gameday")), so it fully owns input and
+      hands the panel back on its own via the SAME `.launch` attribute
+      hand-off BootEngine/MenuEngine already use.
+
+    This is built GAME-DAY-style: a real mode swap, registered in
+    engines.ENGINES like gameday, NOT in PLAYABLE/MenuEngine.NATIVE_GAMES/
+    AmbientEngine.SEQUENCE (force-triggered, never chosen from a menu or a
+    rotation). Constructed with ZERO args, matching set_mode()'s contract
+    (`ENGINES[base]()`) -- it pulls its own batch from
+    flights.FEED.pop_window_takeover_batch() in reset(), which is reading
+    already-cached feed state (the same "engine calls FEED" boundary every
+    other engine here respects), not new I/O.
+
+    CYCLING: closest-first/notable-secondary, exactly as flights.py's
+    pop_window_takeover_batch() already sorted it. ~4-5s per aircraft
+    (HOLD_TICKS_PER_AC), an overall ~15s safety ceiling
+    (TOTAL_CEILING_TICKS). With enough aircraft that strict per-aircraft
+    holds would exceed the ceiling, per-aircraft hold time is COMPRESSED
+    (divided down, floored at a still-readable ~2s) rather than truncating
+    the cycle early or letting it run over -- every aircraft that entered
+    together gets at least a look, which matches "multiple aircraft
+    entering together cycle... never chaotic" better than dropping some
+    silently. A SINGLE-aircraft batch holds until dismissed or the ceiling
+    (never loops pointlessly on itself).
+
+    DISMISSAL: any input() press, or the ceiling running out, hands off to
+    flights' detail card for WHICHEVER aircraft is currently shown --
+    flights.FEED.push_pending_detail(key) then `.launch = "flights"`,
+    consumed by FlightEngine.reset() (see its own docstring on this same
+    hand-off) to jump straight to the ceremonial VIEW_DETAIL instead of
+    the plain scope.
+    """
+
+    name = "planewatch"
+    tick_rate = 0.05
+
+    BG = (0, 0, 0)
+    HERO = (225, 235, 255)
+    ACCENT = (120, 200, 255)
+    RING = (190, 160, 255)   # same lavender as FlightEngine.HANGAR -- "this is a Hangar fact"
+
+    HOLD_TICKS_PER_AC = 90        # ~4.5s at tick_rate 0.05
+    HOLD_TICKS_MIN = 40           # ~2s floor when compressing for a large batch
+    TOTAL_CEILING_TICKS = 300     # ~15s overall safety ceiling
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        # Reading flights.FEED's own cached, already-sorted batch -- zero
+        # new I/O, the same "engine calls FEED.get()-shaped method" rule
+        # every other engine in this project follows.
+        self.batch = flights.FEED.pop_window_takeover_batch() or []
+        self.idx = 0
+        self.hold = 0
+        self.ticks = 0
+        self.launch = None
+        n = len(self.batch)
+        if n <= 1:
+            self.per_ac_ticks = None   # single aircraft: hold until dismissed/ceiling, no pointless loop
+        else:
+            self.per_ac_ticks = max(self.HOLD_TICKS_MIN,
+                                    min(self.HOLD_TICKS_PER_AC, self.TOTAL_CEILING_TICKS // n))
+
+    def has_content(self):
+        # Force-triggered only -- never polled by AmbientEngine's rotation
+        # (it is not in AmbientEngine.SEQUENCE), same contract GameDayEngine
+        # honours for the same reason: a takeover cannot take a turn.
+        return False
+
+    def _current(self):
+        if not self.batch:
+            return None
+        return self.batch[self.idx % len(self.batch)]
+
+    @staticmethod
+    def _key(ac):
+        return ac.get("hex") or ac.get("ident")
+
+    def _dismiss(self):
+        ac = self._current()
+        if ac:
+            key = self._key(ac)
+            if key:
+                flights.FEED.push_pending_detail(key)
+        self.launch = "flights"
+
+    def input(self, cmd):
+        # ANY press dismisses early to the currently-shown aircraft's
+        # detail card -- this mode has nothing else meaningful to do with
+        # left/right/rotate/drop, so every one of them means "I've seen
+        # this, show me more."
+        self._dismiss()
+
+    def auto(self):
+        pass
+
+    def tick(self):
+        if self.launch:
+            return
+        if not self.batch:
+            self._dismiss()
+            return
+        self.ticks += 1
+        self.hold += 1
+        if self.ticks >= self.TOTAL_CEILING_TICKS:
+            self._dismiss()
+            return
+        if self.per_ac_ticks is not None and self.hold >= self.per_ac_ticks:
+            self.hold = 0
+            if self.idx + 1 >= len(self.batch):
+                # Cycled through every aircraft that entered together --
+                # hand off showing the last (least-close/least-notable) one.
+                self._dismiss()
+            else:
+                self.idx += 1
+
+    def frame(self):
+        buf = blank()
+        fill(buf, self.BG)
+        ac = self._current()
+        if ac is None:
+            return bytes(buf)
+
+        kind = FlightEngine._ac_kind(ac)
+        col = FlightEngine._alt_color(ac.get("alt_ft"))
+
+        reg = ac.get("reg")
+        entry = None
+        if reg:
+            entry = next((e for e in hangar.LOG.get() if e.get("reg") == reg), None)
+        is_first = bool(entry and (entry.get("times_seen") or 1) <= 1)
+
+        cy = 34
+        if is_first:
+            draw_first_sighting_ring(buf, WIDTH // 2, cy, self.RING, phase=self.ticks * 0.08)
+        draw_hero_silhouette(buf, WIDTH // 2, cy, kind, col, scale=1.1)
+
+        draw_text_centered(buf, 3, "IN VIEW", self.ACCENT)
+        ident = reg or (ac.get("ident") or "UNKNOWN")
+        draw_text_centered(buf, 11, fit_text(ident, WIDTH - 4), (255, 255, 255))
+
+        typ = flights._type_name(ac.get("type")) or ""
+        if typ:
+            draw_text_centered(buf, 54, fit_text(typ, WIDTH - 4), FlightEngine.INK)
+
+        dist_nm = ac.get("dist_nm")
+        alt_ft = ac.get("alt_ft")
+        parts = []
+        if isinstance(dist_nm, (int, float)):
+            parts.append(f"{nm_to_mi(dist_nm):.0f}MI")
+        if isinstance(alt_ft, (int, float)):
+            parts.append(f"{alt_ft:.0f}FT")
+        if parts:
+            draw_text_centered(buf, 59, fit_text(" ".join(parts), WIDTH - 4), FlightEngine.INK_DIM)
+
+        # Position within the batch, only when there's more than one --
+        # a small, honest "there's more" signal, same spirit as
+        # draw_dots() elsewhere, kept to plain text since a full dot row
+        # would compete with the hero silhouette for attention.
+        if len(self.batch) > 1:
+            draw_text_centered(buf, 47, f"{self.idx + 1}/{len(self.batch)}", FlightEngine.INK_DIM)
         return bytes(buf)
 
 
@@ -13325,6 +13727,13 @@ ENGINES = {
     "blog": BlogEngine,
     "ambient": AmbientEngine,
     "gameday": GameDayEngine,
+    # PLANE-IN-WINDOW takeover -- same shape as "gameday": registered so
+    # arcade_server.set_mode("planewatch") can construct it with zero
+    # args, deliberately NOT added to PLAYABLE/MenuEngine.NATIVE_GAMES/
+    # AmbientEngine.SEQUENCE. It is force-triggered by arcade_server's
+    # render loop (see PlaneWatchEngine's own docstring), never chosen
+    # from a menu or a rotation.
+    "planewatch": PlaneWatchEngine,
     "menu": MenuEngine,
     "boot": BootEngine,
 }
