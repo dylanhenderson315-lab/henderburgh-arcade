@@ -1780,6 +1780,92 @@ question is "where is MY player", not "what is the score".
   on the panel — only an end-to-end pixel match against the real panel
   caught it.
 
+### Per-sport identity icons (2026-08-08)
+
+**Why**: every sport except baseball was colored text only — no visual
+identity marker, unlike the flight mode's aircraft-type icon or
+baseball's own `draw_diamond()`. Two small icons per sport were added,
+matching the flights icon's own "which of these am I looking at" role:
+one in the sport's header, one reused as a small accent inside that
+sport's `draw_celebration()` big-moment graphic.
+
+**No real team/league logos, no copied trademarked shapes — hard
+constraint, followed throughout.** Every new icon is simple original
+geometry (line segments / dot clusters via a shared `put_px`-based
+`_draw_offsets()` helper — same technique `draw_diamond()`/`draw_outs()`
+already established), describing the sport generically: a ball with a
+seam, a flag on a pin, a puck, an abstract glove blob. None of these are
+any specific real organization's mark.
+
+- `engines.py` gained `draw_icon_football`/`draw_icon_basketball`/
+  `draw_icon_hockey`/`draw_icon_soccer`/`draw_icon_golf`/`draw_icon_mma`,
+  each a handful of `put_px` calls (well under the aircraft-icon budget
+  the "ICON/PERFORMANCE REVISIT" section above exists to protect), plus
+  a `scale` param so the celebration accent can reuse the SAME shape
+  definition at 2x rather than a second design — the identical "one
+  shape language, multiple scaled contexts" pattern the aircraft sprites
+  already use.
+- `SPORT_ICONS` dispatches by `SportsEngine`'s normalized `sport` key
+  (`football`/`basketball`/`hockey`/`soccer`/`golf`/`mma`); `LEAGUE_ICON`
+  is the same set keyed by the older `sports.LEAGUE_PATHS` codes (NFL/
+  NCAAF/NBA/NCAAB/NHL/EPL) for the pinned-favorite and per-league-ticker
+  views, which predate the universal `sport` key. **MLB/baseball is
+  deliberately absent from both** — it already carries `draw_diamond()`/
+  `draw_outs()` as its real identity mark in the body, and a second
+  glyph in the header would be redundant. **Tennis is skipped** — no
+  live tennis renderer exists yet to attach an icon to (task #19, still
+  pending per the per-sport renderer table below); noted here explicitly
+  rather than silently omitted.
+- **Header wiring**: `draw_header()` gained an optional `icon` callable,
+  drawn to the left of the title with the title's own budget shrinking
+  to make room. Wired into `_frame_universal_generic()` (the fallback
+  every sport without a dedicated renderer uses, including basketball
+  and any future football/hockey renderer), the older per-league pinned/
+  ticker views, and the soccer/golf/MMA main renderers.
+- **Celebration wiring**: `_set_big_moment()` gained a `sport` param,
+  threaded through every per-sport big-moment detector call site (golf,
+  MLB home run, NFL touchdown, NHL goal, MMA finish, soccer goal) into
+  the moment dict. `_backdrop_sports()` (the shared sports celebration
+  backdrop — confirmed via `CELEBRATION_BACKDROPS`/`_backdrop_sports`
+  that it was a generic ring/ray burst with no sport-specific element
+  before this) now draws the firing sport's icon (or, for baseball,
+  `draw_diamond()` itself, empty — no live base state to show in a
+  celebration accent) as a small 2x-scale accent in the top-left corner,
+  outside the centered text plate's reach. **The burst/ray backdrop
+  itself is unchanged** — this only adds an accent on top, the same
+  "backdrop stays each mode's own visual language, only the accent/
+  detail varies" principle already documented for the flights/satellite
+  backdrops.
+
+**Verified**: `.venv/bin/python -c "import sports, engines, mma"` clean.
+`render_audit.py` and `fold_audit.py` both clean (0 modes failed, 0
+feeds not folding, 0 COLLISION — checked specifically since header icon
+placement is exactly what COLLISION exists to catch). Every icon's pixel
+data confirmed by direct inspection (not just "it ran without error") at
+both the header scale and the 2x celebration-accent scale, and through
+`draw_celebration()` for all seven sports. **Verified against real live
+ESPN data**: `sports.FEED.get_universal()` returned live golf, baseball,
+basketball, MMA, and soccer events this session; a real `SportsEngine`
+driven against that data rendered correct, distinct, non-colliding icon
+pixels for all five (basketball via `_frame_universal_generic()`, the
+other four via their dedicated main renderers) — direct pixel dumps
+confirmed each shape (e.g. basketball's circle+seam, golf's flag,
+soccer's ball+dot, MMA's mitt blob). **Live-verified on the real
+physical panel**: restarted `com.henderburgh.arcade`, switched to
+`sports` mode, and pulled a real `/api/frame` — the golf flag icon
+rendered at the expected header position with real non-background
+pixels, byte-identical to the synthetic pixel dump. Panel restored to
+`ambient` afterward.
+
+**Honestly unverified**: football (NFL/NCAAF) and hockey (NHL) icons
+were confirmed only via direct/synthetic rendering, not against a real
+live game — both leagues were off-season/no live game this session, the
+same honest gap the per-sport MAIN-renderer table below already carries
+for football/basketball. The NFL/NHL icons will render through
+`_frame_universal_generic()` (no dedicated main renderer for either yet)
+the first time either league is actually live; worth a real spot-check
+then.
+
 ### Per-sport MAIN renderers (IN PROGRESS — started 2026-08-01)
 
 **Why**: one generic renderer had to satisfy every sport at once, so every
