@@ -461,25 +461,36 @@ def _fetch_home_run_plays(league, event_id):
 
 
 def _fetch_touchdown_plays(league, event_id):
-    """NFL touchdown plays from a game's `scoringPlays` array, or [] for
-    anything else. Returns a list of {"id": str, "text": str, "awayScore":
-    int, "homeScore": int}, text already paneltext.panel_text()-folded
-    (this is the I/O boundary, same discipline as _fetch_home_run_plays()).
+    """NFL/NCAAF touchdown plays from a game's `scoringPlays` array, or []
+    for anything else. Returns a list of {"id": str, "text": str,
+    "awayScore": int, "homeScore": int}, text already
+    paneltext.panel_text()-folded (this is the I/O boundary, same
+    discipline as _fetch_home_run_plays()).
 
-    Confirmed live (event 401873271, Panthers @ Cardinals, finished game):
-    the top-level key that actually carries scoring plays for NFL is
-    `scoringPlays`, NOT `plays` (MLB's key) and NOT `keyEvents` (soccer's
-    key, empty for this NFL event) -- checked all three on the real
-    payload before picking this one. Each entry has a `type.text` like
-    "Rushing Touchdown" or "Passing Touchdown"; a touchdown is any entry
-    whose `type.text` contains the substring "Touchdown" (case-sensitive,
-    matching the real observed casing), deliberately not an exhaustive
-    enum -- ESPN has other real variants not seen in this one sample
-    (e.g. "Return Touchdown") and a substring match is generic to all of
-    them without needing a future update every time ESPN adds a new
-    touchdown flavor. Field goals, safeties, and extra points are real
-    scoring plays that must NOT fire this -- confirmed their `type.text`
-    values do not contain "Touchdown".
+    Confirmed live (event 401873271, Panthers @ Cardinals, finished NFL
+    game): the top-level key that actually carries scoring plays for NFL
+    is `scoringPlays`, NOT `plays` (MLB's key) and NOT `keyEvents`
+    (soccer's key, empty for this NFL event) -- checked all three on the
+    real payload before picking this one. Each entry has a `type.text`
+    like "Rushing Touchdown" or "Passing Touchdown"; a touchdown is any
+    entry whose `type.text` contains the substring "Touchdown"
+    (case-sensitive, matching the real observed casing), deliberately not
+    an exhaustive enum -- ESPN has other real variants not seen in this
+    one sample (e.g. "Return Touchdown") and a substring match is generic
+    to all of them without needing a future update every time ESPN adds a
+    new touchdown flavor. Field goals, safeties, and extra points are
+    real scoring plays that must NOT fire this -- confirmed their
+    `type.text` values do not contain "Touchdown".
+
+    Widened to NCAAF 2026-08-08: NCAAF is the same "football" sport
+    family on ESPN's site API, using the identical `SUMMARY_URL` template
+    and the identical `scoringPlays` shape -- confirmed live, not
+    assumed, against a real finished NCAAF game (event 401769072, Alabama
+    @ Indiana, 2026 CFP semifinal): the same top-level `scoringPlays` key,
+    the same `type.text` values ("Passing Touchdown", "Rushing
+    Touchdown", "Field Goal Good"), same substring-match logic holding
+    unchanged. Both leagues share one summary-endpoint shape, so one
+    function covers both rather than forking a near-duplicate.
 
     Same per-game summary endpoint _fetch_win_prob() already uses --
     deliberately NOT a new endpoint, so the request-volume discipline
@@ -487,7 +498,7 @@ def _fetch_touchdown_plays(league, event_id):
     engines.py) is the only thing standing between this and the
     per-league-poll volume risk CLAUDE.md already flags twice.
     """
-    if league != "NFL":
+    if league not in ("NFL", "NCAAF"):
         return []
     path = LEAGUE_PATHS[league]
     data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))

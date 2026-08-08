@@ -9620,15 +9620,22 @@ class SportsEngine(Browsable, BigMomentSource):
     BIG_MOMENT_DETECTORS["mlb_hr"] = _detect_mlb_home_run
 
     def _detect_nfl_touchdown(self):
-        """NFL touchdown detector -- same shape as _detect_mlb_home_run(),
-        different sport.
+        """NFL/NCAAF touchdown detector -- same shape as
+        _detect_mlb_home_run(), different sport. Name kept as
+        `_detect_nfl_touchdown`/`BIG_MOMENT_DETECTORS["nfl_touchdown"]`
+        for stability (grepped for other references before widening the
+        scope below -- this method and its registered key are the only
+        places "nfl_touchdown" appears in code; CLAUDE.md's own writeup
+        was updated to match), even though it now also covers NCAAF.
 
         Scoped EXACTLY like sports._fetch_win_prob(): only the pinned
         favorite's own game, and only while it is genuinely `state ==
         "in"` -- never the whole universal feed. See
         sports._fetch_touchdown_plays()'s own docstring for the payload
         facts (`scoringPlays` array, `type.text` contains "Touchdown",
-        confirmed live against event 401873271, Panthers @ Cardinals).
+        confirmed live against event 401873271, Panthers @ Cardinals, NFL,
+        and event 401769072, Alabama @ Indiana, NCAAF -- same shape both
+        leagues, checked live, not assumed).
 
         Seen-play tracking lives on THIS instance (`_seen_nfl_touchdowns`),
         same one-shot idiom as `_seen_home_runs`: the first read adopts
@@ -9638,14 +9645,15 @@ class SportsEngine(Browsable, BigMomentSource):
         """
         favorite = self.data.get("favorite")
         fg = self.data.get("favorite_game")
-        if not favorite or favorite.get("league") != "NFL":
+        league = favorite.get("league") if favorite else None
+        if not favorite or league not in ("NFL", "NCAAF"):
             return
         if not fg or fg.get("state") != "in":
             return
         event_id = fg.get("event_id")
         if not event_id:
             return
-        tds = sports._fetch_touchdown_plays("NFL", event_id)
+        tds = sports._fetch_touchdown_plays(league, event_id)
         ids = {t["id"] for t in tds}
         if self._seen_nfl_touchdowns is None:
             self._seen_nfl_touchdowns = ids       # first read: adopt, don't replay
