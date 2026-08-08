@@ -781,8 +781,54 @@ def draw_alert_frame(alert, ticks, place="", n_alerts=1, cur_alert=0):
 # scaled up to fill the whole panel, closer to GAME DAY's RESULT view
 # drama than to sports' routine scoring flash.
 # =============================================================================
-CELEBRATION_TICKS = 90     # ~4.5s at ambient's 0.05s tick rate
+CELEBRATION_TICKS = 90     # ~4.5s at ambient's 0.05s tick rate -- TIER_INTERRUPT's hold
 _CX, _CY = WIDTH // 2, WIDTH // 2 - 2   # burst center, nudged up for text room
+# Largest ring/sweep radius that keeps EVERY drawn point inside the real
+# 0..63 panel from this center -- REAL BUG, found only once render_audit's
+# instrumented put_px was actually run against draw_celebration() for the
+# first time (nothing in the normal audit sweep had ever forced a
+# celebration to fire before, so this shipped and stayed invisible): the
+# original ring radius formula reached ~37px from a centre at (32,30),
+# well past the edge in every direction. min(_CX, WIDTH-1-_CX, _CY,
+# HEIGHT-1-_CY) is the true safe bound; -2 for margin against rounding.
+_MAX_BURST_R = min(_CX, WIDTH - 1 - _CX, _CY, HEIGHT - 1 - _CY) - 2
+
+# ---- INTENSITY TIERS -------------------------------------------------------
+# THREE tiers, defined by WHAT THE DEVICE DOES, not by adjectives. Three and
+# not four on purpose: a fourth tier invites everything to settle into the
+# middle, and the whole point is that the top tier stays rare.
+#
+#   TIER_FLASH     -- does NOT interrupt ambient at all. A short banner drawn
+#                     INSIDE the owning mode's own frame, so it is only seen
+#                     if you already happen to be looking at that mode.
+#   TIER_INTERRUPT -- full-panel celebration. EXACTLY the behaviour every
+#                     sports detector already had, unchanged, so nothing
+#                     regresses.
+#   TIER_TAKEOVER  -- full-panel, longer, and the ONLY tier allowed to
+#                     pre-empt a celebration already playing. Reserved for
+#                     genuinely rare "something is wrong / go look NOW".
+#
+# TIER_FLASH is the load-bearing addition. Without it every candidate event
+# is a binary "steal the whole panel or do nothing", and that pressure is
+# exactly what inflates a top tier until it means nothing. With it, this
+# project can be GENEROUS about noticing and STINGY about interrupting.
+TIER_FLASH = 1
+TIER_INTERRUPT = 2
+TIER_TAKEOVER = 3
+
+TIER_TICKS = {
+    TIER_FLASH: 40,          # ~2s, in-mode only
+    TIER_INTERRUPT: 90,      # ~4.5s -- CELEBRATION_TICKS, unchanged
+    TIER_TAKEOVER: 120,      # ~6s
+}
+
+# Which system fired a moment. Selects the BACKDROP only -- every tier and
+# every system shares one renderer, one text hierarchy and one set of timing
+# beats, so a celebration always reads as this device speaking. See
+# CELEBRATION_BACKDROPS for why the backdrop is the thing that varies.
+SYSTEM_SPORTS = "sports"
+SYSTEM_FLIGHTS = "flights"
+SYSTEM_SATELLITE = "satellite"
 
 
 def _burst_ring(buf, t, radius, color, n=28, phase=0.0):
@@ -811,28 +857,108 @@ def _sunburst_rays(buf, t, color, n=10):
                 put_px(buf, x, y, tuple(int(c * fade) for c in color))
 
 
+def _backdrop_sports(buf, t, color):
+    """Rings + rotating rays -- stadium energy. The ORIGINAL burst,
+    unchanged, so the sports moments that already shipped look exactly
+    as they did before tiers existed."""
+    _sunburst_rays(buf, t, color)
+    # Three rings at staggered radii/phases so they don't read as one
+    # blob -- each expands and wraps, giving continuous outward motion
+    # for the whole hold rather than a single pulse that goes static.
+    for k in range(3):
+        radius = ((t * 1.6 + k * 11) % (_MAX_BURST_R - 3)) + 3
+        ring_color = tuple(int(c * (1.0 - 0.4 * (k / 3))) for c in color)
+        _burst_ring(buf, t, radius, ring_color, phase=k * 1.9)
+
+
+def _backdrop_flights(buf, t, color):
+    """A radar sweep wedge -- the flights mode's OWN heartbeat, blown up
+    to full-panel. Deliberately not the sports burst: a celebration
+    should feel like it belongs to the system that fired it while still
+    obviously being the same device speaking, and the sweep is the one
+    piece of visual language this mode already owns.
+
+    Cost-shaped on purpose: `step`/`rstep` are coarser than
+    draw_scope_sweep's so a bigger radius doesn't cost more than the
+    burst it replaces (~500 put_px, comparable to the sunburst's rays
+    plus rings)."""
+    sweep = t * 7.0                      # faster than the scope's own 3 deg/tick -- this is an event, not an idle
+    trail_deg, step, rstep = 84, 4, 2
+    for k in range(0, trail_deg, step):
+        fade = (1.0 - k / float(trail_deg)) ** 2
+        col = tuple(int(c * fade) for c in color)
+        if col == (0, 0, 0):
+            continue
+        a = math.radians(sweep - k)
+        sa, ca = math.sin(a), math.cos(a)
+        for r in range(4, _MAX_BURST_R, rstep):
+            put_px(buf, int(_CX + r * sa), int(_CY - r * ca), col)
+    # One expanding ring: reads as "contact", and keeps outward motion
+    # going even at the moment the wedge is pointing away from you.
+    _burst_ring(buf, t, ((t * 1.9) % (_MAX_BURST_R - 4)) + 4,
+                tuple(int(c * 0.75) for c in color), n=32)
+
+
+def _backdrop_satellite(buf, t, color):
+    """A rising horizon-to-horizon arc with a travelling marker -- the
+    sky-dome mode's own pass-arc language (see
+    SatelliteEngine._draw_pass_arc), scaled to full panel. Reads as
+    "something is crossing the sky right now", which is precisely the
+    only thing this system ever interrupts for."""
+    y_horizon, y_top = 50, 12
+    for x in range(3, WIDTH - 3):
+        put_px(buf, x, y_horizon, tuple(int(c * 0.25) for c in color))
+    pts = []
+    for i in range(33):
+        f = i / 32.0
+        x = int(4 + f * (WIDTH - 8))
+        y = int(y_horizon - math.sin(f * math.pi) * (y_horizon - y_top))
+        pts.append((x, y))
+    for x, y in pts:
+        put_px(buf, x, y, tuple(int(c * 0.55) for c in color))
+    # The marker sweeps the arc repeatedly for the whole hold -- one
+    # traverse would go static halfway through a 6s takeover.
+    idx = int((t * 0.9) % len(pts))
+    mx, my = pts[idx]
+    for dx, dy in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)):
+        put_px(buf, mx + dx, my + dy, color)
+    put_px(buf, mx, my, (255, 255, 255))
+
+
+# Backdrop is the ONE thing that varies per system. Everything else --
+# the impact flash, the dark plate, the kind/line1/line2 hierarchy, the
+# timing beats -- is shared, which is what keeps four systems reading as
+# one product instead of four. (Learned from the ambient "channel ident"
+# experiment that got reverted: per-mode LAYOUTS meant two things to
+# maintain per mode and the copy nobody looked at drifted. Varying only
+# the backdrop keeps a single layout and a single renderer.)
+CELEBRATION_BACKDROPS = {
+    SYSTEM_SPORTS: _backdrop_sports,
+    SYSTEM_FLIGHTS: _backdrop_flights,
+    SYSTEM_SATELLITE: _backdrop_satellite,
+}
+
+
 def draw_celebration(buf, t, moment, total=CELEBRATION_TICKS):
     """One frame of the big-moment celebration. `t` counts UP from 0 at
-    the moment it fired; `moment` is whatever pop_big_moment() returned."""
+    the moment it fired; `moment` is whatever pop_big_moment() returned.
+
+    `total` is the tier's own hold length (TIER_TICKS) -- the backdrop
+    motion is all `t`-relative and wraps, so a longer TAKEOVER hold just
+    means more revolutions rather than needing any different math."""
     fill(buf, (0, 0, 0))
     color = moment.get("color") or (255, 200, 40)
 
     # Impact frame: a near-white flash on the first two ticks, the same
     # "hit" beat a real broadcast graphic uses before settling into its
     # sustained look -- done here with plain brightness, not a copied
-    # asset.
-    if t < 2:
+    # asset. A TAKEOVER gets a longer flash: the extra beat is what makes
+    # the top tier register as different before any text resolves.
+    flash_ticks = 4 if moment.get("tier") == TIER_TAKEOVER else 2
+    if t < flash_ticks:
         fill(buf, tuple(min(255, int(c * 0.6 + 90)) for c in color))
 
-    _sunburst_rays(buf, t, color)
-
-    # Three rings at staggered radii/phases so they don't read as one
-    # blob -- each expands and wraps, giving continuous outward motion
-    # for the whole hold rather than a single pulse that goes static.
-    for k in range(3):
-        radius = ((t * 1.6 + k * 11) % 34) + 3
-        ring_color = tuple(int(c * (1.0 - 0.4 * (k / 3))) for c in color)
-        _burst_ring(buf, t, radius, ring_color, phase=k * 1.9)
+    CELEBRATION_BACKDROPS.get(moment.get("system"), _backdrop_sports)(buf, t, color)
 
     # Dark plate behind the text so it stays legible over the burst --
     # same reasoning as any header's contrast treatment elsewhere in this
@@ -864,6 +990,125 @@ def draw_celebration(buf, t, moment, total=CELEBRATION_TICKS):
         draw_text_centered(buf, y, fit_text(line2, WIDTH - 6), (170, 178, 195))
 
     return bytes(buf)
+
+
+# TIER_FLASH's in-mode banner. Deliberately NOT a small celebration: it
+# has no burst, no impact frame and no rings, because the entire point of
+# the tier is that it does not perform. It states a fact and leaves.
+FLASH_BAND_Y = 11            # band occupies y=11..21; text sits at y=13
+FLASH_BAND_H = 11
+
+
+def draw_flash_banner(buf, t, moment, total=None):
+    """A compact banner drawn INSIDE the owning mode's own frame. Never
+    reaches AmbientEngine's celebration path at all, so it can neither
+    interrupt a rotation nor compete with a real celebration.
+
+    The band FILLS its rows rather than compositing over them: the
+    caller is responsible for only invoking this on a view whose rows
+    11..21 carry no text (FlightEngine's SCOPE does not -- its only text
+    is the header above and the range legend below). That keeps this
+    structurally incapable of producing the text-on-text collision
+    render_audit exists to catch, rather than relying on it being
+    noticed later."""
+    total = total or TIER_TICKS[TIER_FLASH]
+    color = moment.get("color") or (255, 200, 40)
+    # Fade the band out over its last third so it leaves rather than
+    # vanishing -- a hard cut reads as a glitch at this size.
+    left = max(0, total - t)
+    fade = min(1.0, left / (total / 3.0))
+    for y in range(FLASH_BAND_Y, min(HEIGHT, FLASH_BAND_Y + FLASH_BAND_H)):
+        edge = y in (FLASH_BAND_Y, FLASH_BAND_Y + FLASH_BAND_H - 1)
+        row = tuple(int(c * (0.75 if edge else 0.16) * fade) for c in color)
+        for x in range(WIDTH):
+            put_px(buf, x, y, row)
+    kind = str(moment.get("kind") or "")
+    line1 = str(moment.get("line1") or "")
+    txt = f"{kind} {line1}".strip() if kind and line1 else (kind or line1)
+    draw_text_centered(buf, FLASH_BAND_Y + 3, fit_text(txt, WIDTH - 4),
+                       tuple(int(c * fade) for c in (255, 255, 255)))
+
+
+class BigMomentSource:
+    """The ONE mechanism any mode uses to report "something worth looking
+    up from what you're doing just happened".
+
+    Mixed into SportsEngine, FlightEngine and SatelliteEngine so all
+    three genuinely share this rather than each growing a parallel
+    implementation that drifts -- the same reasoning that put the fold in
+    paneltext.py instead of per-module, and the scroll control in
+    Browsable instead of per-mode.
+
+    TIER SEPARATION IS STRUCTURAL, NOT CONVENTIONAL. TIER_FLASH moments
+    go into their own slot (`_flash`) that AmbientEngine never reads, so
+    a low-tier moment CANNOT compete with a real celebration by
+    construction -- not merely by a comparison somewhere that a future
+    change could forget.
+    """
+
+    def _init_big_moments(self):
+        self._pending_big_moment = None
+        self._flash = None
+        self._flash_t = 0
+
+    # ---- the interrupt channel (TIER_INTERRUPT / TIER_TAKEOVER) --------
+    def peek_big_moment(self):
+        """The pending moment WITHOUT consuming it. AmbientEngine peeks
+        every engine, picks the highest tier, and pops only the winner --
+        so a trivial moment can no longer pre-empt a critical one purely
+        by dict iteration order, and the loser stays queued for the next
+        tick instead of being silently dropped."""
+        return self._pending_big_moment
+
+    def pop_big_moment(self):
+        m, self._pending_big_moment = self._pending_big_moment, None
+        return m
+
+    def _set_big_moment(self, kind, line1, line2="", color=None,
+                        tier=TIER_INTERRUPT, system=SYSTEM_SPORTS):
+        """`kind`/`line1`/`line2` must already be paneltext.panel_text()-
+        folded by the caller, same as every other externally-sourced
+        string these engines draw.
+
+        A TIER_FLASH moment is routed to the in-mode slot instead of the
+        interrupt queue -- see the class docstring on why that split is
+        structural.
+
+        OVERWRITE IS TIER-GATED. The original one-slot "last write wins"
+        was correct when only sports could fire (two sports moments in
+        the same tick are genuinely interchangeable by recency). Across
+        four systems it is not: a routine TIER_INTERRUPT arriving one
+        tick after a TIER_TAKEOVER would silently discard the more
+        important event. A lesser moment is now dropped instead of
+        clobbering a bigger one still waiting to be shown.
+        """
+        moment = {"kind": kind, "line1": line1, "line2": line2,
+                  "color": color or (255, 200, 40), "tier": tier, "system": system}
+        if tier == TIER_FLASH:
+            self._flash = moment
+            self._flash_t = TIER_TICKS[TIER_FLASH]
+            return
+        cur = self._pending_big_moment
+        if cur and cur.get("tier", TIER_INTERRUPT) > tier:
+            return
+        self._pending_big_moment = moment
+
+    # ---- the in-mode channel (TIER_FLASH) ------------------------------
+    def _tick_flash(self):
+        """Call once per tick() from the owning engine."""
+        if self._flash_t > 0:
+            self._flash_t -= 1
+            if self._flash_t <= 0:
+                self._flash = None
+
+    def _draw_flash(self, buf):
+        """Call at the END of a frame whose rows 11..21 carry no text --
+        see draw_flash_banner()'s own note. Returns True if it drew."""
+        if self._flash_t <= 0 or not self._flash:
+            return False
+        total = TIER_TICKS[TIER_FLASH]
+        draw_flash_banner(buf, total - self._flash_t, self._flash, total)
+        return True
 
 
 # =============================================================================
@@ -4951,7 +5196,7 @@ class TickerEngine(Browsable):
         return bytes(buf)
 
 
-class SatelliteEngine(Browsable):
+class SatelliteEngine(Browsable, BigMomentSource):
     """Visible satellite passes -- the ISS and every other bright object,
     in ONE unified system.
 
@@ -5032,6 +5277,14 @@ class SatelliteEngine(Browsable):
         self.sweep = 0.0
         self._overhead_ids = set()   # (norad_id, rise) seen overhead last tick
         self._init_scroll()
+        self._init_big_moments()
+        # Seen-pass cursor for _detect_go_outside_pass() -- same one-shot
+        # adopt-then-diff idiom as every other detector in this project
+        # (GameDayEngine._seen_done, SportsEngine's five detectors): the
+        # first read adopts whatever's already overhead/about to start
+        # without firing, so a pass already in progress when this mode
+        # opens can't replay itself as a fresh moment.
+        self._seen_go_outside = None
 
     # ---- input -------------------------------------------------------
     def has_content(self):
@@ -5135,11 +5388,13 @@ class SatelliteEngine(Browsable):
         # mode is supposed to be showing the best of what's happening.
         now_overhead = set()
         best_new = None            # (rank, peak_el, index) among newly-overhead
+        newly_overhead_passes = []
         for i, p in enumerate(ps):
             key = (p.get("norad_id"), p["rise"])
             if self._is_overhead(p):
                 now_overhead.add(key)
                 if key not in self._overhead_ids:
+                    newly_overhead_passes.append(p)
                     rank = skypass.quality_rank(p)[1]
                     cand = (rank, p["peak_el"], i)
                     if best_new is None or cand[:2] > best_new[:2]:
@@ -5147,6 +5402,7 @@ class SatelliteEngine(Browsable):
         if best_new is not None:
             self.cur = best_new[2]
         self._overhead_ids = now_overhead
+        self._detect_go_outside_pass(newly_overhead_passes)
 
         # Sweep is the mode's heartbeat -- advanced every tick regardless of
         # view or pause, same as the flight scope. One float add.
@@ -5176,6 +5432,49 @@ class SatelliteEngine(Browsable):
                         self.view = self.VIEW_SCOPE
 
         self.score = len(ps)
+
+    # A pass this close to the zenith is genuinely rare -- ELEV_EXCELLENT
+    # (skypass.py, 60 deg) already gates TIER_INTERRUPT below; this sits
+    # well above it on purpose, reserved for the "directly overhead"
+    # moment, not merely "a good pass".
+    GO_OUTSIDE_TAKEOVER_EL = 80.0
+
+    def _detect_go_outside_pass(self, newly_overhead_passes):
+        """TIER_TAKEOVER for a >=80 deg peak-elevation pass beginning
+        right now (near-zenith, directly overhead); TIER_INTERRUPT for
+        any other GO-OUTSIDE-grade pass beginning right now
+        (skypass.quality_rank rank 3, the same BRIGHT tier the UPCOMING
+        chip already uses). No TIER_FLASH here, deliberately: a lower-
+        grade pass beginning is already fully served by the existing
+        chip/arc treatment in-mode, and flashing on top of a screen
+        that's ALREADY showing the pass would be redundant, not useful --
+        unlike flights, where the scope does not otherwise call out a
+        new aircraft type at all.
+
+        The ISS is NOT special-cased here, deliberately -- unifying it
+        into one ordinary catalogue entry was the entire point of the
+        2026-08-01 satellite rework, and re-privileging it in the
+        celebration path would undo that. It fires on its own real
+        merits, same as every other object.
+
+        One-shot via self._seen_go_outside: None on the very first tick
+        adopts silently (a pass already overhead when the mode starts
+        must not fire), same idiom as every other detector here."""
+        if self._seen_go_outside is None:
+            self._seen_go_outside = True
+            return
+        if not newly_overhead_passes:
+            return
+        best = max(newly_overhead_passes, key=lambda p: p.get("peak_el") or 0)
+        el = best.get("peak_el") or 0
+        name = best.get("name") or "OBJECT"
+        color = self.ISS if best.get("is_iss") else self.ACCENT
+        if el >= self.GO_OUTSIDE_TAKEOVER_EL:
+            self._set_big_moment("OVERHEAD NOW", name, f"{el:.0f} DEG PEAK",
+                                 color, tier=TIER_TAKEOVER, system=SYSTEM_SATELLITE)
+        elif skypass.quality_rank(best)[1] == 3:
+            self._set_big_moment("GO OUTSIDE", name, f"{el:.0f} DEG PEAK",
+                                 color, tier=TIER_INTERRUPT, system=SYSTEM_SATELLITE)
 
     def ambient_weight(self):
         """Weighted by the most urgent thing this mode currently has to
@@ -5450,7 +5749,7 @@ class SatelliteEngine(Browsable):
         return self._frame_upcoming(p)
 
 
-class FlightEngine(Browsable):
+class FlightEngine(Browsable, BigMomentSource):
     """Live ADS-B flight tracker.
 
     Same discipline as Ticker/Satellite: no I/O in this class. Reads
@@ -5651,6 +5950,19 @@ class FlightEngine(Browsable):
         # its own select-to-expand.
         self._auto_detail = False
         self._init_scroll()
+        self._init_big_moments()
+        # Seen-squawk/seen-airship cursors -- same one-shot adopt-then-
+        # diff idiom as every other detector in this project. Separate
+        # sets: an emergency squawk and an airship are unrelated events
+        # and must not share a baseline.
+        self._seen_squawks = None
+        self._seen_airships = None
+        # First-ever-type detector (THE HANGAR-powered TIER_FLASH) --
+        # None until the first read adopts whatever types are already in
+        # the collection, so a device that's been running a while
+        # doesn't flash on every type already logged the moment this
+        # code ships.
+        self._seen_hangar_types = None
 
     # ---- input -----------------------------------------------------------
     def has_content(self):
@@ -5960,7 +6272,96 @@ class FlightEngine(Browsable):
                 if new_idx == 0:
                     self.view = self.VIEW_SCOPE
                     self._auto_detail = False
+        self._tick_flash()
+        self._detect_big_moments(ac_list)
         self.score = n
+
+    # ---- BIG MOMENTS -- see BigMomentSource/CELEBRATION_BACKDROPS above ---
+    def _detect_big_moments(self, ac_list):
+        """Called once per tick with the CURRENT real aircraft list.
+        Three detectors, deliberately not five or six -- see each one's
+        own docstring for why it's included and, more importantly, why
+        the many things NOT here (a heavy, a low-and-transitioning
+        aircraft, a routine helicopter) were deliberately excluded: they
+        already have a badge and a scope color, and promoting common
+        real events to an interrupt is exactly the failure mode that
+        makes a top tier stop meaning anything."""
+        self._detect_emergency_squawk(ac_list)
+        self._detect_airship(ac_list)
+        self._detect_new_hangar_type()
+
+    def _detect_emergency_squawk(self, ac_list):
+        """TIER_TAKEOVER. Keyed directly off flights._notable()'s own
+        real classification (rank 5 = HIJACK/NORADIO/MAYDAY from a real
+        emergency squawk code) rather than re-deriving squawk parsing --
+        one real source of truth, not two. The rarest, least ambiguous
+        "go look now" this mode can produce; genuinely cannot be
+        fabricated to test (see this feature's own design note --
+        flagged honestly, not worked around with a synthetic trigger).
+
+        One-shot per real ident PER SIGHTING: a squawk can legitimately
+        be re-set on a later refresh after clearing, so this tracks
+        which idents are CURRENTLY squawking, not an ever-growing seen
+        set -- an aircraft that squawks 7700 twice in one session on two
+        separate real emergencies should fire twice, not once."""
+        current = {ac["ident"] for ac in ac_list
+                  if ac.get("notable") and ac["notable"][1] == 5 and ac.get("ident")}
+        if self._seen_squawks is None:
+            self._seen_squawks = current
+            return
+        new = current - self._seen_squawks
+        self._seen_squawks = current
+        if new:
+            ac = next(a for a in ac_list if a.get("ident") in new)
+            tag = ac["notable"][0]
+            self._set_big_moment(tag, ac["ident"],
+                                 flights._type_name(ac.get("type")) or "",
+                                 (255, 70, 70), tier=TIER_TAKEOVER, system=SYSTEM_FLIGHTS)
+
+    def _detect_airship(self, ac_list):
+        """TIER_INTERRUPT. Category B2 (lighter-than-air) -- ONE real
+        instance in this project's own 213-aircraft sample. Rare enough
+        to interrupt without becoming routine; common categories that
+        already got their own real-sample counts checked (6 rotorcraft,
+        11 heavies out of 213) are deliberately NOT promoted here for
+        exactly that reason -- they are common enough that an interrupt
+        would stop being special within days."""
+        current = {ac["ident"] for ac in ac_list
+                  if ac.get("notable") and ac["notable"][0] == "AIRSHIP" and ac.get("ident")}
+        if self._seen_airships is None:
+            self._seen_airships = current
+            return
+        new = current - self._seen_airships
+        self._seen_airships = current
+        if new:
+            ac = next(a for a in ac_list if a.get("ident") in new)
+            self._set_big_moment("AIRSHIP", ac["ident"],
+                                 flights._type_name(ac.get("type")) or "",
+                                 (200, 170, 255), tier=TIER_INTERRUPT, system=SYSTEM_FLIGHTS)
+
+    def _detect_new_hangar_type(self):
+        """TIER_FLASH -- THE HANGAR-powered. Deliberately keyed on
+        aircraft TYPE, not registration: a new REGISTRATION is common (11
+        distinct real aircraft were logged in this feature's first few
+        minutes of real operation) and would make this fire constantly
+        during exactly the period a new device is still building its
+        collection. A new TYPE CODE is rare and self-limiting -- it
+        naturally approaches zero as the collection matures, which is
+        what keeps a flash a flash instead of becoming background noise.
+
+        Reads self.hangar_entries, already refreshed this tick -- no new
+        I/O, pure composition of data this engine already has."""
+        types = {e["type"] for e in self.hangar_entries if e.get("type")}
+        if self._seen_hangar_types is None:
+            self._seen_hangar_types = types
+            return
+        new = types - self._seen_hangar_types
+        self._seen_hangar_types = types
+        if new:
+            t = sorted(new)[0]   # deterministic if more than one type is new in the same tick
+            name = flights._type_name(t) or t
+            self._set_big_moment("NEW TYPE", name, "",
+                                 self.HANGAR, tier=TIER_FLASH, system=SYSTEM_FLIGHTS)
 
     # ---- radar scope (GROUND projection: bearing + ground distance) -------
     def _scope_r_frac(self, dist_nm):
@@ -6088,6 +6489,14 @@ class FlightEngine(Browsable):
         # bigger scope its full bottom margin.
         mi_txt = "/".join(str(round(nm_to_mi(nm))) for nm in self.SCOPE_RING_NM) + "MI"
         draw_text_centered(buf, 59, fit_text(mi_txt, WIDTH - 4), (70, 76, 92))
+        # TIER_FLASH -- drawn LAST, over whatever scope content sits in
+        # its band. That's the intended tradeoff for a cheap, in-mode-
+        # only notice (see draw_flash_banner()'s own docstring on why
+        # SCOPE specifically is safe for this: its only TEXT lives in the
+        # header above and this legend row below, so a banner overwriting
+        # rows 11..21 can only ever cover graphics, never collide with
+        # another text draw).
+        self._draw_flash(buf)
         return bytes(buf)
 
     # ---- render --------------------------------------------------------
@@ -6554,7 +6963,7 @@ class FlightEngine(Browsable):
         return bytes(buf)
 
 
-class SportsEngine(Browsable):
+class SportsEngine(Browsable, BigMomentSource):
     """Live sports scoreboard (NFL/NBA/MLB/NHL via ESPN).
 
     Same discipline as Ticker/Satellite/Flights: no I/O in this class at
@@ -6677,7 +7086,7 @@ class SportsEngine(Browsable):
         # SPORT_RENDERERS/SPORT_DETAIL_RENDERERS -- a sport opts in, an
         # unclaimed sport contributes nothing and that is correct, not a
         # gap to fill generically).
-        self._pending_big_moment = None
+        self._init_big_moments()
         # Seen-play cursor for _detect_mlb_home_run() -- same one-shot
         # idiom as GameDayEngine._seen_done. None until the first read
         # adopts a baseline, so a game already in progress can't replay
@@ -6703,25 +7112,12 @@ class SportsEngine(Browsable):
         happening, not merely when the configured leagues are off-season."""
         return bool(self.universal or self.data.get("games"))
 
-    def pop_big_moment(self):
-        """Consumed by AmbientEngine's celebration interrupt -- see
-        draw_celebration()'s module docstring in the shared section above
-        for the full contract. One-slot queue: a second moment arriving
-        before this is popped simply overwrites the first rather than
-        queuing, since by the time anyone reads it only the most recent
-        real event matters."""
-        m, self._pending_big_moment = self._pending_big_moment, None
-        return m
-
-    def _set_big_moment(self, kind, line1, line2="", color=None):
-        """Called by per-sport detection in tick() -- the one write path
-        into the queue pop_big_moment() reads. `kind`/`line1`/`line2` must
-        already be paneltext.panel_text()-folded by the caller, same as
-        every other externally-sourced string this engine draws."""
-        self._pending_big_moment = {
-            "kind": kind, "line1": line1, "line2": line2,
-            "color": color or (255, 200, 40),
-        }
+    # pop_big_moment()/_set_big_moment() now come from BigMomentSource --
+    # see that class for the shared contract every system uses. Sports
+    # moments are always TIER_INTERRUPT (unchanged behaviour) and always
+    # SYSTEM_SPORTS; every _set_big_moment call below states both
+    # explicitly rather than relying on a default, so a future reader
+    # never has to go check what the default is.
 
     PANEL_TEAM = "team"
     PANEL_GOLF = "golf"
@@ -7774,7 +8170,8 @@ class SportsEngine(Browsable):
         if not play:
             return
         self._set_big_moment("WNBA BIG PLAY", play.get("clock") or "",
-                              play.get("text") or "", color=(255, 140, 0))
+                              play.get("text") or "", color=(255, 140, 0),
+                              tier=TIER_INTERRUPT, system=SYSTEM_SPORTS)
 
     BIG_MOMENT_DETECTORS = {
         "wnba_big_play": _detect_wnba_big_play,
@@ -7824,7 +8221,8 @@ class SportsEngine(Browsable):
         # choice draw_celebration()'s own docstring calls out as the
         # fallback for a sport without one (golf, MMA).
         color = (255, 200, 40)
-        self._set_big_moment(move, name, f"{move} {par}", color)
+        self._set_big_moment(move, name, f"{move} {par}", color,
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS)
 
     BIG_MOMENT_DETECTORS["golf_move"] = _detect_golf_big_moment
 
@@ -7878,7 +8276,8 @@ class SportsEngine(Browsable):
         home, away = fg["home"], fg["away"]
         line1 = f"{away['abbr']} {away['score']}, {home['abbr']} {home['score']}"
         color = home.get("color") or away.get("color") or (255, 200, 40)
-        self._set_big_moment("HOME RUN", line1, newest["text"], color)
+        self._set_big_moment("HOME RUN", line1, newest["text"], color,
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS)
 
     BIG_MOMENT_DETECTORS["mlb_hr"] = _detect_mlb_home_run
 
@@ -7936,7 +8335,8 @@ class SportsEngine(Browsable):
         kind = method or "RESULT"
         line2 = ev.get("class_label") or ""
         color = (winner or {}).get("color") or (255, 200, 40)
-        self._set_big_moment(kind, name, line2, color)
+        self._set_big_moment(kind, name, line2, color,
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS)
 
     BIG_MOMENT_DETECTORS["mma_finish"] = _detect_mma_finish
 
@@ -8248,7 +8648,8 @@ class SportsEngine(Browsable):
         color = fav_team.get("color") or (255, 200, 40)   # real team color, else neutral gold
 
         line1 = f"{away.get('abbr') or ''} {away.get('score')} - {home.get('score')} {home.get('abbr') or ''}"
-        self._set_big_moment("GOAL", line1, newest["text"] or newest["type"], color)
+        self._set_big_moment("GOAL", line1, newest["text"] or newest["type"], color,
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS)
 
     BIG_MOMENT_DETECTORS["soccer_goal"] = _detect_soccer_goal
 
@@ -9204,20 +9605,42 @@ class AmbientEngine(Browsable):
         # arcade_server AFTER this engine's frame() runs, so an alert
         # covers a celebration exactly as it covers anything else).
         #
-        # Priority within ambient: an active celebration is NOT interrupted
-        # by a second moment firing mid-hold -- the queued one is simply
-        # dropped (pop_big_moment() already consumed it). A missed
-        # celebration is a fair trade for never stacking or truncating one
-        # that's already playing.
-        if self._celebration_t <= 0:
-            for e in self.engines.values():
-                pop = getattr(e, "pop_big_moment", None)
-                moment = pop() if callable(pop) else None
-                if moment:
-                    self._celebration = moment
-                    self._celebration_t = CELEBRATION_TICKS
-                    break
-        else:
+        # HIGHEST TIER WINS, not first-found. Four systems can now each
+        # have a moment pending in the same tick, and dict iteration
+        # order is not a priority order -- PEEK every engine (without
+        # consuming), keep the highest tier seen, and only POP the
+        # winner. The loser(s) stay queued in their own engine for the
+        # next tick rather than being silently discarded, since
+        # _set_big_moment()'s own tier-gated overwrite already protects
+        # each engine's single slot from a lesser moment clobbering it.
+        #
+        # A TIER_TAKEOVER may pre-empt an in-flight celebration; nothing
+        # else may (TIER_INTERRUPT-vs-TIER_INTERRUPT keeps the original
+        # never-interrupt rule, and TIER_TAKEOVER-vs-TIER_TAKEOVER keeps
+        # it too -- the FIRST takeover to start gets its full hold).
+        best_engine, best_moment = None, None
+        for e in self.engines.values():
+            peek = getattr(e, "peek_big_moment", None)
+            m = peek() if callable(peek) else None
+            if m and (best_moment is None
+                     or m.get("tier", TIER_INTERRUPT) > best_moment.get("tier", TIER_INTERRUPT)):
+                best_engine, best_moment = e, m
+
+        started_or_preempted = False
+        if best_moment is not None:
+            tier = best_moment.get("tier", TIER_INTERRUPT)
+            playing = self._celebration_t > 0 and self._celebration
+            cur_tier = playing.get("tier", TIER_INTERRUPT) if playing else None
+            may_start = not playing
+            may_preempt = (cur_tier is not None and tier == TIER_TAKEOVER
+                          and cur_tier < TIER_TAKEOVER)
+            if may_start or may_preempt:
+                best_engine.pop_big_moment()
+                self._celebration = best_moment
+                self._celebration_t = TIER_TICKS.get(tier, CELEBRATION_TICKS)
+                started_or_preempted = True
+
+        if not started_or_preempted and self._celebration_t > 0:
             self._celebration_t -= 1
             if self._celebration_t <= 0:
                 self._celebration = None
@@ -9247,8 +9670,9 @@ class AmbientEngine(Browsable):
     # ---- render --------------------------------------------------------
     def frame(self):
         if self._celebration_t > 0:
-            elapsed = CELEBRATION_TICKS - self._celebration_t
-            return draw_celebration(blank(), elapsed, self._celebration)
+            total = TIER_TICKS.get(self._celebration.get("tier", TIER_INTERRUPT), CELEBRATION_TICKS)
+            elapsed = total - self._celebration_t
+            return draw_celebration(blank(), elapsed, self._celebration, total=total)
 
         avail = self._available()
         if not avail:
