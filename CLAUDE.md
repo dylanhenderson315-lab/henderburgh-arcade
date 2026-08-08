@@ -995,6 +995,120 @@ appends them to the menu automatically.
     checkout, which this worktree cannot deploy into or restart; the
     real-panel pixel-dump check (`/api/frame`) is the next step once
     this merges to main.
+
+  **WINDOW FILTER, ROUND 2 (2026-08-08)** — perfected flights' window
+  logic and shipped the equivalent for satellites.
+
+  - **Real-panel ring verification (the gap noted above)**: restarted
+    `com.henderburgh.arcade` and pulled `/api/frame` in `flights` mode.
+    Result: honestly nothing to verify — `flights.FEED.get()` returned 0
+    real aircraft in range for the several refresh cycles checked (both
+    locally via `.venv` and against the live service), so the frame is a
+    black scope with no ring to see, not a failure. `render_audit.py
+    flights --strict` stays clean, and a synthetic single-aircraft
+    smoke test (`in_window: True`, not a real payload) confirmed
+    `draw_window_ring()` still fires through the render path after the
+    `satellite.py` move below. The real-panel confirmation against an
+    actual in-window aircraft remains the next honest step, same as it
+    was before this pass — just no aircraft happened to be around this
+    session either.
+  - **Edge flicker**: checked for real, not assumed. No aircraft were in
+    range to sample real `dir_deg` jitter against the 256°/336° boundary
+    this session, so no hysteresis was added — the standing rule here is
+    "only add this complexity if you can show it's solving a real
+    problem," and there was no real data to show it with. Revisit next
+    time a real aircraft sits near the edge for a few refreshes.
+  - **Legend for the ring**: checked for a clean way to add context and
+    found none that doesn't repeat the N/S/E/W experiment already tried
+    and reverted on this exact scope (see below, same session it was
+    reverted) for reading as clunky instrument-panel text. Left as a
+    learned visual convention instead — the same category as the home
+    diamond and the airport runway glyph, neither of which carry
+    on-screen labels either. Deliberate, not an oversight.
+  - **`_notable()` boost interaction**: re-verified the reasoning still
+    holds (rank tiers spaced ≥1 apart, `WINDOW_BOOST = 0.5` can only
+    break ties within a tier) — could not re-run against a fresh live
+    snapshot with real window aircraft in it this session (none were in
+    range), so this re-confirms the math, not new live evidence beyond
+    the original two-snapshot verification already on record above.
+  - **Config ownership moved to `satellite.py`**: `in_window()`,
+    `load_window()`, and `save_window()` used to live in `flights.py`
+    even though they operate on `satellite.CONFIG_PATH` — fine when only
+    flights needed them, wrong once satellites did too. `satellite.py`
+    cannot import `flights.py` (flights already imports satellite; the
+    reverse would be circular — confirmed by reading both files' imports
+    before moving anything), and `satellite.py` already owns
+    `location_config.json`, so the three functions moved there verbatim
+    (docstrings updated to point at the new home) and `flights.py` now
+    aliases `load_window = satellite.load_window` etc. at its old call
+    site — a one-line-per-name change, not a new dependency. Grepped the
+    whole repo afterward for `flights.load_window`/`flights.save_window`/
+    `flights.in_window`; the only hit was a stale comment in `engines.py`,
+    fixed. No control-panel API endpoint touches these (checked
+    `arcade_server.py`), so nothing else needed updating.
+  - **Satellite window feature, same cone, same config, same visual
+    language**: `skypass.py` now imports `satellite.py` (no
+    circularity — `satellite.py` imports nothing of `skypass.py`'s) and
+    `SkyPassFeed.get()` stamps an `in_window` boolean onto every pass
+    (using `peak_az` — the moment the pass is most visible and the
+    representative bearing for the whole pass, not `rise_az`, since a
+    pass can rise somewhere and sweep well away from the window by peak)
+    and onto every `sky_now` object (using its live current `az`). Same
+    bearing convention as flights' `dir_deg` (0–360° from north),
+    confirmed by reading `skypass.py`'s `predict()`/`sky_now()` before
+    reusing `in_window()` unmodified. This is feed-layer I/O, same cost
+    class as flights' own per-refresh `load_window()` read — zero I/O
+    added to `SatelliteEngine`.
+    - **OVERHEAD-NOW (the sky dome)**: the centerpiece, per the ask —
+      `draw_window_ring()` (the SAME violet, `SatelliteEngine.WINDOW_RING`
+      set identical to `FlightEngine.WINDOW_RING` on purpose — one
+      window, one visual convention, not a second color to learn) is
+      drawn under any dome object whose live `az` is in the window cone,
+      the exact "is this visible out my window right now" answer.
+    - **UPCOMING (the pass list)**: left chronological (soonest-first),
+      not reordered — `skypass.predict()`'s own docstring says "soonest
+      first," and jumping a window pass ahead of a sooner non-window one
+      on a COUNTDOWN screen would read as confusing in a way flights'
+      distance ranking doesn't. Instead of a new tier or new text next to
+      GO OUTSIDE/GOOD PASS/VISIBLE, an in-window pass gets the same
+      violet ring drawn as a small badge beside the existing chip — reuse,
+      not a new visual system.
+    - **`ambient_weight()`**: an in-window pass adds a small *additive*
+      0.25 nudge to the existing quality-tier weight, mirroring
+      `WINDOW_BOOST`'s "never cross a tier boundary" shape — 0.25 sits
+      well under the smallest real gap between tiers here (0.5, between
+      GOOD's 1.5 and BRIGHT's 2.5).
+    - **Big-moment tiers untouched, deliberately**: `TIER_INTERRUPT`/
+      `TIER_TAKEOVER`'s existing GO-OUTSIDE/near-zenith detector
+      (`_detect_go_outside_pass`) was left alone. The owner asked for the
+      window feature, not an expansion of the celebration system, and no
+      clean small addition presented itself that wasn't scope creep.
+  - **Verified**: `.venv/bin/python -c "import flights, satellite,
+    engines"` clean. `render_audit.py flights`, `render_audit.py
+    satellite`, `render_audit.py satellite --strict` all clean.
+    `fold_audit.py` clean (0 feeds not folding). `satellite.in_window()`
+    re-checked against the real measured window (256°–336°) with
+    boundary values (256.0→True, 336.1→False, etc.) confirming the moved
+    copy behaves identically to the pre-move version already verified
+    against real ADS-B data for flights. **Real live satellite data
+    (TLE-based passes/`sky_now`) could not be pulled this session** —
+    `celestrak.org` (the TLE source `skypass.fetch_tles()` uses) was
+    unreachable from this machine for the whole session, confirmed a real
+    outage/network issue and not a sandbox artifact (same timeout with
+    sandboxing both on and off, while `api.adsb.lol` and
+    `api.wheretheiss.at` both responded normally in the same window). In
+    its place, a **synthetic** wiring smoke test (explicitly not a real
+    observed pass, built only to prove the render path doesn't crash and
+    draws the ring) confirmed both the UPCOMING chip badge and the dome
+    ring draw correctly when `in_window: True` is present on a pass/
+    `sky_now` dict. **Honestly unverified**: the satellite window feature
+    against a real live pass or real live dome object, and the flights
+    ring against a real live in-window aircraft on the actual panel —
+    both blocked by real absence of qualifying live data this session
+    (no aircraft in range, no TLE fetch reachable), not by a code
+    problem found. Next session: re-check both once celestrak is
+    reachable and/or a real aircraft is in the window.
+
 - **sports** (`sports.py`/`SportsEngine`, 2026-07-30, expanded same day) —
   NFL/NBA/MLB/NHL/EPL/NCAAF/NCAAB scores via ESPN's free undocumented site
   API. Pinned favorite team (full-screen score, scoring-flash animation,

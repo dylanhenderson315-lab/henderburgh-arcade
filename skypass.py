@@ -61,6 +61,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 import paneltext
+import satellite
 
 try:
     from sgp4.api import Satrec, jday
@@ -410,6 +411,7 @@ class SkyPassFeed:
                     self._loc = (lat, lon)
                     self._passes, self._passes_at = [], 0.0
             passes = [dict(p) for p in self._passes]
+            sky_now = [dict(o) for o in self._sky_now]
             out = {
                 "passes": passes,
                 "next": passes[0] if passes else None,
@@ -420,9 +422,31 @@ class SkyPassFeed:
                 "available": HAVE_SGP4,
                 # Everything above the horizon right now, for the sky-dome
                 # scope. Already computed on the background thread.
-                "sky_now": [dict(o) for o in self._sky_now],
+                "sky_now": sky_now,
                 "sky_now_age": (now - self._sky_now_at) if self._sky_now_at else None,
             }
+        # WINDOW FILTER (2026-08-08) -- the satellite equivalent of
+        # flights.py's window ring/boost, see satellite.in_window()'s own
+        # notes. A cheap local config read, same cost class as every other
+        # per-call config check in this project (flights._fetch_positions'
+        # own load_window() call, satellite's CONFIG_CHECK reload) -- this
+        # is the feed layer, not the engine, so SatelliteEngine still does
+        # zero I/O of its own.
+        #
+        # UPCOMING (passes): flagged by PEAK azimuth, not rise azimuth --
+        # a pass rises somewhere and can sweep well away from the window by
+        # the time it peaks, and peak is the moment it's most visible, i.e.
+        # the one bearing that actually represents "was this pass visible
+        # out the window". OVERHEAD-NOW (sky_now): flagged by the object's
+        # CURRENT azimuth, the literal live answer to "is it out my window
+        # right now".
+        win = satellite.load_window()
+        for p in out["passes"]:
+            p["in_window"] = satellite.in_window(
+                p.get("peak_az"), win["center_deg"], win["fov_deg"])
+        for o in out["sky_now"]:
+            o["in_window"] = satellite.in_window(
+                o.get("az"), win["center_deg"], win["fov_deg"])
         if HAVE_SGP4:
             self._ensure_thread()
         return out
