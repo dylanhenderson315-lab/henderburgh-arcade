@@ -1109,6 +1109,144 @@ appends them to the menu automatically.
     problem found. Next session: re-check both once celestrak is
     reachable and/or a real aircraft is in the window.
 
+  **FLOWN-PATH TRAIL + ROUTE CONTEXT (2026-08-08)** — three owner-requested
+  features, built the same session real DEAD-RECKONING landed (see
+  `FlightEngine._update_dead_reckoning()`, already in the working tree
+  when this work started, uncommitted from a concurrent session). Built
+  to REUSE that feature's exact identity keying and local-plane
+  representation rather than invent a second one — confirmed by reading
+  its docstring first, not assumed.
+
+  1. **Real flown-path trail** — "click select on the plane, show the
+     path it's flown." `FlightEngine._trail` maps `_sel_key()` (the same
+     hex/ident identity dead reckoning and selection already use) to a
+     list of REAL observed `(x_nm, y_nm)` local-plane positions —
+     literally the same flat-plane conversion `_update_dead_reckoning()`
+     already does (`x = dist_nm*sin(dir_deg)`, `y = dist_nm*cos(dir_deg)`),
+     reused verbatim rather than re-derived.
+     - **Sampled ONLY on a real poll refresh** (`_update_trail(ac_list,
+       new_poll)`, called right after `_update_dead_reckoning()` in
+       `tick()`, same `_new_poll` signal), never per render tick — a
+       trail built from the dead-reckoned/extrapolated icon position
+       would compound estimation error into a feature whose entire point
+       is showing where the aircraft REALLY was. Verified directly: three
+       ticks (one real poll + two non-poll ticks) produced exactly one
+       trail point, not three.
+     - **Bounded**: `TRAIL_MAX_POINTS = 20` (~5 minutes of real polls at
+       `flights.POSITION_REFRESH`, 15s), oldest point dropped past the
+       cap; rebuilt to only currently-tracked `_sel_key()`s every call, so
+       an aircraft leaving range or going unseen drops its trail — same
+       discipline as `self._dr` and THE HANGAR. Verified: 30 simulated
+       real-shaped polls capped at exactly 20 points; a second aircraft's
+       trail stayed separate; an empty aircraft list evicted every key.
+     - **Drawn only for the CURRENTLY SELECTED aircraft**, never all 8 —
+       this scope already had one real lag complaint fixed earlier this
+       session from over-drawing (6→2 strokes per icon); trailing every
+       aircraft every frame would reopen it. Rendered as short segments
+       (`draw_line`) in a dimmed (÷3) version of the aircraft's own real
+       altitude-band color, drawn BEFORE the aircraft icon loop so the
+       live icon always paints over the trail's end, never the reverse.
+       Selecting a different aircraft shows that aircraft's own
+       (possibly empty) trail automatically — no separate reset needed,
+       it falls out of keying by `_sel_key()`.
+
+  2. **Departing / Arriving / Transit** — the owner's own framing: "myrtle
+     to wherever means departing, wherever to myrtle means arriving."
+     `FlightEngine._route_status(route, airport)` compares the real
+     resolved `route["origin"]`/`route["dest"]` (adsbdb, IATA preferred/
+     ICAO fallback) against `flights.load_airport()`'s configured home
+     code. No route or no configured airport → `None`, never guessed.
+     Verified against the real configured home (MYR): a MYR→MHT-shaped
+     route → `"DEPARTING"`, MHT→MYR → `"ARRIVING"`, an unrelated
+     MDW→MHT route → `None` (TRANSIT, the common case — most tracked
+     traffic is near home, not to/from it, same "no badge for the
+     mundane case" rule flight-phase CRUISE already follows).
+     - **Placement: the header's existing `right_tag` slot, not a new
+       row.** This detail card's vertical budget is already fully
+       audited (see the y-cursor comment above this block in the code);
+       DEPARTING/ARRIVING takes priority over the notable tag/position
+       counter that slot already shows, since "is this plane leaving or
+       arriving" is the single most useful real fact when it applies.
+       The common TRANSIT case falls through unchanged.
+     - **Honest limitation, not fabricated past**: `load_airport()`
+       stores only ONE code form (whatever the owner configured — MYR,
+       IATA), not both IATA and ICAO. adsbdb's route field prefers IATA
+       too, so this matches in the common case, but a route that only
+       resolved an ICAO code (`"KMYR"`) against an IATA-configured home
+       would false-negative to TRANSIT rather than DEPARTING/ARRIVING —
+       a real format-mismatch gap, left honest rather than guessed past
+       with an unverified code-conversion table.
+
+  3. **Real country + a real route-bearing ray** — `flights._fetch_route()`
+     now keeps `origin_country`/`dest_country` (adsbdb's real
+     `country_name`, folded through `paneltext.panel_text()` like every
+     other externally-sourced string here) and `origin_lat`/`origin_lon`/
+     `dest_lat`/`dest_lon` (numeric, adsbdb's real per-airport
+     coordinates) — both were already in the raw payload and simply being
+     discarded, same shape of gap `origin_city`/`dest_city` closed
+     earlier. **Zero new I/O**: same per-callsign `_fetch_route()` call
+     that already ran on the existing `MAX_LOOKUPS_PER_REFRESH`-capped
+     cadence, just keeping more fields off the same real response.
+     Verified live against a real callsign (SWA1065, MDW→MHT):
+     `origin_country`/`dest_country` both resolved `"UNITED STATES"`,
+     `origin_lat/lon` `(41.785999, -87.752403)`, `dest_lat/lon`
+     `(42.932598, -71.435699)` — all real, all populated.
+     - **Country display**: appended to the existing route-line text
+       (`"<origin city> > <dest city> - <country>"`) rather than given
+       its own fixed row — piggybacking on a line that's ALREADY
+       marquee-safe (`draw_marquee` scrolls it when it doesn't fit at
+       scale 1) means a longer string can never collide with anything;
+       it either fits or scrolls, exactly like the line already did.
+       Destination country preferred (matches the existing
+       destination-first city preference), origin's used only as a
+       fallback.
+     - **Route-bearing ray on the scope**: drawn from the home marker
+       toward the REAL bearing (via `flights.bearing_distance()`, the
+       same haversine/bearing function the coastline and airport-verify
+       math already use — reused, not re-derived) to whichever real
+       airport coordinate is the informative one. Only drawn when the
+       selected aircraft has a real resolved route AND adsbdb returned
+       real coordinates for that end — no route or no coordinates means
+       no ray, never a guessed one. **"Departing means show where it's
+       headed, arriving means show where it came from, transit shows
+       both"**: DEPARTING draws only the destination ray, ARRIVING draws
+       only the origin ray (the home-side ray would be redundant in
+       either case), TRANSIT draws both — judged the most intuitive
+       framing of the three, matching feature 2's own DEPARTING/ARRIVING
+       logic rather than inventing a separate rule. Short ray (fixed
+       `frac=0.42`, not rim-to-rim), dim muted color, drawn in the same
+       context layer as the trail (before the aircraft icon loop, under
+       the live icon).
+
+  **Verified**: `.venv/bin/python -c "import flights, engines"` clean.
+  `render_audit.py flights` and `render_audit.py flights --strict` both
+  clean (0 CLIPPED/DROPPED/COLLISION). `fold_audit.py` clean (0 feeds not
+  folding). All three pieces verified directly against real data as
+  described above (real callsign route fetch, real MYR-based
+  departing/arriving/transit classification, simulated real-shaped poll
+  sequences for trail accumulation/capping/eviction). **Real panel
+  check**: restarted `com.henderburgh.arcade`, switched to `flights`,
+  pulled `/api/frame` — clean non-crashing frame (708 real non-background
+  pixels: header rule + rings + idle-scope legend), zero errors. **Zero
+  real aircraft were in range at verification time** (`flights.FEED.get()`
+  returned 0), so the trail/route-ray/DEPARTING-ARRIVING pixels
+  themselves are honestly UNVERIFIED on the real physical panel — the
+  direct engine-driving checks above are what's actually verified for
+  those three pieces, not a live in-range aircraft. Next session with
+  real traffic in range: select an aircraft, watch a real trail
+  accumulate over a few real polls, and confirm the route ray/DEPARTING-
+  ARRIVING tag on an aircraft with a resolved route. Panel restored to
+  `ambient` afterward.
+
+  **Concurrent dead-reckoning work note**: this was built on top of
+  `_update_dead_reckoning()`, `self._dr`, and the `_ext_dist_nm`/
+  `_ext_dir_deg` icon-position fields already present uncommitted in the
+  working tree when this session started (a different concurrent
+  session's work, per its own in-code dated comments). Nothing about it
+  was modified — this work only reads its `_sel_key()` keying convention
+  and reuses its x_nm/y_nm math, and both features coexist in
+  `_frame_scope()`/`tick()` without touching each other's call sites.
+
 - **sports** (`sports.py`/`SportsEngine`, 2026-07-30, expanded same day) —
   NFL/NBA/MLB/NHL/EPL/NCAAF/NCAAB scores via ESPN's free undocumented site
   API. Pinned favorite team (full-screen score, scoring-flash animation,
