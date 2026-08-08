@@ -1895,6 +1895,169 @@ ESPN numbers OT periods 5, 6... above regulation) whose
   to verify MLB: with the first real trigger, not a synthetic push — and
   only once WNBA pinning exists to make it reachable at all.
 
+### The celebration system GENERALIZED across all four modes (2026-08-07)
+
+**Why**: sports had a genuinely sophisticated interrupt (five detectors,
+priority-ordered under severe weather). Flights and satellite had
+nothing — a MAYDAY squawk and a routine helicopter got the identical
+quiet notable-tag treatment, and a GO-OUTSIDE-grade satellite pass
+couldn't interrupt ambient at all despite being the entire reason that
+mode exists. Named as the real inconsistency in a full four-system deep
+dive, then fixed deliberately, design-first (the owner asked for the
+tier scheme and per-system visuals before any code, specifically
+because the earlier ambient "channel ident" experiment had shipped,
+been wrong, and been reverted — see the ambient section above).
+
+**ONE mechanism, not four.** `BigMomentSource` (`engines.py`, module
+level, next to `draw_celebration`) is mixed into `SportsEngine`,
+`FlightEngine`, and `SatelliteEngine`. Sports' own private
+`pop_big_moment()`/`_set_big_moment()` were deleted and replaced by the
+shared version — same adopt-then-diff detector idiom every existing
+sports detector already used, not a second mechanism.
+
+**THREE intensity tiers** — the actual missing piece, not the queue
+plumbing:
+- `TIER_FLASH` — does **not** reach `AmbientEngine` at all. Routed to
+  its own `_flash` field, drawn as a compact in-mode banner
+  (`draw_flash_banner`) only by the mode that fired it. Load-bearing:
+  without it, every candidate is forced into interrupt-or-nothing,
+  which is exactly the pressure that inflates a top tier until it means
+  nothing. With it, the project can be generous about noticing and
+  stingy about interrupting.
+- `TIER_INTERRUPT` — full-panel, `CELEBRATION_TICKS` (90, ~4.5s).
+  Exactly what every sports detector already did — zero regression.
+- `TIER_TAKEOVER` — full-panel, 120 ticks (~6s), and the **only** tier
+  allowed to pre-empt a celebration already playing. Reserved for
+  genuinely rare "go look now" events. Deliberately three tiers, not
+  four — a fourth invites everything to settle into the middle.
+
+**One renderer, one text hierarchy, one set of timing beats — only the
+BACKDROP varies per system** (`CELEBRATION_BACKDROPS`), reusing each
+mode's own existing visual language rather than inventing a fourth
+product: sports keeps its original ring/ray burst unchanged
+(`_backdrop_sports`); flights gets a full-panel radar-sweep wedge
+(`_backdrop_flights`, faster than the scope's own idle sweep — this is
+an event, not ambience); satellite gets a horizon-to-horizon arc with a
+travelling marker (`_backdrop_satellite`, reusing `_draw_pass_arc`'s own
+language). Color stays owned by the event (a real team color, a real
+urgency color), not the system — the backdrop alone is what makes a
+MAYDAY and a home run obviously belong to different things while still
+obviously being the same device speaking.
+
+**Queue correctness across four systems — two real design bugs fixed
+before they could ship, not two bugs found after:**
+- `AmbientEngine.tick()` now **peeks** every engine's pending moment
+  (`peek_big_moment()`, non-consuming) and selects the **highest tier**,
+  not first-found-in-dict-order — the old code's `for e in
+  self.engines.values(): ... break` meant a trivial moment could
+  pre-empt a critical one purely by iteration position. The loser stays
+  queued in its own engine (not popped, not discarded) rather than
+  being silently lost.
+- `_set_big_moment()`'s overwrite is now **tier-gated**: a lesser moment
+  arriving while a bigger one is still pending in the same engine's
+  slot is dropped, not applied. `TIER_TAKEOVER` may pre-empt an
+  in-flight celebration; `TIER_INTERRUPT`-vs-`TIER_INTERRUPT` and
+  `TIER_TAKEOVER`-vs-`TIER_TAKEOVER` both keep the original
+  never-interrupt-what's-already-playing rule.
+
+**A real pre-existing bug found in the process, unrelated to anything
+being added.** `render_audit.py`'s instrumented `put_px` had never
+actually been run against `draw_celebration()` before — nothing in the
+normal audit sweep forces a celebration to fire, so this code path had
+zero coverage since the feature shipped. The **original** ring-radius
+math (`((t * 1.6 + k * 11) % 34) + 3`, unchanged by anything in this
+generalization) reached ~37px from a (32, 30) centre — well past the
+real panel edge in every direction, on every single sports celebration
+that has ever fired. Fixed with `_MAX_BURST_R`, computed from the real
+panel bounds rather than a guessed constant; verified 0 clipped pixels
+across all 3 backdrops × both interrupt tiers × every tick of their
+hold, via `render_audit.Audit`'s own instrumentation run directly
+against `draw_celebration()`.
+
+**Flights detectors (3)**, keyed off `flights._notable()`'s own real
+classification — one source of truth, not re-derived:
+- **Emergency squawk** (rank 5 — HIJACK/NORADIO/MAYDAY from a real
+  ADS-B squawk code) → `TIER_TAKEOVER`. The rarest, least ambiguous
+  "look up" this mode can produce. **Cannot be fabricated to test** — a
+  real emergency squawk can't be manufactured on demand — so this is
+  honestly flagged as never-fired-live, same treatment `mma_finish`
+  already established; verified instead via the detector's own logic
+  against a real-shaped payload.
+- **Airship** (category B2 — confirmed exactly ONE real instance in
+  this project's own 213-aircraft sample) → `TIER_INTERRUPT`.
+  Deliberately NOT promoted: helicopters (6/213), heavies (11/213), or
+  any phase-transition state — all common enough near any airport that
+  interrupting on them would stop being special within days.
+- **First-ever aircraft TYPE, via THE HANGAR** → `TIER_FLASH`.
+  Deliberately keyed on `type`, not registration — 11 distinct
+  registrations were logged in the Hangar's first few real minutes of
+  operation, which would have made a registration-keyed flash fire
+  constantly during exactly the period a new device is still building
+  its collection. A new type code is rare and self-limiting, naturally
+  approaching zero as the collection matures. Verified live against
+  real detector logic: adopts silently on the first tick (a device
+  that's been running doesn't flash on its whole existing collection),
+  fires correctly the moment a genuinely new type is recorded.
+
+**Satellite detector (1, two tiers)**, reusing `tick()`'s own existing
+newly-overhead-pass detection (`_overhead_ids` diffing) rather than
+re-deriving it:
+- A **GO-OUTSIDE-grade pass** (`skypass.quality_rank` rank 3, the same
+  ≥60° `ELEV_EXCELLENT` threshold the UPCOMING chip already uses)
+  beginning right now → `TIER_INTERRUPT`.
+- A **near-zenith pass** (`GO_OUTSIDE_TAKEOVER_EL = 80°`, sitting well
+  above the existing chip's own top tier) → `TIER_TAKEOVER`.
+- No `TIER_FLASH` here, deliberately — a lower-grade pass beginning is
+  already fully served by the existing in-mode chip/arc treatment;
+  flashing on top of a screen already showing the pass would be
+  redundant, not useful.
+- **The ISS is deliberately NOT special-cased** — unifying it into one
+  ordinary catalogue entry was the entire point of the 2026-08-01
+  satellite rework (see that section above), and re-privileging it here
+  would undo it. It fires on its own real merits like everything else.
+- Honestly flagged: no qualifying real pass occurred during this
+  session's build — unverified live, same as the flights TAKEOVER/
+  INTERRUPT detectors.
+
+**Verified**: unit tests for tier-gated overwrite and highest-tier-wins
+queue selection (both pass — a `TIER_FLASH` cannot clobber a pending
+`TIER_INTERRUPT`, a `TIER_TAKEOVER` correctly overwrites a pending
+`TIER_INTERRUPT`, and `AmbientEngine`'s selection picks the higher-tier
+moment regardless of which engine's dict-iteration position it's in,
+leaving the loser queued rather than dropped). All three flights
+detectors run against real-shaped live-traffic payloads. Full
+`AmbientEngine` integration path exercised end-to-end: a sub-engine
+fires → ambient picks it up the same tick → renders with zero clipped
+pixels → clears correctly after its own tier-specific hold length.
+`render_audit.py` clean (0 modes failed) project-wide, including the
+celebration path for the first time ever. Live panel verified
+error-free across ambient/flights/satellite modes via direct pixel
+dump — no real qualifying flights or satellite event occurred during
+the session to trigger a live TIER_INTERRUPT/TIER_TAKEOVER, honestly
+flagged rather than worked around with a fabricated trigger.
+
+**WNBA added to `LEAGUE_PATHS`** (`sports.py`) in the same pass — the
+one missing piece keeping `_detect_wnba_big_play` (documented above)
+"practically unreachable": `load_config()`/`set_favorite()` both reject
+any league outside this dict, and WNBA was never in it despite
+`_WNBA_PATH` already existing for the detector's own summary fetch.
+Deliberately NOT added to `DEFAULT_LEAGUES` — this makes WNBA
+*choosable*, not polled by default for every install. Verified
+mechanically (`set_favorite("WNBA", ...)` now succeeds and persists
+correctly), then the test change was reverted from `sports_config.json`
+— not this session's call to actually set a real favorite team. **Not
+verified against a real live WNBA game** — ESPN was returning 403 to
+this network for the entire duration of this session (three separate
+checks across two sessions, unchanged), so there was no way to even
+check whether a WNBA game was live, let alone confirm the detector
+fires against one.
+
+**MMA expanded-detail renderer was explicitly SKIPPED this session**,
+not attempted — it was scoped to real live MMA/PFL events only, "don't
+build against synthesized card data," and ESPN's outage meant there was
+no way to even check whether one existed. Still open; build it the
+first session ESPN is reachable and a real card is live.
+
 ### Per-sport EXPANDED-DETAIL renderers (started 2026-08-01)
 
 **Why, and why it's a SEPARATE follow-up rather than part of the main-
