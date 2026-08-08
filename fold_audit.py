@@ -159,6 +159,24 @@ def main():
     else:
         print("  %-28s skipped (no card)" % "mma card")
 
+    # ---- sports: TENNIS -- own dedicated per-tour endpoint, different
+    # nested shape (groupings[] -> competitions[]) from every parser above.
+    tdata = sports._get_json(sports.SCOREBOARD_URL.format(path=sports.TENNIS_TOURS["WTA"]))
+    tevents = tdata.get("events") or []
+    if tevents:
+        ev = inject(tevents[0])
+        g = (ev.get("groupings") or [{}])[0]
+        comp = (g.get("competitions") or [{}])[0]
+        bad += check("sports tennis match",
+                     lambda: sports._parse_tennis_match(
+                         comp, (g.get("grouping") or {}).get("displayName"),
+                         "WTA", paneltext.panel_text(ev.get("name")),
+                         paneltext.panel_text(ev.get("shortName"))),
+                     ignore_paths=("state", "id", "home_away", "tiebreak", "winner",
+                                   "games", "sport", "league", "best_of"))
+    else:
+        print("  %-28s skipped (no tennis today)" % "sports tennis match")
+
     # ---- the pure text cleaners each feed exposes ------------------------
     import news
     import blog

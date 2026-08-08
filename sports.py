@@ -682,6 +682,253 @@ def _fetch_mma_finish_method(league_slug, event_id):
     return None
 
 
+# =============================================================================
+# TENNIS -- task #19, the last per-sport MAIN renderer. Blocked since
+# 2026-08-01 on "no live match to verify against"; unblocked this session
+# against real live/finished WTA National Bank Open + Warsaw Polish Open
+# matches (site.web.api.espn.com/apis/site/v2/sports/tennis/{atp,wta}
+# /scoreboard, checked live).
+#
+# WHY A DEDICATED FETCH, NOT THE UNIVERSAL HEADER. The header endpoint
+# (HEADER_URL, what get_universal() already surfaces) DOES include tennis
+# events -- confirmed live, 6 real WTA matches today -- but a `pre`-state
+# match has literally no score/linescores fields on its competitors. That
+# is confirmed empty-until-live, not a missing field: this endpoint is the
+# real source of truth for tennis scores, the same SCOREBOARD_URL template
+# every team sport already uses, just pointed at a tennis path.
+#
+# THE SHAPE IS COMPLETELY DIFFERENT FROM EVERY OTHER SPORT THIS MODULE
+# PARSES -- confirmed live, not assumed. One `event` here is a whole
+# TOURNAMENT (e.g. "National Bank Open"), closer to mma.py's "one event =
+# the whole CARD" shape than to _parse_event()'s flat team-sport shape.
+# `groupings[]` adds one more nesting level MMA doesn't have -- the DRAW
+# category (Men's Singles / Women's Singles / Women's Doubles) -- and each
+# grouping's `competitions[]` are the individual MATCHES. mma.py's
+# `_parse_card()` is the structural precedent this follows, not
+# `_parse_event()`.
+#
+# `linescores` entries are `{value, tiebreak (optional), winner}` -- NOT
+# the `{value, displayValue, period, winner}` shape an earlier speculative
+# note in this project once described before anyone had actually pulled a
+# live payload. `value` is games won in that set (a float, e.g. 7.0),
+# `tiebreak` is only present when that set went to a breaker (the loser's
+# breaker points, e.g. 7 meaning the set finished 7-5 in a 7-5 tiebreak --
+# confirmed against a real completed match, Mejia d. Trungelliti
+# 7-6(7-5) 3-6 6-1), `winner` is whether THIS competitor won that set.
+#
+# DOUBLES uses a DIFFERENT competitor shape than SINGLES -- also confirmed
+# live, not assumed. Singles carries `athlete` (one player). Doubles
+# carries `roster` (a two-player team: `roster.athletes[]`,
+# `roster.displayName`/`shortDisplayName` for the pair). Both are handled
+# below; an unrecognised shape degrades to an empty name rather than a
+# guess.
+#
+# NO LIVE (in-progress) MATCH WAS AVAILABLE TO VERIFY LIVE in-game point
+# score fields against this session -- every real match checked was `pre`
+# or `post`. Built correctly against the real PRE/POST shapes actually
+# seen; the `in` state renders only the real set-by-set score so far, with
+# no live point score, because no field for one was ever observed to
+# confirm a name for.
+TENNIS_TOURS = {"ATP": "tennis/atp", "WTA": "tennis/wta"}
+
+TENNIS_REFRESH_LIVE = 20.0     # a match is actually in progress
+TENNIS_REFRESH_IDLE = 300.0    # matches exist today but none live
+TENNIS_REFRESH_EMPTY = 1800.0  # no tennis at all (real off-season condition)
+
+
+def _tennis_competitor_name(c):
+    """Singles carries `athlete`, doubles carries `roster` -- two
+    genuinely different real shapes on the same endpoint, confirmed live
+    against a real doubles match (Brooks/Haverlag). Returns
+    (abbr, full) already panel_text()-folded, or ("", "") if neither
+    shape is present rather than a guessed name."""
+    ath = c.get("athlete")
+    if isinstance(ath, dict) and ath:
+        full = ath.get("fullName") or ath.get("displayName") or ""
+        abbr = ath.get("shortName") or full
+        return paneltext.panel_text(abbr), paneltext.panel_text(full)
+    roster = c.get("roster")
+    if isinstance(roster, dict) and roster:
+        full = roster.get("displayName") or ""
+        abbr = roster.get("shortDisplayName") or full
+        return paneltext.panel_text(abbr), paneltext.panel_text(full)
+    return "", ""
+
+
+def _parse_tennis_sets(competitor):
+    """`linescores` -> [{"games": int, "tiebreak": int|None, "winner": bool}].
+    `value` is always a float on the real payload (7.0, not 7) -- cast to
+    int since a tennis set score is never fractional. A set with no
+    `value` at all (should not happen, but never invent one) is skipped."""
+    out = []
+    for s in (competitor.get("linescores") or []):
+        v = s.get("value")
+        if v is None:
+            continue
+        out.append({
+            "games": int(v),
+            "tiebreak": s.get("tiebreak"),
+            "winner": bool(s.get("winner")),
+        })
+    return out
+
+
+def _parse_tennis_competitor(c):
+    abbr, full = _tennis_competitor_name(c)
+    return {
+        "id": c.get("id"),
+        "is_team": False,
+        "abbr": abbr,
+        "full": full,
+        "winner": bool(c.get("winner")),
+        "seed": _num_or_none(c.get("curatedRank", {}).get("current")
+                              if isinstance(c.get("curatedRank"), dict) else None),
+        "sets": _parse_tennis_sets(c),
+        "score": None,       # tennis has no single numeric score -- see "sets"
+        "color": None, "alt_color": None, "record": None, "rank": None,
+        "form": None, "movement": None, "shootout": None,
+        "place": None, "thru": None, "hole": None,
+        "tee_time": None, "player_state": None, "home_away": c.get("homeAway"),
+    }
+
+
+def _parse_tennis_match(comp, grouping_name, tour_code, event_name, event_short):
+    """One match (a `competitions[]` entry inside a `groupings[]` entry)
+    -> the same normalised shape sports.py's other parsers produce
+    (`_header_event`'s keys), so this slots into the existing
+    universal-events list and SPORT_RENDERERS/SPORT_DETAIL_RENDERERS
+    dispatch without a third rendering path."""
+    status = comp.get("status") or {}
+    stype = status.get("type") or {}
+    state = stype.get("state") or "pre"
+    comps = [_parse_tennis_competitor(c) for c in (comp.get("competitors") or [])]
+    venue = comp.get("venue") or {}
+    venue_bits = [x for x in (venue.get("fullName"), venue.get("court")) if x]
+    fmt = ((comp.get("format") or {}).get("regulation") or {}).get("periods")
+    notes = [paneltext.panel_text(n.get("text"))
+             for n in (comp.get("notes") or []) if n.get("text")][:2]
+    return {
+        "id": str(comp.get("id") or ""),
+        "competition_id": str(comp.get("id") or ""),
+        "sport": "tennis",
+        "league": tour_code,                 # ATP / WTA
+        "league_name": tour_code,
+        "name": event_name,                  # tournament name, already folded
+        "short_name": paneltext.panel_text(grouping_name) or event_short,
+        "state": state,
+        "live": state == "in",
+        "detail": paneltext.panel_text(stype.get("shortDetail") or stype.get("description")),
+        "period": _num_or_none(status.get("period")),
+        "clock": None,   # no live in-game clock field observed -- see module docstring
+        "broadcast": None, "week": None, "playoff": False, "neutral": False,
+        "venue": paneltext.panel_text(" - ".join(venue_bits)) or None,
+        "series": None,
+        "note": notes[0] if notes else None,
+        "notes": notes,
+        "class_label": paneltext.panel_text(grouping_name) or None,   # the DRAW, e.g. "Men's Singles"
+        "match_number": None,
+        "card_segment": None,
+        "round": None,           # not present on this endpoint -- never guessed
+        "best_of": fmt,          # 3 or 5 -- real scheduled-format field
+        "leaderboard": False,
+        "competitors": comps,
+        "bases": None, "outs": None, "runners_text": None,
+    }
+
+
+def _fetch_tennis_matches(tour_code):
+    """Every real match across every real tournament this tour's
+    scoreboard currently carries -- confirmed live returning MULTIPLE
+    real tournaments in one call (WTA: National Bank Open AND the Warsaw
+    T-Mobile Polish Open, same request)."""
+    path = TENNIS_TOURS[tour_code]
+    data = _get_json(SCOREBOARD_URL.format(path=path))
+    out = []
+    for ev in data.get("events") or []:
+        name = paneltext.panel_text(ev.get("name"))
+        short = paneltext.panel_text(ev.get("shortName"))
+        for g in (ev.get("groupings") or []):
+            gr = g.get("grouping") or {}
+            gname = gr.get("displayName") or gr.get("slug") or ""
+            for comp in (g.get("competitions") or []):
+                try:
+                    out.append(_parse_tennis_match(comp, gname, tour_code, name, short))
+                except (KeyError, IndexError, TypeError, ValueError):
+                    continue      # one malformed match must not lose the rest
+    return out
+
+
+def load_tennis_player():
+    """Pinned tennis player, or None. Same file/shape as
+    load_golf_player() -- one config file for one mode, matched by name
+    rather than ESPN athlete id for the same reason golf's is: someone
+    types "Coco Gauff", the scoreboard shows "C. GAUFF"."""
+    if not CONFIG_PATH.exists():
+        return None
+    try:
+        data = json.loads(CONFIG_PATH.read_text())
+    except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+        return None
+    p = data.get("tennis_player")
+    if isinstance(p, str) and p.strip():
+        return paneltext.panel_text(p)
+    return None
+
+
+def save_tennis_player(name):
+    """Persist (or clear) the pinned tennis player. Preserves every other
+    key -- same discipline as save_golf_player(), because this file also
+    carries leagues/favorite/golf_player and a naive rewrite would wipe
+    them."""
+    data = {}
+    if CONFIG_PATH.exists():
+        try:
+            data = json.loads(CONFIG_PATH.read_text()) or {}
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+            data = {}
+    cleaned = paneltext.panel_text(name) if name else None
+    if cleaned:
+        data["tennis_player"] = cleaned
+    else:
+        data.pop("tennis_player", None)
+    data.setdefault("leagues", list(DEFAULT_LEAGUES))
+    data.setdefault("favorite", None)
+    CONFIG_PATH.write_text(json.dumps(data, indent=2))
+    return cleaned
+
+
+def find_pinned_tennis_player(matches, pinned):
+    """Locate the pinned player in any real tennis match, forgiving on
+    name form exactly like find_pinned_golfer(): exact, surname, or
+    substring. Prefers a LIVE match over a finished/upcoming one when the
+    player appears in more than one real match on the board."""
+    if not pinned:
+        return None, None
+    want = paneltext.panel_text(pinned)
+    if not want:
+        return None, None
+    want_last = want.split()[-1] if want.split() else want
+    hits = []
+    for m in matches:
+        for c in m.get("competitors") or []:
+            name = c.get("full") or c.get("abbr") or ""
+            if not name:
+                continue
+            last = name.split()[-1] if name.split() else ""
+            if name == want or last == want_last or want in name or name in want:
+                hits.append((m, c))
+                break
+    if not hits:
+        return None, None
+    live = [h for h in hits if h[0]["state"] == "in"]
+    if live:
+        return live[0]
+    pre = [h for h in hits if h[0]["state"] == "pre"]
+    if pre:
+        return pre[0]
+    return hits[0]
+
+
 class SportsFeed:
     """Background poller with a last-good cache -- same contract as every
     other FEED in this project: never blocks the caller, never invents a
@@ -720,6 +967,15 @@ class SportsFeed:
         self._golf_move_at = 0.0
         self._golf_field = None       # (meta, [competitors]) full-field fallback
         self._golf_field_try = 0.0
+        # Tennis -- own dedicated poll, separate from the universal header
+        # (see the TENNIS section docstring for why: the header's tennis
+        # entries carry no score until live, this is the real source).
+        self._tennis = []             # real matches, every tour, every tournament
+        self._tennis_updated = 0.0
+        self._tennis_try = 0.0
+        self._tennis_interval = 0.0
+        self._tennis_fails = 0
+        self._tennis_player = load_tennis_player()
         self._thread = None
         self._err = None
 
@@ -813,9 +1069,55 @@ class SportsFeed:
                 return
             self._maybe_reload_config()
             self._refresh_universal()
+            self._refresh_tennis()
             self._refresh_scoreboards()
             self._refresh_win_prob()
             time.sleep(2.0)
+
+    def _refresh_tennis(self):
+        """Both tours, real matches, own adaptive interval -- same tiered
+        backoff shape as _refresh_scoreboards()/_refresh_universal(), just
+        against the dedicated tennis endpoint instead of the header."""
+        now = time.time()
+        with self._lock:
+            if now - self._tennis_try < self._tennis_interval:
+                return
+            self._tennis_try = now
+        matches = []
+        failed = 0
+        for tour in TENNIS_TOURS:
+            try:
+                matches.extend(_fetch_tennis_matches(tour))
+            except Exception:                     # noqa: BLE001 - never die
+                failed += 1
+        with self._lock:
+            if failed == len(TENNIS_TOURS) and self._tennis:
+                # Both tours failed and we already have real cached data --
+                # back off rather than replace good data with nothing.
+                self._tennis_fails += 1
+                self._tennis_interval = min(
+                    ERROR_BACKOFF_MAX,
+                    ERROR_BACKOFF_BASE * (2 ** (self._tennis_fails - 1)))
+                return
+            self._tennis = matches
+            self._tennis_updated = time.time()
+            self._tennis_fails = 0
+            if any(m["live"] for m in matches):
+                self._tennis_interval = TENNIS_REFRESH_LIVE
+            elif matches:
+                self._tennis_interval = TENNIS_REFRESH_IDLE
+            else:
+                self._tennis_interval = TENNIS_REFRESH_EMPTY
+
+    def set_tennis_player(self, name):
+        cleaned = save_tennis_player(name)
+        with self._lock:
+            self._tennis_player = cleaned
+        return cleaned
+
+    def get_tennis_player(self):
+        with self._lock:
+            return self._tennis_player
 
     def _refresh_universal(self):
         """Poll the one endpoint that covers every sport.
@@ -875,12 +1177,23 @@ class SportsFeed:
         now = time.time()
         with self._lock:
             self._last_read = now
-            events = [dict(e) for e in self._universal]
+            # Tennis is DROPPED from the header list and REPLACED with the
+            # dedicated per-tour fetch -- the header's tennis entries are
+            # confirmed empty-until-live (no score/linescores while `pre`),
+            # so keeping both would either duplicate a match or show the
+            # useless header copy alongside the real one. See the TENNIS
+            # section docstring above _fetch_tennis_matches().
+            events = [dict(e) for e in self._universal if e.get("sport") != "tennis"]
+            events.extend(dict(m) for m in self._tennis)
             age = (now - self._universal_updated) if self._universal_updated else None
+            tennis_age = (now - self._tennis_updated) if self._tennis_updated else None
+            if tennis_age is not None:
+                age = tennis_age if age is None else min(age, tennis_age)
             golf_player = self._golf_player
             golf_move = (self._golf_move
                          if self._golf_move and (now - self._golf_move_at) < GOLF_MOVE_TTL
                          else None)
+            tennis_player = self._tennis_player
         self._ensure_thread()
         # Live first, then upcoming, then finished -- within that, keep
         # ESPN's own ordering, which already groups by sport sensibly.
@@ -891,12 +1204,14 @@ class SportsFeed:
             gc = self._pinned_from_field(events, golf_player)
             if gc is not None:
                 gev = self.golf_field_event()
+        tev, tc = find_pinned_tennis_player(events, tennis_player)
         return {"events": events, "age": age,
                 "leagues": sorted({(e["sport"], e["league"]) for e in events}),
                 "golf_player": golf_player, "golf_event": gev, "golf_pinned": gc,
                 # Reported for a short window then lapses on its own, so the
                 # engine never has to acknowledge or clear it.
-                "golf_move": golf_move}
+                "golf_move": golf_move,
+                "tennis_player": tennis_player, "tennis_event": tev, "tennis_pinned": tc}
 
     def _maybe_reload_config(self):
         now = time.time()
@@ -905,6 +1220,7 @@ class SportsFeed:
         self._last_config_check = now
         leagues, favorite = load_config()
         gp = load_golf_player()
+        tp = load_tennis_player()
         with self._lock:
             if leagues != self.leagues or favorite != self.favorite:
                 self.leagues, self.favorite = leagues, favorite
@@ -913,6 +1229,8 @@ class SportsFeed:
                 # Changed under us (edited file / other process): drop the
                 # baseline so the new player cannot flash on arrival.
                 self._golf_player, self._golf_prev, self._golf_move = gp, None, None
+            if tp != self._tennis_player:
+                self._tennis_player = tp
 
     def _pinned_from_field(self, events, pinned):
         """Pinned golfer from the whole field, or None.
