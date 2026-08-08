@@ -7167,6 +7167,12 @@ class SportsEngine(Browsable, BigMomentSource):
         # adopts a baseline, so a game already in progress can't replay
         # its earlier home runs the moment the mode is opened.
         self._seen_home_runs = None
+        # Seen-play cursor for _detect_nfl_touchdown() -- identical
+        # one-shot idiom to _seen_home_runs above.
+        self._seen_nfl_touchdowns = None
+        # Seen-play cursor for _detect_nhl_goal() -- identical one-shot
+        # idiom to _seen_home_runs above.
+        self._seen_nhl_goals = None
         # State for _detect_soccer_goal -- the per-game "seen" set, keyed
         # off the currently-watched event_id so a game change starts
         # clean instead of replaying goals already shown (same reasoning
@@ -8326,6 +8332,103 @@ class SportsEngine(Browsable, BigMomentSource):
                              tier=TIER_INTERRUPT, system=SYSTEM_SPORTS)
 
     BIG_MOMENT_DETECTORS["mlb_hr"] = _detect_mlb_home_run
+
+    def _detect_nfl_touchdown(self):
+        """NFL touchdown detector -- same shape as _detect_mlb_home_run(),
+        different sport.
+
+        Scoped EXACTLY like sports._fetch_win_prob(): only the pinned
+        favorite's own game, and only while it is genuinely `state ==
+        "in"` -- never the whole universal feed. See
+        sports._fetch_touchdown_plays()'s own docstring for the payload
+        facts (`scoringPlays` array, `type.text` contains "Touchdown",
+        confirmed live against event 401873271, Panthers @ Cardinals).
+
+        Seen-play tracking lives on THIS instance (`_seen_nfl_touchdowns`),
+        same one-shot idiom as `_seen_home_runs`: the first read adopts
+        the current set without firing (a game already in progress when
+        the mode is opened must not replay every earlier touchdown), and
+        only IDs not in that set are new.
+        """
+        favorite = self.data.get("favorite")
+        fg = self.data.get("favorite_game")
+        if not favorite or favorite.get("league") != "NFL":
+            return
+        if not fg or fg.get("state") != "in":
+            return
+        event_id = fg.get("event_id")
+        if not event_id:
+            return
+        tds = sports._fetch_touchdown_plays("NFL", event_id)
+        ids = {t["id"] for t in tds}
+        if self._seen_nfl_touchdowns is None:
+            self._seen_nfl_touchdowns = ids       # first read: adopt, don't replay
+            return
+        new_ids = ids - self._seen_nfl_touchdowns
+        self._seen_nfl_touchdowns = ids
+        if not new_ids:
+            return
+        # Only the most recent new one matters -- _set_big_moment is a
+        # one-slot queue anyway, so firing on more than one would just
+        # overwrite itself.
+        newest = max((t for t in tds if t["id"] in new_ids), key=lambda t: t["id"])
+        home, away = fg["home"], fg["away"]
+        line1 = f"{away['abbr']} {away['score']}, {home['abbr']} {home['score']}"
+        color = home.get("color") or away.get("color") or (255, 100, 40)
+        self._set_big_moment("TOUCHDOWN", line1, newest["text"], color,
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS)
+
+    BIG_MOMENT_DETECTORS["nfl_touchdown"] = _detect_nfl_touchdown
+
+    def _detect_nhl_goal(self):
+        """NHL goal detector -- same shape as _detect_mlb_home_run() /
+        _detect_nfl_touchdown(), different sport.
+
+        Scoped EXACTLY like sports._fetch_win_prob(): only the pinned
+        favorite's own game, and only while it is genuinely `state ==
+        "in"` -- never the whole universal feed.
+
+        UNVERIFIED against real live data -- see
+        sports._fetch_goal_plays()'s own docstring: no NHL game was
+        `state == "in"` this session (every event in today's scoreboard
+        was `pre`), so the "Goal" `type.text` match this relies on has
+        not been confirmed against a real payload. Built correctly on the
+        same `scoringPlays` shape confirmed live for NFL/MLB, shipped
+        honestly unverified rather than blocked -- same precedent as
+        `_detect_mma_finish()`.
+
+        Seen-play tracking lives on THIS instance (`_seen_nhl_goals`),
+        same one-shot idiom as `_seen_home_runs` / `_seen_nfl_touchdowns`.
+        """
+        favorite = self.data.get("favorite")
+        fg = self.data.get("favorite_game")
+        if not favorite or favorite.get("league") != "NHL":
+            return
+        if not fg or fg.get("state") != "in":
+            return
+        event_id = fg.get("event_id")
+        if not event_id:
+            return
+        goals = sports._fetch_goal_plays("NHL", event_id)
+        ids = {g["id"] for g in goals}
+        if self._seen_nhl_goals is None:
+            self._seen_nhl_goals = ids            # first read: adopt, don't replay
+            return
+        new_ids = ids - self._seen_nhl_goals
+        self._seen_nhl_goals = ids
+        if not new_ids:
+            return
+        # Only the most recent new one matters -- _set_big_moment is a
+        # one-slot queue anyway, so firing on more than one would just
+        # overwrite itself.
+        newest = max((g for g in goals if g["id"] in new_ids), key=lambda g: g["id"])
+        home, away = fg["home"], fg["away"]
+        line1 = f"{away['abbr']} {away['score']}, {home['abbr']} {home['score']}"
+        color = home.get("color") or away.get("color") or (40, 160, 255)
+        self._set_big_moment("GOAL", line1, newest["text"], color,
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS)
+
+    BIG_MOMENT_DETECTORS["nhl_goal"] = _detect_nhl_goal
 
     def _detect_mma_finish(self):
         """MMA finish detector for the SHARED big-moment celebration.

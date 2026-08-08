@@ -460,6 +460,106 @@ def _fetch_home_run_plays(league, event_id):
     return out
 
 
+def _fetch_touchdown_plays(league, event_id):
+    """NFL touchdown plays from a game's `scoringPlays` array, or [] for
+    anything else. Returns a list of {"id": str, "text": str, "awayScore":
+    int, "homeScore": int}, text already paneltext.panel_text()-folded
+    (this is the I/O boundary, same discipline as _fetch_home_run_plays()).
+
+    Confirmed live (event 401873271, Panthers @ Cardinals, finished game):
+    the top-level key that actually carries scoring plays for NFL is
+    `scoringPlays`, NOT `plays` (MLB's key) and NOT `keyEvents` (soccer's
+    key, empty for this NFL event) -- checked all three on the real
+    payload before picking this one. Each entry has a `type.text` like
+    "Rushing Touchdown" or "Passing Touchdown"; a touchdown is any entry
+    whose `type.text` contains the substring "Touchdown" (case-sensitive,
+    matching the real observed casing), deliberately not an exhaustive
+    enum -- ESPN has other real variants not seen in this one sample
+    (e.g. "Return Touchdown") and a substring match is generic to all of
+    them without needing a future update every time ESPN adds a new
+    touchdown flavor. Field goals, safeties, and extra points are real
+    scoring plays that must NOT fire this -- confirmed their `type.text`
+    values do not contain "Touchdown".
+
+    Same per-game summary endpoint _fetch_win_prob() already uses --
+    deliberately NOT a new endpoint, so the request-volume discipline
+    (only the pinned favorite's own LIVE game, see the caller in
+    engines.py) is the only thing standing between this and the
+    per-league-poll volume risk CLAUDE.md already flags twice.
+    """
+    if league != "NFL":
+        return []
+    path = LEAGUE_PATHS[league]
+    data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))
+    plays = data.get("scoringPlays")
+    if not isinstance(plays, list):
+        return []
+    out = []
+    for p in plays:
+        ptype = p.get("type") or {}
+        if "Touchdown" not in (ptype.get("text") or ""):
+            continue
+        pid = p.get("id")
+        if pid is None:
+            continue
+        out.append({
+            "id": str(pid),
+            "text": paneltext.panel_text(p.get("text") or ""),
+            "awayScore": p.get("awayScore"),
+            "homeScore": p.get("homeScore"),
+        })
+    return out
+
+
+def _fetch_goal_plays(league, event_id):
+    """NHL goal plays from a game's `scoringPlays` array, or [] for
+    anything else. Returns a list of {"id": str, "text": str, "awayScore":
+    int, "homeScore": int}, text already paneltext.panel_text()-folded --
+    same I/O-boundary discipline as _fetch_home_run_plays() /
+    _fetch_touchdown_plays().
+
+    UNVERIFIED against real live data -- every NHL event in today's
+    scoreboard is `state == "pre"` (off-season), so no live NHL
+    `scoringPlays` payload has been observed this session. Built on the
+    same `scoringPlays` shape confirmed live for both NFL (see
+    _fetch_touchdown_plays()) and MLB's sibling `plays` key, since ESPN's
+    site API uses one unified shape across these team sports. The
+    assumption made here, NOT confirmed against a real payload: a goal is
+    a scoring play whose `type.text` == "Goal" (exact match, not a
+    substring -- a "Penalty Shot Goal" or similar more-specific variant,
+    if ESPN uses one, would NOT match this and would need its own
+    handling once a real payload is seen). Documented honestly as
+    unconfirmed, same precedent as mma.py's finish-method reconstruction
+    shipping unverified when no live MMA event existed.
+
+    Same per-game summary endpoint _fetch_win_prob() already uses --
+    deliberately NOT a new endpoint, matching the request-volume
+    discipline of the other big-moment fetchers.
+    """
+    if league != "NHL":
+        return []
+    path = LEAGUE_PATHS[league]
+    data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))
+    plays = data.get("scoringPlays")
+    if not isinstance(plays, list):
+        return []
+    out = []
+    for p in plays:
+        ptype = p.get("type") or {}
+        if (ptype.get("text") or "") != "Goal":
+            continue
+        pid = p.get("id")
+        if pid is None:
+            continue
+        out.append({
+            "id": str(pid),
+            "text": paneltext.panel_text(p.get("text") or ""),
+            "awayScore": p.get("awayScore"),
+            "homeScore": p.get("homeScore"),
+        })
+    return out
+
+
 def _fetch_key_events(league, event_id):
     """One soccer match's play-by-play event log (goals, cards, subs,
     kickoff/halftime/regulation-end markers...) from the summary
