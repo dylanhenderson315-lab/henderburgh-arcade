@@ -2022,6 +2022,124 @@ tick when NWS drops the alert. **Deliberate cost:** this reads
 out (a takeover that only worked while already viewing weather would be
 pointless).
 
+**Home Assistant notification pass-through (task #8, 2026-08-08)** — a new
+`POST /api/notify` endpoint lets Home Assistant push arbitrary short text
+onto the panel, mirroring HA's real `notify` service payload shape:
+
+    {"title": "GARAGE", "message": "Left open 20 min", "data": {"priority": "normal"}}
+
+`title` is required; `message` and `data.priority` are optional.
+`data.priority` recognizes only `"normal"`/`"urgent"` -- missing,
+malformed, or unrecognized falls back to `"normal"`, the same convention
+`/api/brightness` already established for bad config values.
+
+**Auth is a real, targeted exception to this project's usual no-auth
+posture.** Every other `/api/*` endpoint here is unauthenticated (trusted
+LAN, 0.0.0.0 bind). This ONE endpoint checks header `X-Arcade-Token`
+against a token in `notify_config.json` (`secrets.token_hex(16)`,
+generated on first run) via `hmac.compare_digest` -- constant-time, not
+`==`, so a same-LAN attacker can't guess it byte-by-byte off response
+timing. The reasoning: every other endpoint here can at worst change what
+game is showing; a spoofable notify endpoint lets anyone on the LAN put
+convincing, unattributable fake text on a panel in the house. Missing or
+wrong token is a 401 with zero side effect. `notify_config.json` holds a
+real credential (unlike every other `*_config.json` in this project) and
+is gitignored rather than committed.
+
+`title`/`message` are folded through `paneltext.panel_text()` at the
+endpoint boundary in `arcade_server.py` -- the standard external-text
+entry-point rule -- before anything downstream ever sees them. The
+endpoint never fabricates text; it only ever displays exactly what the
+real POST body contained, fit/wrapped, never invented.
+
+**Two visual tiers, reusing the project's two existing takeover
+mechanisms rather than inventing a third:**
+
+- **`priority: normal`** — `engines.draw_notify_banner()`, a lightweight
+  composite overlay modeled on `_severe_alert_frame()`'s pattern (applied
+  post-render in `arcade_server._loop()`, never touches `self.mode` or
+  input, whatever's running keeps running underneath) but visually the
+  OPPOSITE of severe weather's full-bleed 4-edge pulse: a quiet band
+  pinned to the bottom third (`HEIGHT-20..HEIGHT-1`, ~31% of the panel),
+  everything above it untouched. Deliberately subordinate-looking --
+  reusing the pulse treatment for an "FYI" would train someone to tune
+  out the panel exactly the way restricting severe takeover to
+  Extreme/Severe already reasons about. Title via `fit_text()` (single
+  line), message via `wrap_text()` (up to 2 lines); if the folded message
+  doesn't fit that budget, overflow uses `draw_marquee()` -- the same
+  scrolling tape news/ticker/gameday/flights already use -- instead of a
+  third truncation style. Auto-clears after `NOTIFY_BANNER_SECONDS` (9s:
+  long enough to read a short line on a glanced-at wall panel, short
+  enough to never compete with whatever's running for more than a few
+  seconds -- a reasoned default, not measured). State lives on `Arcade`
+  (`self._notify_banner`), mirroring how `_alert_ticks` tracks
+  severe-weather state there rather than in a feed module. Composited
+  BEFORE the severe-weather takeover in the render loop, so severe still
+  wins outright if both are ever active at once.
+
+- **`priority: urgent`** — `engines.NotifyEngine`, a real mode-swap
+  takeover built with the EXACT same shape as `PlaneWatchEngine` (see
+  PLANE-IN-WINDOW TAKEOVER above): zero-arg constructible, registered in
+  `engines.ENGINES["notify"]`, deliberately NOT added to
+  `MenuEngine.NATIVE_GAMES`/`AmbientEngine.SEQUENCE` -- force-triggered
+  only, `has_content()` always `False`, never chosen from a menu or a
+  rotation. Pauses whatever's running via a real
+  `arcade_server.set_mode("notify")`, owns input, dismisses on ANY press
+  or a ~15s ceiling (`TOTAL_CEILING_TICKS`, matching `PlaneWatchEngine`'s
+  own duration for consistency across the project's two force-triggered
+  takeovers).
+
+  **Hands back to the ACTUAL previous mode, not a hardcoded landing
+  spot** (unlike `PlaneWatchEngine`'s fixed `.launch = "flights"`) --
+  `Arcade.trigger_notify()` captures `prev = self.mode` right before the
+  swap, the same idiom `set_mode()` itself already uses internally, and
+  threads it through `notify.push_pending()`/`notify.pop_pending()`, the
+  IDENTICAL one-shot module-level hand-off idiom `flights.py`'s
+  `push_pending_detail()`/`pop_pending_detail()` already established for
+  `PlaneWatchEngine`'s own "`set_mode()` always constructs `ENGINES[base]
+  ()` with zero args, so there's no way to pass data through the switch"
+  problem. `NotifyEngine.reset()` consumes (never peeks) the payload. If
+  an urgent notification arrives while one is already showing, the fresh
+  one carries the in-progress one's own `return_mode` forward instead of
+  looping back to `"notify"` itself.
+
+Both tiers are guarded against waking a panel deliberately released to
+`off` (`Arcade.trigger_notify()` returns `False`, no state change) --
+same reasoning `_loop()`'s plane-in-window trigger already uses: `off` is
+a deliberate hand-off to WLED/Home Assistant lighting, not a state any
+feature may override uninvited.
+
+**Architecture note**: `notify.py` (new) holds config load/save, the
+`hmac.compare_digest` auth check, and the urgent tier's one-shot
+pending-payload slot -- the project's usual "one module per feature with
+a config file" shape. It is NOT a `FEED`-shaped polling module like every
+other module here (`weather.FEED`, `flights.FEED`, ...): there is nothing
+to poll. Home Assistant PUSHES via the HTTP endpoint, so the "background
+thread caches, engine reads the cache" shape those modules exist for
+doesn't apply. The normal-priority banner's display-window STATE
+(`_notify_banner`) intentionally lives on `Arcade` in `arcade_server.py`
+instead of in `notify.py`, mirroring where `_alert_ticks` (severe
+weather's own takeover state) already lives, since it's read every render
+tick by the same loop that reads `_alert_ticks`.
+
+**Verified live against the real running `com.henderburgh.arcade`
+service** (`launchctl kickstart -k gui/<uid>/com.henderburgh.arcade`,
+confirmed `/api/state` healthy before and after): wrong token and missing
+token both returned 401 with `mode` unchanged; a `priority: normal` call
+drew non-black pixels in the bottom-third band (1280 of 1280 checked
+rows-worth) without changing `mode`; a `priority: urgent` call while in
+`flights` mode swapped `mode` to `"notify"`, rendered a non-black frame,
+and — critically — dismissing via `POST /api/input/left` returned `mode`
+to the real prior `"flights"`, not a hardcoded fallback; a deliberately
+oversized message exercised the `draw_marquee()` overflow path on the
+urgent tier without crashing; releasing the panel to `off` and then
+POSTing an urgent notify returned `{"ok": false}` and left `mode` at
+`"off"`, confirming the off-guard. `render_audit.py` and `fold_audit.py`
+both stayed clean (0 modes failed / 0 feeds not folding) before and
+after. `notify` is intentionally absent from `render_audit.py`'s
+`TEXT_MODES` list, same as `planewatch` -- it's force-triggered, not
+part of the fixed sweep, verified manually instead (see above).
+
 **Universal scroll control** (`Scroller` + `Browsable` in `engines.py`,
 2026-07-31) — **system-wide convention; new sequence modes must follow
 it.** Every competitor in this category is push-only; this is what lets
