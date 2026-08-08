@@ -6088,6 +6088,13 @@ class FlightEngine(Browsable, BigMomentSource):
                     self.VIEW_SCOPE: self.VIEW_DETAIL,
                     self.VIEW_DETAIL: self.VIEW_ATC_LOG,
                     self.VIEW_ATC_LOG: self.VIEW_SCOPE,
+                    # VIEW_HANGAR isn't part of the SCOPE->DETAIL->ATC_LOG
+                    # drill-down (it's a separate up/down toggle) -- but it
+                    # was missing here entirely, so pressing rotate while on
+                    # it raised KeyError and left self.view stuck on HANGAR,
+                    # silently hiding the live scope. Same "any deeper view
+                    # goes back to SCOPE" rule drop already uses.
+                    self.VIEW_HANGAR: self.VIEW_SCOPE,
                 }[self.view]
             self._auto_detail = False    # manual either way -- see reset()
             self.hold = 0
