@@ -335,14 +335,21 @@ def wrap_text(text, max_px, max_lines=None, scale=1):
     return lines
 
 
-def draw_header(buf, title, accent, right_tag=None, stale=False):
+def draw_header(buf, title, accent, right_tag=None, stale=False, icon=None):
     """Standard top chrome for every data mode: a full-width accent rule,
     the mode/source title on it, and an optional right-aligned tag.
 
     A solid coloured rule (rather than only coloured text) is what makes
     each mode identifiable from across a room before any text is legible
     -- at 64px the title itself is only readable up close, but a band of
-    colour reads instantly."""
+    colour reads instantly.
+
+    `icon` is an optional draw_icon_*(buf, x, y, color) callable (see
+    SPORT_ICONS) -- when present it draws a small 5px glyph to the left
+    of the title and the title's own budget shrinks to make room, so a
+    sport is identifiable by shape as well as by its accent-colour rule,
+    the same "which of these am I looking at" role the flight mode's
+    aircraft-type icon plays there."""
     for x in range(WIDTH):
         put_px(buf, x, 0, accent)
         put_px(buf, x, 1, rim(accent, 0.45))
@@ -361,7 +368,11 @@ def draw_header(buf, title, accent, right_tag=None, stale=False):
     if tag:
         draw_text3x5(buf, right - text_w(tag), 3, tag, (110, 118, 140))
         right -= text_w(tag) + 3
-    draw_text3x5(buf, 2, 3, fit_text(title, right - 2), color_on_dark(accent))
+    left = 2
+    if icon is not None:
+        icon(buf, left, 3, color_on_dark(accent))
+        left += 6
+    draw_text3x5(buf, left, 3, fit_text(title, right - left), color_on_dark(accent))
 
 
 def color_on_dark(c, floor=140):
@@ -602,6 +613,119 @@ def draw_outs(buf, x, y, outs, on_col=OUT_ON, off_col=OUT_OFF):
         c = on_col if (outs or 0) > i else off_col
         put_px(buf, x + i * 3, y, c)
         put_px(buf, x + i * 3 + 1, y, c)
+
+
+# =============================================================================
+# PER-SPORT IDENTITY ICONS -- baseball already had draw_diamond()/draw_outs()
+# above; this is the same idea (a few put_px, a fixed relative offset table,
+# no general-purpose shape algorithm) extended to every other sport this
+# project covers. ONE shape per sport, reused in TWO contexts (a tiny header
+# glyph and a bigger celebration accent), exactly the "one shape language,
+# multiple scaled contexts" pattern the flight icons already established.
+#
+# HARD RULE: every offset table below is simple original geometry (line
+# segments / dot clusters describing the SPORT generically -- a ball, a
+# flag, a puck), never a real league's actual mark. If a shape reads as a
+# specific real trademark, it needs to be simplified further, not shipped.
+#
+# Each function draws into a small box anchored at (x, y) and takes a
+# `scale` (drawn by multiplying offsets, matching the "reuse the same
+# geometric definition, scaled differently" precedent from the aircraft
+# sprites) -- no interpolation, just sparser ink at larger scale, which is
+# fine for an accent glyph, not a hero image.
+def _draw_offsets(buf, x, y, offsets, color, scale=1):
+    for dx, dy in offsets:
+        px, py = x + dx * scale, y + dy * scale
+        put_px(buf, px, py, color)
+        if scale > 1:
+            # Fill the scale x scale cell so a bigger icon isn't just the
+            # same sparse dots spread further apart.
+            for fx in range(scale):
+                for fy in range(scale):
+                    put_px(buf, px + fx, py + fy, color)
+
+
+def draw_icon_football(buf, x, y, color, scale=1):
+    """Oval/lentil + a center seam line -- generic football silhouette,
+    not any team's ball art."""
+    outline = ((1, 0), (2, 0), (3, 0), (0, 1), (4, 1), (0, 2), (4, 2),
+               (1, 3), (2, 3), (3, 3))
+    _draw_offsets(buf, x, y, outline, color, scale)
+    _draw_offsets(buf, x, y, ((2, 1), (2, 2)), color, scale)
+
+
+def draw_icon_basketball(buf, x, y, color, scale=1):
+    """Circle outline + a cross seam -- a generic ball, not a real league
+    mark."""
+    outline = ((1, 0), (2, 0), (3, 0), (0, 1), (4, 1), (0, 2), (4, 2),
+               (0, 3), (4, 3), (1, 4), (2, 4), (3, 4))
+    _draw_offsets(buf, x, y, outline, color, scale)
+    _draw_offsets(buf, x, y, ((2, 1), (2, 2), (2, 3)), color, scale)
+
+
+def draw_icon_hockey(buf, x, y, color, scale=1):
+    """A flat puck (2px-tall rectangle) plus a short angled stick line --
+    pure geometric silhouette."""
+    puck = ((0, 2), (1, 2), (2, 2), (3, 2), (0, 3), (1, 3), (2, 3), (3, 3))
+    stick = ((4, 0), (3, 1))
+    _draw_offsets(buf, x, y, puck, color, scale)
+    _draw_offsets(buf, x, y, stick, color, scale)
+
+
+def draw_icon_soccer(buf, x, y, color, scale=1):
+    """Ball outline with an internal dot suggesting a panel seam --
+    deliberately simpler than the basketball glyph so the two don't read
+    the same at a glance."""
+    outline = ((1, 0), (2, 0), (3, 0), (0, 1), (4, 1), (0, 2), (4, 2),
+               (0, 3), (4, 3), (1, 4), (2, 4), (3, 4))
+    _draw_offsets(buf, x, y, outline, color, scale)
+    _draw_offsets(buf, x, y, ((2, 2),), color, scale)
+
+
+def draw_icon_golf(buf, x, y, color, scale=1):
+    """A flag on a pin -- vertical line plus a small triangular flag at
+    the top."""
+    pin = ((0, 0), (0, 1), (0, 2), (0, 3), (0, 4))
+    flag = ((1, 0), (2, 0), (1, 1))
+    _draw_offsets(buf, x, y, pin, color, scale)
+    _draw_offsets(buf, x, y, flag, color, scale)
+
+
+def draw_icon_mma(buf, x, y, color, scale=1):
+    """An abstract rounded-mitt silhouette -- a glove shape reduced to its
+    simplest geometric blob, not a detailed rendering."""
+    mitt = ((1, 0), (2, 0), (0, 1), (1, 1), (2, 1), (3, 1),
+            (0, 2), (1, 2), (2, 2), (3, 2), (1, 3), (2, 3))
+    _draw_offsets(buf, x, y, mitt, color, scale)
+
+
+# Dispatch by SportsEngine's own normalized `sport` key (see SPORT_ACCENT).
+# Baseball is deliberately absent -- draw_diamond()/draw_outs() are its
+# existing, already-shipped glyph and are reused as-is (see
+# _backdrop_sports below), not redefined here. Tennis has no live renderer
+# to attach an icon to yet (task #19, still pending) -- skipped on purpose,
+# not silently omitted.
+SPORT_ICONS = {
+    "football": draw_icon_football,
+    "basketball": draw_icon_basketball,
+    "hockey": draw_icon_hockey,
+    "soccer": draw_icon_soccer,
+    "golf": draw_icon_golf,
+    "mma": draw_icon_mma,
+}
+
+# Same icons, keyed instead by the OLDER per-league LEAGUE_PATHS code
+# (sports.LEAGUE_PATHS: NFL/NBA/MLB/NHL/EPL/NCAAF/NCAAB) -- the pinned-
+# favorite and per-league-ticker views predate the universal `sport` key
+# and still key off the raw league string. MLB is deliberately absent:
+# that view already carries baseball's own diamond/outs glyph in the
+# body, so a second identity mark in the header would be redundant.
+LEAGUE_ICON = {
+    "NFL": draw_icon_football, "NCAAF": draw_icon_football,
+    "NBA": draw_icon_basketball, "NCAAB": draw_icon_basketball,
+    "NHL": draw_icon_hockey,
+    "EPL": draw_icon_soccer,
+}
 
 
 def draw_trend_arrow(buf, x, y, up, color):
@@ -857,10 +981,21 @@ def _sunburst_rays(buf, t, color, n=10):
                 put_px(buf, x, y, tuple(int(c * fade) for c in color))
 
 
-def _backdrop_sports(buf, t, color):
+def _backdrop_sports(buf, t, color, moment=None):
     """Rings + rotating rays -- stadium energy. The ORIGINAL burst,
     unchanged, so the sports moments that already shipped look exactly
-    as they did before tiers existed."""
+    as they did before tiers existed.
+
+    ADDS a small per-sport identity icon as an accent, reusing the SAME
+    shape definition the header glyph draws (SPORT_ICONS / draw_diamond
+    for baseball), just at 2x scale -- the "one shape language, multiple
+    contexts" pattern, not a second design. Drawn in the top-left corner,
+    outside the centered text plate's reach, so it never collides with
+    the kind/line1/line2 block drawn afterward. The burst/ray backdrop
+    itself is UNCHANGED -- this only adds an accent on top of it, per
+    the "backdrop stays each mode's own visual language, only the
+    accent/detail varies" rule already used for the flights/satellite
+    backdrops."""
     _sunburst_rays(buf, t, color)
     # Three rings at staggered radii/phases so they don't read as one
     # blob -- each expands and wraps, giving continuous outward motion
@@ -869,9 +1004,22 @@ def _backdrop_sports(buf, t, color):
         radius = ((t * 1.6 + k * 11) % (_MAX_BURST_R - 3)) + 3
         ring_color = tuple(int(c * (1.0 - 0.4 * (k / 3))) for c in color)
         _burst_ring(buf, t, radius, ring_color, phase=k * 1.9)
+    sport = (moment or {}).get("sport")
+    icon_color = (255, 255, 255)
+    if sport == "baseball":
+        # Reuse the existing diamond glyph directly rather than adding a
+        # redundant second baseball shape -- drawn "empty" (no real base
+        # state to show here) since a celebration accent isn't a live
+        # base/out state, just an identity mark.
+        draw_diamond(buf, 4, 4, [False, False, False],
+                     on_col=icon_color, off_col=tuple(int(c * 0.35) for c in icon_color))
+    else:
+        fn = SPORT_ICONS.get(sport)
+        if fn is not None:
+            fn(buf, 4, 4, icon_color, scale=2)
 
 
-def _backdrop_flights(buf, t, color):
+def _backdrop_flights(buf, t, color, moment=None):
     """A radar sweep wedge -- the flights mode's OWN heartbeat, blown up
     to full-panel. Deliberately not the sports burst: a celebration
     should feel like it belongs to the system that fired it while still
@@ -899,7 +1047,7 @@ def _backdrop_flights(buf, t, color):
                 tuple(int(c * 0.75) for c in color), n=32)
 
 
-def _backdrop_satellite(buf, t, color):
+def _backdrop_satellite(buf, t, color, moment=None):
     """A rising horizon-to-horizon arc with a travelling marker -- the
     sky-dome mode's own pass-arc language (see
     SatelliteEngine._draw_pass_arc), scaled to full panel. Reads as
@@ -958,7 +1106,7 @@ def draw_celebration(buf, t, moment, total=CELEBRATION_TICKS):
     if t < flash_ticks:
         fill(buf, tuple(min(255, int(c * 0.6 + 90)) for c in color))
 
-    CELEBRATION_BACKDROPS.get(moment.get("system"), _backdrop_sports)(buf, t, color)
+    CELEBRATION_BACKDROPS.get(moment.get("system"), _backdrop_sports)(buf, t, color, moment)
 
     # Dark plate behind the text so it stays legible over the burst --
     # same reasoning as any header's contrast treatment elsewhere in this
@@ -1065,7 +1213,7 @@ class BigMomentSource:
         return m
 
     def _set_big_moment(self, kind, line1, line2="", color=None,
-                        tier=TIER_INTERRUPT, system=SYSTEM_SPORTS):
+                        tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport=None):
         """`kind`/`line1`/`line2` must already be paneltext.panel_text()-
         folded by the caller, same as every other externally-sourced
         string these engines draw.
@@ -1083,7 +1231,8 @@ class BigMomentSource:
         clobbering a bigger one still waiting to be shown.
         """
         moment = {"kind": kind, "line1": line1, "line2": line2,
-                  "color": color or (255, 200, 40), "tier": tier, "system": system}
+                  "color": color or (255, 200, 40), "tier": tier, "system": system,
+                  "sport": sport}
         if tier == TIER_FLASH:
             self._flash = moment
             self._flash_t = TIER_TICKS[TIER_FLASH]
@@ -7581,7 +7730,8 @@ class SportsEngine(Browsable, BigMomentSource):
         live = fg["state"] == "in"
         draw_header(buf, fg["league"], lg_col,
                     right_tag="LIVE" if live else ("FINAL" if fg["state"] == "post" else ""),
-                    stale=bool(self.data.get("age") and self.data["age"] > 120))
+                    stale=bool(self.data.get("age") and self.data["age"] > 120),
+                    icon=LEAGUE_ICON.get(fg["league"]))
 
         flash_col = self.FLASH if (self.score_flash > 0 and self.score_flash % 2 == 0) else None
         self._draw_game_block(buf, fg, 12, big=True, flash_col=flash_col)
@@ -7662,7 +7812,8 @@ class SportsEngine(Browsable, BigMomentSource):
         live = g["state"] == "in"
         draw_header(buf, g["league"], lg_col,
                     right_tag="LIVE" if live else f"{self.cur + 1}/{len(games)}",
-                    stale=bool(self.data.get("age") and self.data["age"] > 120))
+                    stale=bool(self.data.get("age") and self.data["age"] > 120),
+                    icon=LEAGUE_ICON.get(g["league"]))
 
         self._draw_game_block(buf, g, 12, big=True)
 
@@ -7804,7 +7955,8 @@ class SportsEngine(Browsable, BigMomentSource):
         pos, total = self._league_position(ev)
         draw_header(buf, ev["league_name"] or ev["league"], accent,
                     right_tag=f"{pos}/{total}",
-                    stale=bool(self.data.get("age") and self.data["age"] > 300))
+                    stale=bool(self.data.get("age") and self.data["age"] > 300),
+                    icon=SPORT_ICONS.get(ev.get("sport")))
         self._draw_league_rail(buf, ev)
 
         comps = ev["competitors"]
@@ -8036,7 +8188,8 @@ class SportsEngine(Browsable, BigMomentSource):
         """
         accent = self._sport_accent(ev)
         pos, total = self._league_position(ev)
-        draw_header(buf, ev["league_name"] or "MMA", accent, right_tag=f"{pos}/{total}")
+        draw_header(buf, ev["league_name"] or "MMA", accent, right_tag=f"{pos}/{total}",
+                    icon=SPORT_ICONS.get(ev.get("sport")))
         self._draw_league_rail(buf, ev)
 
         # PRIMARY line: weight class, and whether this is the main event.
@@ -8099,7 +8252,8 @@ class SportsEngine(Browsable, BigMomentSource):
         """
         accent = self._sport_accent(ev)
         pos, total = self._league_position(ev)
-        draw_header(buf, ev["league_name"] or "SOCCER", accent, right_tag=f"{pos}/{total}")
+        draw_header(buf, ev["league_name"] or "SOCCER", accent, right_tag=f"{pos}/{total}",
+                    icon=SPORT_ICONS.get(ev.get("sport")))
         self._draw_league_rail(buf, ev)
 
         # Laid out with a CURSOR. Fixed offsets put the divider and the
@@ -8192,7 +8346,8 @@ class SportsEngine(Browsable, BigMomentSource):
         pos, total = self._league_position(ev)
         draw_header(buf, ev["league_name"] or ev["league"], accent,
                     right_tag=f"{pos}/{total}",
-                    stale=bool(self.data.get("age") and self.data["age"] > 300))
+                    stale=bool(self.data.get("age") and self.data["age"] > 300),
+                    icon=SPORT_ICONS.get(ev.get("sport")))
         self._draw_league_rail(buf, ev)
 
         comps = ev["competitors"]
@@ -8314,7 +8469,7 @@ class SportsEngine(Browsable, BigMomentSource):
         # fallback for a sport without one (golf, MMA).
         color = (255, 200, 40)
         self._set_big_moment(move, name, f"{move} {par}", color,
-                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS)
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="golf")
 
     BIG_MOMENT_DETECTORS["golf_move"] = _detect_golf_big_moment
 
@@ -8369,7 +8524,7 @@ class SportsEngine(Browsable, BigMomentSource):
         line1 = f"{away['abbr']} {away['score']}, {home['abbr']} {home['score']}"
         color = home.get("color") or away.get("color") or (255, 200, 40)
         self._set_big_moment("HOME RUN", line1, newest["text"], color,
-                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS)
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="baseball")
 
     BIG_MOMENT_DETECTORS["mlb_hr"] = _detect_mlb_home_run
 
@@ -8416,7 +8571,7 @@ class SportsEngine(Browsable, BigMomentSource):
         line1 = f"{away['abbr']} {away['score']}, {home['abbr']} {home['score']}"
         color = home.get("color") or away.get("color") or (255, 100, 40)
         self._set_big_moment("TOUCHDOWN", line1, newest["text"], color,
-                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS)
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="football")
 
     BIG_MOMENT_DETECTORS["nfl_touchdown"] = _detect_nfl_touchdown
 
@@ -8466,7 +8621,7 @@ class SportsEngine(Browsable, BigMomentSource):
         line1 = f"{away['abbr']} {away['score']}, {home['abbr']} {home['score']}"
         color = home.get("color") or away.get("color") or (40, 160, 255)
         self._set_big_moment("GOAL", line1, newest["text"], color,
-                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS)
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="hockey")
 
     BIG_MOMENT_DETECTORS["nhl_goal"] = _detect_nhl_goal
 
@@ -8525,7 +8680,7 @@ class SportsEngine(Browsable, BigMomentSource):
         line2 = ev.get("class_label") or ""
         color = (winner or {}).get("color") or (255, 200, 40)
         self._set_big_moment(kind, name, line2, color,
-                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS)
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="mma")
 
     BIG_MOMENT_DETECTORS["mma_finish"] = _detect_mma_finish
 
@@ -8838,7 +8993,7 @@ class SportsEngine(Browsable, BigMomentSource):
 
         line1 = f"{away.get('abbr') or ''} {away.get('score')} - {home.get('score')} {home.get('abbr') or ''}"
         self._set_big_moment("GOAL", line1, newest["text"] or newest["type"], color,
-                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS)
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="soccer")
 
     BIG_MOMENT_DETECTORS["soccer_goal"] = _detect_soccer_goal
 
