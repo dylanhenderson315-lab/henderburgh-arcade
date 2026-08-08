@@ -44,6 +44,7 @@ from display import get_renderer
 import backgrounds
 import market
 import satellite
+import flights
 import sports
 import news
 import weather
@@ -711,6 +712,22 @@ class Arcade:
                     time.sleep(0.1)
                     continue
 
+                # PLANE-IN-WINDOW TAKEOVER. Cheap check every tick, same
+                # cost class as flights.FEED.get()'s own cache read (this
+                # is a plain list pop under a lock, not new I/O) --
+                # matching the discipline _severe_alert_frame() already
+                # uses for its own every-tick weather.FEED.get() read.
+                # Guarded to skip "off" (already excluded above -- the
+                # panel doubling as a house lamp must not be woken by a
+                # plane flying by, per CLAUDE.md) and "planewatch" itself
+                # (don't re-trigger a takeover already in progress).
+                if mode != "planewatch":
+                    batch = flights.FEED.pop_window_takeover_batch()
+                    if batch:
+                        self.set_mode("planewatch")
+                        with self.lock:
+                            mode, eng = self.mode, self.engine
+
                 # Pause DDP and sample the real Apollo effect into a loop cache
                 # so game underlays are exact (Polar_Waves ≠ Fire, Yves exact, …).
                 # Never capture during pure ambient — native FX already is exact.
@@ -980,6 +997,14 @@ class Handler(BaseHTTPRequestHandler):
             lat, lon, label = satellite.FEED.get_location()
             self._json({"lat": lat, "lon": lon, "label": label,
                         "configured": satellite.FEED.configured})
+        elif path == "/api/window":
+            # Window bearing/FOV config -- confirmed genuinely missing
+            # before adding (satellite.py already owns load_window()/
+            # save_window() and location_config.json; there was simply no
+            # HTTP surface for it yet). Same shape as /api/satellite/
+            # location just above.
+            w = satellite.load_window()
+            self._json({"center_deg": w["center_deg"], "fov_deg": w["fov_deg"]})
         elif path == "/api/sports/config":
             leagues, favorite = sports.FEED.get_config()
             u = sports.FEED.get_universal()
@@ -1158,6 +1183,15 @@ class Handler(BaseHTTPRequestHandler):
                 lat, lon, label = satellite.FEED.set_location(
                     j["lat"], j["lon"], j.get("label", "HOME"))
                 self._json({"ok": True, "lat": lat, "lon": lon, "label": label})
+            except (ValueError, KeyError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/window":
+            try:
+                j = json.loads(body or b"{}")
+                center = float(j["center_deg"])
+                fov = float(j["fov_deg"])
+                satellite.save_window(center, fov)
+                self._json({"ok": True, "center_deg": center, "fov_deg": fov})
             except (ValueError, KeyError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/sports/leagues":
