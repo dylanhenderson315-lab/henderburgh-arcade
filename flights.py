@@ -118,68 +118,20 @@ def save_airport(code, lat, lon):
 # 80deg total field of view (roughly 256deg -> 336deg). Stored in the SAME
 # shared location_config.json as `airport` -- a window's bearing is a
 # LOCATION fact tied to where the panel/owner actually is, exactly the
-# reasoning that already put `airport` there instead of a new file. Default
-# values below are the real measured numbers, seeded into the config on
-# first save so the mode has a real window from the start rather than an
-# invented one -- but everything is re-readable/settable without a code
-# edit from here on, per the config-driven convention this project holds
-# every owner-specific value to.
-WINDOW_CENTER_DEG_DEFAULT = 296.0
-WINDOW_FOV_DEG_DEFAULT = 80.0
-
-
-def load_window():
-    """The configured window cone as {"center_deg", "fov_deg"}. Malformed
-    or missing data falls back to the real measured defaults above (never
-    a guessed value) -- same "safe default on first run" shape as
-    satellite.load_location()."""
-    path = satellite.CONFIG_PATH
-    data = {}
-    if path.exists():
-        try:
-            data = json.loads(path.read_text()) or {}
-        except (json.JSONDecodeError, OSError, TypeError, ValueError):
-            data = {}
-    win = data.get("window")
-    if isinstance(win, dict):
-        try:
-            center = float(win["center_deg"]) % 360.0
-            fov = float(win["fov_deg"])
-            if 0.0 < fov <= 360.0:
-                return {"center_deg": center, "fov_deg": fov}
-        except (KeyError, TypeError, ValueError):
-            pass
-    return {"center_deg": WINDOW_CENTER_DEG_DEFAULT, "fov_deg": WINDOW_FOV_DEG_DEFAULT}
-
-
-def save_window(center_deg, fov_deg):
-    """Persist the window cone. PRESERVES every key this function does not
-    own (notably `airport`, and `lat`/`lon`/`label` -- the identical lesson
-    satellite.save_location()/save_airport() already had to learn: a writer
-    that rebuilds the whole document silently wipes a sibling feature's
-    config the first time this one is touched)."""
-    path = satellite.CONFIG_PATH
-    data = {}
-    if path.exists():
-        try:
-            data = json.loads(path.read_text()) or {}
-        except (json.JSONDecodeError, OSError, TypeError, ValueError):
-            data = {}
-    data["window"] = {"center_deg": float(center_deg) % 360.0,
-                      "fov_deg": float(fov_deg)}
-    path.write_text(json.dumps(data, indent=2))
-    return data["window"]
-
-
-def in_window(bearing_deg, center_deg, fov_deg):
-    """True if `bearing_deg` (real bearing FROM home TO the aircraft --
-    i.e. `dir_deg`, the exact same bearing every scope projection in this
-    module already uses, NOT `track_deg`, the aircraft's own heading)
-    falls inside the window cone. Angular wrap-around formula exactly as
-    specified -- already correct, not re-derived here."""
-    if bearing_deg is None:
-        return False
-    return abs(((bearing_deg - center_deg + 180) % 360) - 180) <= (fov_deg / 2)
+# reasoning that already put `airport` there instead of a new file.
+#
+# in_window()/load_window()/save_window() MOVED to satellite.py on
+# 2026-08-08: satellite.py gained its own window feature (the sky dome /
+# pass list also need to know what's in the same window), and satellite.py
+# already owns location_config.json, so it -- not flights.py -- is the
+# correct home for the SHARED implementation. satellite.py cannot import
+# flights.py (this module already imports satellite.py; the reverse would
+# be circular), so flights.py keeps calling the shared functions from here,
+# same one-line-per-call-site shape as every other satellite.CONFIG_PATH
+# read in this file (load_airport/save_airport above).
+load_window = satellite.load_window
+save_window = satellite.save_window
+in_window = satellite.in_window
 
 
 # Soft-priority boost applied to a window aircraft's sort rank (see the

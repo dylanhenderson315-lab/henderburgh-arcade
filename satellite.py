@@ -90,6 +90,83 @@ def load_location():
     return DEFAULT_LAT, DEFAULT_LON, DEFAULT_LABEL
 
 
+# ---- window filter (2026-08-07, moved here 2026-08-08) -------------------
+# Prioritize/flag anything currently visible out ONE specific real window,
+# measured with a phone compass held at that window: centre bearing 296deg,
+# 80deg total field of view (roughly 256deg -> 336deg). Stored in the SAME
+# shared location_config.json this module already owns -- a window's
+# bearing is a LOCATION fact tied to where the panel/owner actually is,
+# exactly the reasoning that already put `airport` here (flights.py, but in
+# THIS file's config).
+#
+# MOVED here from flights.py on 2026-08-08 when satellite.py gained its own
+# window feature (the sky dome / pass list). Both flights.py and
+# satellite.py need in_window()/load_window()/save_window() now, and
+# satellite.py cannot import flights.py (flights.py already imports
+# satellite.py -- a satellite->flights import would be circular, confirmed
+# by reading both files' imports before this move). satellite.py already
+# owns location_config.json (CONFIG_PATH above), so it is the natural home
+# for the shared pieces rather than making satellite.py duplicate code that
+# used to live in flights.py. flights.py now calls satellite.in_window() /
+# satellite.load_window() / satellite.save_window() -- see its own note at
+# the old call sites.
+WINDOW_CENTER_DEG_DEFAULT = 296.0
+WINDOW_FOV_DEG_DEFAULT = 80.0
+
+
+def load_window():
+    """The configured window cone as {"center_deg", "fov_deg"}. Malformed
+    or missing data falls back to the real measured defaults above (never
+    a guessed value) -- same "safe default on first run" shape as
+    load_location()."""
+    data = {}
+    if CONFIG_PATH.exists():
+        try:
+            data = json.loads(CONFIG_PATH.read_text()) or {}
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            data = {}
+    win = data.get("window")
+    if isinstance(win, dict):
+        try:
+            center = float(win["center_deg"]) % 360.0
+            fov = float(win["fov_deg"])
+            if 0.0 < fov <= 360.0:
+                return {"center_deg": center, "fov_deg": fov}
+        except (KeyError, TypeError, ValueError):
+            pass
+    return {"center_deg": WINDOW_CENTER_DEG_DEFAULT, "fov_deg": WINDOW_FOV_DEG_DEFAULT}
+
+
+def save_window(center_deg, fov_deg):
+    """Persist the window cone. PRESERVES every key this function does not
+    own (notably `airport`, `lat`/`lon`/`label` -- the identical lesson
+    save_location()/flights.save_airport() already had to learn: a writer
+    that rebuilds the whole document silently wipes a sibling feature's
+    config the first time this one is touched)."""
+    data = {}
+    if CONFIG_PATH.exists():
+        try:
+            data = json.loads(CONFIG_PATH.read_text()) or {}
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            data = {}
+    data["window"] = {"center_deg": float(center_deg) % 360.0,
+                      "fov_deg": float(fov_deg)}
+    CONFIG_PATH.write_text(json.dumps(data, indent=2))
+    return data["window"]
+
+
+def in_window(bearing_deg, center_deg, fov_deg):
+    """True if `bearing_deg` (a real bearing FROM home, 0-360 from north --
+    flights.py's `dir_deg`, or skypass.py's `az`/`peak_az`/`rise_az`/
+    `set_az`, all the SAME convention, confirmed by reading skypass.py's
+    predict()/sky_now() before reusing this formula for satellites) falls
+    inside the window cone. Angular wrap-around formula exactly as
+    specified -- already correct, not re-derived here."""
+    if bearing_deg is None:
+        return False
+    return abs(((bearing_deg - center_deg + 180) % 360) - 180) <= (fov_deg / 2)
+
+
 def save_location(lat, lon, label):
     """PRESERVES any key this function does not own (notably `airport`,
     which flights.py stores in this same file) -- the identical lesson

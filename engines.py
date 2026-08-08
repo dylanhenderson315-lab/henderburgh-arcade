@@ -5263,6 +5263,13 @@ class SatelliteEngine(Browsable, BigMomentSource):
 
     ACCENT = (150, 190, 255)  # ONE accent for the whole mode, was gold+blue
 
+    # WINDOW FILTER (2026-08-08) -- the SAME violet as FlightEngine.WINDOW_RING,
+    # deliberately, not a new color. One window, one config, one visual
+    # convention: a viewer who has already learned "violet ring = visible out
+    # my window" on the flight scope should not have to learn a second color
+    # for the sky dome. See satellite.in_window()/draw_window_ring()'s notes.
+    WINDOW_RING = (190, 110, 255)
+
     VIEW_TICKS = 160          # ~8s per pass while auto-advancing UPCOMING
 
     # THIRD view, ADDITIVE. The settled UPCOMING/OVERHEAD-NOW pair is
@@ -5503,7 +5510,16 @@ class SatelliteEngine(Browsable, BigMomentSource):
         if any(self._is_overhead(p) for p in ps):
             return 3.0                     # it's happening right now
         best_rank = max((skypass.quality_rank(p)[1] for p in ps), default=1)
-        return {3: 2.5, 2: 1.5}.get(best_rank, 1.0)
+        weight = {3: 2.5, 2: 1.5}.get(best_rank, 1.0)
+        # WINDOW FILTER (2026-08-08): a small ADDITIVE nudge, same relationship
+        # to the base weight as flights.WINDOW_BOOST has to _notable() rank --
+        # never overriding a stronger existing signal (quality still decides
+        # the tier), only breaking a tie in favor of "and it's out my window".
+        # 0.25 is kept well under the smallest real gap between tiers here
+        # (0.5, between GOOD's 1.5 and BRIGHT's 2.5) so it can never cross one.
+        if any(p.get("in_window") for p in ps):
+            weight += 0.25
+        return weight
 
     # ---- render --------------------------------------------------------
     @staticmethod
@@ -5580,6 +5596,20 @@ class SatelliteEngine(Browsable, BigMomentSource):
         tag, rank = skypass.quality_rank(p)
         col = self.VISIBLE if rank >= 2 else self.INK
         self._draw_chip(buf, y, self._chip_tag(rank), col)
+        # WINDOW FILTER (2026-08-08): chronological order is left alone --
+        # ps stays soonest-first (see skypass.predict()'s own docstring),
+        # because reordering it would make a window pass jump ahead of a
+        # sooner non-window one, which is confusing on a COUNTDOWN screen in
+        # a way it isn't on the flight scope's distance ranking. Instead the
+        # SAME violet ring flights already established is drawn as a small
+        # badge beside the chip -- flags this specific pass without adding a
+        # second tier of text next to GO OUTSIDE/GOOD PASS/VISIBLE, and
+        # without inventing a new visual (see draw_window_ring()'s own note
+        # on staying the "simple" version).
+        if p.get("in_window"):
+            tw = text_w(self._chip_tag(rank))
+            ring_x = (WIDTH - tw - 6) // 2 - 6
+            draw_window_ring(buf, ring_x, y + 4, self.WINDOW_RING)
 
         pos = self.data.get("pos")
         if is_iss and pos:
@@ -5704,6 +5734,16 @@ class SatelliteEngine(Browsable, BigMomentSource):
             if frac is None or az is None:
                 continue
             x, y = scope_xy(az, frac)
+            # WINDOW FILTER (2026-08-08): the centerpiece of the satellite
+            # window feature -- "is this object visible out my window RIGHT
+            # NOW", answered with the exact same primitive and placement
+            # flights.py's scope already established (draw_window_ring()
+            # under the icon, drawn first so it's never obscured). `az` is
+            # skypass.sky_now()'s live current azimuth, same bearing
+            # convention as flights' dir_deg, confirmed via skypass.py
+            # before reuse -- see satellite.in_window()'s own note.
+            if o.get("in_window"):
+                draw_window_ring(buf, x, y, self.WINDOW_RING)
             # `visible` (elevation + sunlit + observer darkness), not just
             # `sunlit`, drives the bright/dim split -- an object that is
             # sunlit but it's broad daylight here, or one in Earth's
@@ -6519,7 +6559,7 @@ class FlightEngine(Browsable, BigMomentSource):
             mark_col = self.ATC_MATCH if matched else ((255, 255, 255) if sel else col)
             # WINDOW FILTER (2026-08-07): a small ring under the icon for
             # any aircraft currently visible out the configured window --
-            # see flights.in_window()/draw_window_ring()'s own notes.
+            # see satellite.in_window()/draw_window_ring()'s own notes.
             # Drawn BEFORE the aircraft icon so the ring never covers it.
             if ac.get("in_window"):
                 draw_window_ring(buf, x, y, self.WINDOW_RING)
