@@ -17,6 +17,11 @@ tron_brain.json
 # macOS
 .DS_Store
 
+# HA notify shared-secret token -- a real credential, unlike every other
+# *_config.json here (leagues/URLs/coordinates). Generated at runtime by
+# notify.load_config() on first POST /api/notify; never committed.
+notify_config.json
+
 # ATC transcription log -- runtime state (real transcript text with real
 # timestamps), not source, and personal-rig-only (see atc.py/CLAUDE.md).
 atc_log.jsonl
