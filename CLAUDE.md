@@ -1109,6 +1109,100 @@ appends them to the menu automatically.
     problem found. Next session: re-check both once celestrak is
     reachable and/or a real aircraft is in the window.
 
+  **DEAD RECKONING (2026-08-08)** — real user feedback after watching the
+  radar scope: aircraft only visibly moved once per ADS-B poll (`flights.
+  FEED` refreshes every `flights.POSITION_REFRESH` = 15s), sitting frozen
+  at their last-polled bearing/distance the rest of the time and
+  teleporting once per poll. Read as static/jumpy, not "live". Fixed with
+  render-side dead reckoning, `FlightEngine._update_dead_reckoning()` —
+  pure math over data `flights.py` already fetches, **zero new I/O**,
+  same discipline every other engine in this project follows.
+
+  - **Real data only, no invented motion.** Every aircraft dict already
+    carries REAL `gs_kt` (ADS-B ground speed, kt) and `track_deg` (real
+    heading) — this is physics-based extrapolation from observed real
+    velocity, the same category of derived-but-real inference
+    `flights._phase()` already does for CLIMB/DESCEND/CRUISE
+    classification, just continuous instead of discrete.
+  - **The math**: real `dist_nm`/`dir_deg` (bearing FROM home, the same
+    convention `scope_xy()` itself uses — confirmed by reading
+    `scope_xy()`'s own docstring/formula before writing any of this: `x =
+    cx + r*sin(bearing)`, `y = cy - r*cos(bearing)`, 0°=N=up, clockwise)
+    convert to a local flat-plane position: `x_nm = dist_nm*sin(dir_deg)`,
+    `y_nm = dist_nm*cos(dir_deg)` (north = +y). On a REAL poll, this
+    becomes the dead-reckoning REFERENCE for that aircraft, keyed by the
+    SAME identity `_sel_key()` selection already uses (hex preferred,
+    ident fallback) — one keying scheme, not a second one. Every render
+    tick after that, if `gs_kt`/`track_deg` are BOTH real (neither
+    `None` — honest degrade otherwise: hold the last known real position,
+    extrapolate nothing), advance from the reference: `speed_nm_per_sec =
+    gs_kt / 3600`, `dx = speed_nm_per_sec * sin(track_deg) * elapsed`,
+    `dy = speed_nm_per_sec * cos(track_deg) * elapsed`, elapsed clamped
+    to `[0, DR_MAX_MULT(2.0) * POSITION_REFRESH]` (30s) so a late/stalled
+    poll freezes extrapolation at a ceiling instead of projecting further
+    into an increasingly unreliable future — same "an honest gap beats a
+    lie" principle as the selection-loss-on-range-exit handling above.
+    Recomputed `dist_nm`/`dir_deg` land on the aircraft dict as
+    `_ext_dist_nm`/`_ext_dir_deg`.
+  - **Real poll always wins, no blending.** `tick()` detects a genuinely
+    new poll landing by watching `flights.FEED.get()`'s own `age` field
+    (seconds since the cached snapshot was fetched): `age` increases
+    smoothly with real wall time between polls and drops back down the
+    instant a new snapshot lands, so a decrease is a reliable "a real
+    poll just landed" signal with **zero extra I/O** (no second signal
+    needed). On that signal, the dead-reckoning reference resets
+    immediately to the new real position/timestamp — never smoothed or
+    blended toward it, so a real position correction is never hidden.
+  - **Text stays real, only the icon moves.** `_ext_dist_nm`/
+    `_ext_dir_deg` are read in exactly one place — `_frame_scope()`'s
+    aircraft-icon `x, y` — falling back to the real `dist_nm`/`dir_deg`
+    when unset. Every other read of the aircraft dict (DETAIL card text,
+    sorting, notability, ATC matching, the window filter) still sees the
+    real polled values untouched, so nothing ever displays a number that
+    isn't literally what ADS-B reported. The window ring and selection
+    ring are drawn AT the icon's `x, y`, so they track the smoothed
+    position automatically — no separate wiring needed.
+  - **No new rim-clipping risk.** `_scope_r_frac()` already clamps its
+    output to `[0, 1]` (`min(1.0, dist_nm / RADIUS_NM)`) before the sqrt
+    — an extrapolated aircraft projected past the rim just draws AT the
+    rim, identical to how a real near-rim aircraft already renders; no
+    new edge-of-scope handling was invented.
+  - **Bounded.** `self._dr` (sel_key -> `{x_nm, y_nm, t_ref}`) is rebuilt
+    to only the keys present in the current aircraft list every tick —
+    an aircraft leaving `RADIUS_NM` has its dead-reckoning state cleaned
+    up here too, same discipline as every other keyed cache in this
+    project (THE HANGAR, `atc.py`'s log).
+  - **Verified**: `.venv/bin/python -c "import flights, engines"` clean.
+    Direct math check: a synthetic aircraft at 10nm/090°, 360kt, heading
+    000° — hand-computed position after 5 real seconds
+    (10.0125nm/87.138°) matched the engine's actual
+    `_update_dead_reckoning()` output within float tolerance
+    (10.0125nm/87.1376°, diff <1e-4). Drove the engine through 20
+    simulated ticks between two real polls: `(x_nm, y_nm)` progressed
+    smoothly and monotonically toward the aircraft's real track, never
+    jumpy or static. Confirmed the honest-degrade path (missing
+    `gs_kt`/`track_deg` → no `_ext_*` fields set, position holds).
+    Confirmed snap-to-real: a new poll with a very different real
+    position immediately became the new reference with zero blending.
+    Confirmed the `DR_MAX_MULT` clamp: a 10,000s-stale reference
+    extrapolated only to the 30s ceiling, not further. Confirmed bounded
+    cleanup: an aircraft absent from the next tick's list is dropped from
+    `self._dr`. `render_audit.py`/`fold_audit.py` both clean (0 modes
+    failed, 0 feeds not folding), including flights' scope render.
+    **Real panel check**: restarted `com.henderburgh.arcade`, switched to
+    `flights`, pulled `/api/frame` repeatedly a few hundred ms apart.
+    **Zero real aircraft were in range at MYR at verification time**
+    (`flights.FEED.get()` returned an empty list for several consecutive
+    real polls), so the frame correctly showed the static `_frame_idle()`
+    "CLEAR SKIES" screen and byte-identical frames are the EXPECTED
+    result in that state, not a sign of a stuck sweep — the moving-icon
+    behavior itself is honestly unverified on the real physical panel
+    this session; the direct math/engine-driving checks above are what's
+    actually verified. Next session with real traffic in range: watch a
+    selected aircraft's icon move smoothly between two real polls rather
+    than jumping only at the 15s mark. Panel restored to `ambient`
+    afterward.
+
   **FLOWN-PATH TRAIL + ROUTE CONTEXT (2026-08-08)** — three owner-requested
   features, built the same session real DEAD-RECKONING landed (see
   `FlightEngine._update_dead_reckoning()`, already in the working tree
