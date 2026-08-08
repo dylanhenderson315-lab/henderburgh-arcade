@@ -2442,6 +2442,53 @@ build against synthesized card data," and ESPN's outage meant there was
 no way to even check whether one existed. Still open; build it the
 first session ESPN is reachable and a real card is live.
 
+### Select-to-expand gets its own transition (2026-08-08)
+
+**Real gap, not a guess**: `SportsEngine.frame()`'s transition already
+slides between PANELS (pinned team -> golfer -> events), but its `cur`
+tracking key never included `self.detail` — entering or leaving a
+game's expanded detail view was an instant cut, the one select-to-expand
+action in the whole project with zero motion. Owner feedback: hitting
+select to open a game should feel like "a spectacular, genius breakdown"
+— eye-catching, not a snap.
+
+**`transitions.iris_open()`** (new, `transitions.py`) — new content
+reveals from the centre column outward, like a shutter opening. Same
+cost class as the existing `wipe_right` (one slice pair per row, still
+zero per-pixel work — the hard constraint every style in that module
+respects): `k` grows from `WIDTH//2` outward instead of from one edge,
+still pure byte slicing.
+
+**Deliberately its own style, not a reuse of `push_up`** — opening ONE
+specific game is a bigger, more deliberate moment than switching which
+panel is showing, and CLAUDE.md's own working conventions already
+establish that distinct actions deserve visually distinct treatment
+(see the flights/satellite backdrop reasoning). `SportsEngine.frame()`
+now tracks `cur = (self._panel(), self.panel_i, self.detail is not None)`
+— entering detail (`False -> True`) fires `iris_open`; leaving
+(`True -> False`) fires the existing `push_down` (a natural "closing"
+counterpart, no new style needed for that direction); stepping between
+games while ALREADY expanded (left/right browsing) does not change the
+`in_detail` flag, so it stays instant, matching this project's
+established "switching KIND of thing gets a transition, browsing within
+one stays immediate" rule verbatim. `DETAIL_TRANSITION_TICKS = 14`
+(~0.7s, longer than the 8-tick/~0.4s panel slide) — a bigger moment
+gets a touch more time to land, not just a different shape.
+
+**Verified**: driven directly through a real `SportsEngine` instance
+(not synthetic frames) — confirmed `_trans_style` correctly resolves to
+`iris_open` on entry and `push_down` on exit, confirmed browsing between
+two different games while expanded does not restart or alter the
+transition. `render_audit.py`/`fold_audit.py` both clean (0 modes
+failed, 0 feeds not folding) before and after. **Live-verified on the
+real panel**: restarted `com.henderburgh.arcade`, switched to `sports`,
+pressed `rotate` through the real `/api/press` input path, pulled
+`/api/frame` across 5 consecutive frames — lit-pixel count grew
+monotonically (916 -> 989 -> 1077 -> 1162 -> 1162, settling once the
+transition completed), confirming the band genuinely widens from centre
+outward on real hardware, not just in a synthetic buffer diff. Panel
+restored to `ambient` afterward.
+
 ### Per-sport EXPANDED-DETAIL renderers (started 2026-08-01)
 
 **Why, and why it's a SEPARATE follow-up rather than part of the main-

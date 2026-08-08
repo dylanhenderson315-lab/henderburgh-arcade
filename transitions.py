@@ -87,11 +87,38 @@ def fade(old, new, p):
     return brightness.apply(new, (p - 0.5) * 2.0)
 
 
+def iris_open(old, new, p):
+    """New content reveals from the centre column outward, like a shutter
+    opening -- reserved for expanding a ticker row into its full detail
+    view (SportsEngine.frame(), entering `self.detail`), distinct on
+    purpose from push_up's full mode changes so opening ONE game reads as
+    its own kind of motion, not a smaller version of switching modes.
+    Same cost class as wipe_right: one slice pair per row, still no
+    per-pixel work -- the band just grows from the middle instead of one
+    edge."""
+    half = WIDTH // 2
+    k = int(_ease(p) * (half + 1))
+    if k <= 0:
+        return old
+    if k >= half:
+        return new
+    out = bytearray(FRAME)
+    lo = (half - k) * 3
+    hi = (half + k) * 3
+    for y in range(HEIGHT):
+        o = y * ROW
+        out[o:o + lo] = old[o:o + lo]
+        out[o + lo:o + hi] = new[o + lo:o + hi]
+        out[o + hi:o + ROW] = old[o + hi:o + ROW]
+    return bytes(out)
+
+
 STYLES = {
     "push_up": push_up,
     "push_down": push_down,
     "wipe_right": wipe_right,
     "fade": fade,
+    "iris_open": iris_open,
 }
 DEFAULT_STYLE = "push_up"
 

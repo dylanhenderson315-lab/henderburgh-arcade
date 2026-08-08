@@ -7289,6 +7289,10 @@ class SportsEngine(Browsable, BigMomentSource):
 
     VIEW_TICKS = 200          # ~10s per view at this tick rate
     TRANSITION_TICKS = 8      # ~0.4s slide between PINNED and TICKER
+    DETAIL_TRANSITION_TICKS = 14  # ~0.7s -- a little longer than the panel
+                                   # slide above; entering a game's detail
+                                   # view is a bigger moment and reads
+                                   # better with a touch more time to land
     SPOTLIGHT_TICKS = 90      # ~4.5s per game in the ticker view
     FLASH_TICKS = 14
 
@@ -7315,6 +7319,8 @@ class SportsEngine(Browsable, BigMomentSource):
         self._prev_frame = None      # last rendered frame, for the outgoing slide
         self._trans_from = None
         self._trans_i = 0
+        self._trans_ticks = self.TRANSITION_TICKS
+        self._trans_style = transitions.DEFAULT_STYLE
         self.hold = 0
         self.cur = 0                     # index into games, for TICKER view
         # UNIVERSAL ticker: every sport ESPN is currently featuring, from
@@ -9068,32 +9074,54 @@ class SportsEngine(Browsable, BigMomentSource):
         return self._frame_ticker()
 
     def frame(self):
-        """Render the current panel, sliding when the PANEL changes.
+        """Render the current panel, sliding when the PANEL changes OR
+        when a game is entered/left via select-to-expand.
 
-        The slide fires on a panel change (pinned team -> golfer ->
+        The panel slide fires on a panel change (pinned team -> golfer ->
         events), not on stepping between games inside the events panel --
         browsing should feel immediate, while switching what KIND of thing
-        you are looking at deserves the shared transition.
+        you are looking at deserves the shared transition. Entering or
+        leaving `self.detail` gets the SAME treatment for the same reason
+        -- opening one specific game's detail view is a real change of
+        what's being looked at, not a browse step -- but with its OWN
+        distinct style (`iris_open` opening, `push_down` closing) rather
+        than reusing the panel slide's `push_up`, so hitting select to
+        open a game reads as its own kind of motion rather than a smaller
+        copy of the panel transition. Stepping from one game's detail
+        view directly to another's (left/right while already expanded)
+        deliberately stays instant, same "browsing stays immediate" rule.
 
         The outgoing frame is captured here rather than in tick() because
-        input() can change the panel between ticks.
+        input() can change the panel/detail between ticks.
         """
-        cur = (self._panel(), self.panel_i)
+        in_detail = self.detail is not None
+        cur = (self._panel(), self.panel_i, in_detail)
         if self._last_view is not None and cur != self._last_view:
             # Slide FROM the frame actually last shown, which is exactly
             # what was on the panel. Re-rendering the old panel here would
             # need its state restored and could re-trigger side effects.
             self._trans_from = self._prev_frame
             self._trans_i = 0
+            was_in_detail = self._last_view[2]
+            if in_detail and not was_in_detail:
+                self._trans_style = "iris_open"
+                self._trans_ticks = self.DETAIL_TRANSITION_TICKS
+            elif was_in_detail and not in_detail:
+                self._trans_style = "push_down"
+                self._trans_ticks = self.DETAIL_TRANSITION_TICKS
+            else:
+                self._trans_style = transitions.DEFAULT_STYLE
+                self._trans_ticks = self.TRANSITION_TICKS
         self._last_view = cur
 
         frame = self._frame_for_view()
         self._prev_frame = frame
-        if self._trans_from and self._trans_i < self.TRANSITION_TICKS:
+        if self._trans_from and self._trans_i < self._trans_ticks:
             self._trans_i += 1
             frame = transitions.blend(
-                self._trans_from, frame, self._trans_i / float(self.TRANSITION_TICKS))
-            if self._trans_i >= self.TRANSITION_TICKS:
+                self._trans_from, frame, self._trans_i / float(self._trans_ticks),
+                self._trans_style)
+            if self._trans_i >= self._trans_ticks:
                 self._trans_from = None
         return frame
 
