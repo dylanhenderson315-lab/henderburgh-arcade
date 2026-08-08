@@ -621,6 +621,22 @@ def _fetch_route(callsign):
         # draw (same bug class as paneltext.py's tally, instance 2, which
         # was this exact field).
         "airline": paneltext.panel_text(airline.get("name")) or None,
+        # REAL country + coordinates (2026-08-08) -- adsbdb's route
+        # response already carries these per airport and they were simply
+        # being discarded before, the same shape of gap `origin_city`/
+        # `dest_city` closed above. `country_name` is real, full-length
+        # ("United States"), folded like every other externally-sourced
+        # string here. lat/lon are numeric -- no fold needed, but each is
+        # validated as an actual number so a malformed/missing value
+        # degrades to None rather than a guessed 0.0. ZERO new I/O: this
+        # is the same per-callsign `_fetch_route()` call that already ran,
+        # just keeping two more fields off the same real payload.
+        "origin_country": paneltext.panel_text(origin.get("country_name")) or None,
+        "dest_country": paneltext.panel_text(dest.get("country_name")) or None,
+        "origin_lat": origin.get("latitude") if isinstance(origin.get("latitude"), (int, float)) else None,
+        "origin_lon": origin.get("longitude") if isinstance(origin.get("longitude"), (int, float)) else None,
+        "dest_lat": dest.get("latitude") if isinstance(dest.get("latitude"), (int, float)) else None,
+        "dest_lon": dest.get("longitude") if isinstance(dest.get("longitude"), (int, float)) else None,
     }
 
 
