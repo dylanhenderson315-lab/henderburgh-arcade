@@ -1023,7 +1023,18 @@ class Handler(BaseHTTPRequestHandler):
                                          "event": (u.get("golf_event") or {}).get("name")}
                                         if pinned else None),
                         "golf_live": sorted({e["league"] for e in u.get("events") or []
-                                             if e.get("leaderboard")})})
+                                             if e.get("leaderboard")}),
+                        "tennis_player": sports.FEED.get_tennis_player(),
+                        # Same "did the pinned name actually resolve" shape
+                        # golf_status already established above.
+                        "tennis_status": ({"name": u["tennis_pinned"]["abbr"],
+                                           "opponent": next(
+                                               (c["abbr"] for c in
+                                                (u.get("tennis_event") or {}).get("competitors", [])
+                                                if c.get("id") != u["tennis_pinned"].get("id")), None),
+                                           "state": (u.get("tennis_event") or {}).get("state"),
+                                           "event": (u.get("tennis_event") or {}).get("name")}
+                                          if u.get("tennis_pinned") else None)})
         elif path == "/api/gameday/config":
             cfg = gameday.load_config()
             cfg["targets"] = list(gameday.TARGETS)
@@ -1217,6 +1228,13 @@ class Handler(BaseHTTPRequestHandler):
                 j = json.loads(body or b"{}")
                 name = sports.FEED.set_golf_player(j.get("name"))
                 self._json({"ok": True, "golf_player": name})
+            except (ValueError, AttributeError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/sports/tennis_player":
+            try:
+                j = json.loads(body or b"{}")
+                name = sports.FEED.set_tennis_player(j.get("name"))
+                self._json({"ok": True, "tennis_player": name})
             except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/sports/favorite":

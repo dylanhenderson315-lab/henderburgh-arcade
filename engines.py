@@ -699,12 +699,22 @@ def draw_icon_mma(buf, x, y, color, scale=1):
     _draw_offsets(buf, x, y, mitt, color, scale)
 
 
+def draw_icon_tennis(buf, x, y, color, scale=1):
+    """A ball outline with a curved seam suggested by two offset dots --
+    deliberately distinct from the soccer ball glyph's single centred
+    dot/straight seam, so the two don't read the same at a glance."""
+    outline = ((1, 0), (2, 0), (3, 0), (0, 1), (4, 1), (0, 2), (4, 2),
+               (0, 3), (4, 3), (1, 4), (2, 4), (3, 4))
+    _draw_offsets(buf, x, y, outline, color, scale)
+    _draw_offsets(buf, x, y, ((1, 1), (3, 3)), color, scale)
+
+
 # Dispatch by SportsEngine's own normalized `sport` key (see SPORT_ACCENT).
 # Baseball is deliberately absent -- draw_diamond()/draw_outs() are its
 # existing, already-shipped glyph and are reused as-is (see
-# _backdrop_sports below), not redefined here. Tennis has no live renderer
-# to attach an icon to yet (task #19, still pending) -- skipped on purpose,
-# not silently omitted.
+# _backdrop_sports below), not redefined here. Tennis was skipped here
+# until task #19 (the tennis MAIN renderer) shipped -- now that a real
+# renderer exists to attach an icon to, it is included.
 SPORT_ICONS = {
     "football": draw_icon_football,
     "basketball": draw_icon_basketball,
@@ -712,6 +722,7 @@ SPORT_ICONS = {
     "soccer": draw_icon_soccer,
     "golf": draw_icon_golf,
     "mma": draw_icon_mma,
+    "tennis": draw_icon_tennis,
 }
 
 # Same icons, keyed instead by the OLDER per-league LEAGUE_PATHS code
@@ -8148,6 +8159,10 @@ class SportsEngine(Browsable, BigMomentSource):
                                              # _detect_golf_big_moment, kept
                                              # separate from golf_pulse's own
                                              # key (see that method's docstring)
+        # Pinned tennis player -- same "where is MY player" framing as
+        # golf, resolved by the feed each poll (find_pinned_tennis_player).
+        self.tennis_pinned = None
+        self.tennis_event = None
         self._init_scroll()
         self.cycling = True
         self.ticks = 0
@@ -8206,6 +8221,7 @@ class SportsEngine(Browsable, BigMomentSource):
 
     PANEL_TEAM = "team"
     PANEL_GOLF = "golf"
+    PANEL_TENNIS = "tennis"
     PANEL_EVENTS = "events"
 
     def _build_panels(self):
@@ -8218,6 +8234,8 @@ class SportsEngine(Browsable, BigMomentSource):
             p.append(self.PANEL_TEAM)
         if self.golf_pinned:
             p.append(self.PANEL_GOLF)
+        if self.tennis_pinned:
+            p.append(self.PANEL_TENNIS)
         if self.universal:
             p.append(self.PANEL_EVENTS)
         return p
@@ -8359,6 +8377,8 @@ class SportsEngine(Browsable, BigMomentSource):
         self.golf_pinned = u.get("golf_pinned")
         self.golf_event = u.get("golf_event")
         self.golf_move = u.get("golf_move")
+        self.tennis_pinned = u.get("tennis_pinned")
+        self.tennis_event = u.get("tennis_event")
         # Pulse keys on the MOVE, so it fires once per notable move rather
         # than continuously while the move is still being reported.
         self.golf_pulse.note(("golf", self.golf_move) if self.golf_move else None)
@@ -8899,6 +8919,88 @@ class SportsEngine(Browsable, BigMomentSource):
         n = sum(1 for x in (ev.get("competitors") or []) if x.get("place") == place)
         return n > 1
 
+    def _tennis_set_line(self, comps):
+        """Combine both competitors' per-set `sets` lists into ONE
+        real set-by-set score string -- "7-6(7-5) 3-6 6-1" -- matching how
+        a real scoreboard/broadcast graphic shows a tennis match, and
+        matching ESPN's own real finished-match `notes[]` text format
+        exactly (verified live: both independently produce "7-6 (7-5)"
+        for the same real set).
+
+        Each `sets` entry is confirmed real per-competitor data: `games`
+        is that player's OWN game count for the set, `tiebreak` (when
+        present) is THAT player's own breaker points -- both sides carry
+        their own tiebreak value, not a single shared one (confirmed
+        against a real payload: winner tiebreak=7, loser tiebreak=5 on
+        the same set). A set neither competitor has data for yet (not
+        played) is simply not included -- never a guessed "0-0".
+        """
+        if len(comps) < 2:
+            return ""
+        a, b = (comps[0].get("sets") or []), (comps[1].get("sets") or [])
+        n = min(len(a), len(b))    # only sets BOTH sides actually have real data for
+        parts = []
+        for i in range(n):
+            sa, sb = a[i], b[i]
+            s = f"{sa['games']}-{sb['games']}"
+            ta, tb = sa.get("tiebreak"), sb.get("tiebreak")
+            if ta is not None and tb is not None:
+                s += f"({ta}-{tb})"
+            elif ta is not None or tb is not None:
+                s += f"({ta if ta is not None else tb})"
+            parts.append(s)
+        return " ".join(parts)
+
+    def _frame_tennis_pinned(self):
+        """The pinned player, given the panel -- same "where is MY player"
+        framing golf's pinned view established, applied to a head-to-head
+        sport instead of a leaderboard: name, opponent, real set-by-set
+        score so far, real match state. No live in-game point score is
+        drawn -- see sports.py's TENNIS section docstring for why: no
+        live match was available this session to confirm a field name for
+        one, and this project never guesses a field into existence.
+        """
+        buf = blank(); fill(buf, self.BG)
+        c = self.tennis_pinned or {}
+        ev = self.tennis_event or {}
+        accent = self.SPORT_ACCENT["tennis"]
+        live = ev.get("live")
+
+        draw_event_frame(buf, 1.0 if live else 0.45, accent, accent)
+        head = ev.get("league") or "TENNIS"
+        draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
+                           color_on_dark(accent), x_min=3)
+
+        comps = ev.get("competitors") or []
+        opp = next((x for x in comps if x.get("id") != c.get("id")), None)
+
+        name = c.get("abbr") or c.get("full") or "-"
+        scale = 2 if text_w(name, 2) <= WIDTH - 8 else 1
+        y = 14
+        draw_text_centered(buf, y, fit_text(name, WIDTH - 8, scale),
+                           self.WIN if c.get("winner") else self.HERO_INK,
+                           scale=scale, x_min=3)
+        y += 5 * scale + 2
+
+        if opp:
+            vs = f"VS {opp.get('abbr') or opp.get('full') or ''}"
+            draw_text_centered(buf, y, fit_text(vs, WIDTH - 8), self.INK_DIM, x_min=3)
+            y += 7
+
+        line = self._tennis_set_line(comps[:2]) if len(comps) >= 2 else ""
+        y += 2
+        if line:
+            draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.HERO_INK, x_min=3)
+            y += 7
+        elif ev.get("state") == "pre":
+            draw_text_centered(buf, y, "NOT STARTED", self.INK_DIM, x_min=3)
+            y += 7
+
+        foot = ev.get("detail") or ev.get("name") or ""
+        draw_text_centered(buf, min(max(y, 48), 56), fit_text(foot, WIDTH - 8),
+                           self.LIVE if live else self.INK, x_min=3)
+        return bytes(buf)
+
     # ---- per-sport renderers ---------------------------------------------
     def _draw_inning_arrow(self, buf, x, y, top, color):
         """Half-inning as a triangle: up = top, down = bottom. Thin
@@ -9192,6 +9294,58 @@ class SportsEngine(Browsable, BigMomentSource):
         draw_divider(buf, 58)
         draw_text_centered(buf, 59, fit_text(foot, WIDTH - 6), self.INK_DIM)
 
+    def _render_tennis(self, buf, ev):
+        """Tennis. Task #19 -- the last sport still on the generic
+        fallback, blocked since 2026-08-01 on "no live match to verify
+        against" until this session pulled real live/finished matches
+        from the dedicated per-tour scoreboard (see sports.py's TENNIS
+        section for the real schema facts -- a completely different
+        nested shape from every team sport this file otherwise parses).
+
+        The generic renderer's whole reason for the tennis exception in
+        the first place was STRING SCORES TOO WIDE FOR THE SLOT -- a set
+        score drawn at scale 2 is 126px on a 64px panel. This renderer
+        gives the set-by-set line its own row at scale 1, on a y-cursor,
+        rather than trying to squeeze it beside a name.
+        """
+        accent = self._sport_accent(ev)
+        pos, total = self._league_position(ev)
+        draw_header(buf, ev["league_name"] or "TENNIS", accent, right_tag=f"{pos}/{total}",
+                    icon=SPORT_ICONS.get(ev.get("sport")))
+        self._draw_league_rail(buf, ev)
+
+        comps = ev["competitors"][:2]
+        y = 10
+        for c in comps:
+            col = self.WIN if c.get("winner") else self.HERO_INK
+            draw_text3x5(buf, 4, y, fit_person(c.get("abbr") or c.get("full") or "", WIDTH - 8), col)
+            y += 7
+        y += 2
+
+        # Set-by-set score, own line, scale 1 -- never scale 2 (see
+        # docstring above and CLAUDE.md's own layout rule on this exact
+        # sport). Real data only: an unplayed set is simply absent, never
+        # a guessed "0-0".
+        line = self._tennis_set_line(comps)
+        if line:
+            draw_text_centered(buf, y, fit_text(line, WIDTH - 6), self.INK)
+            y += 7
+        elif ev["state"] == "pre":
+            draw_text_centered(buf, y, "NOT STARTED", self.INK_DIM)
+            y += 7
+
+        # The DRAW (Men's/Women's Singles or Doubles) -- real structure a
+        # generic renderer would have had no room for.
+        draw_label = ev.get("class_label") or ""
+        if draw_label and y <= HEIGHT - 12:
+            draw_text_centered(buf, y, fit_text(draw_label, WIDTH - 6), self.INK_DIM)
+            y += 6
+
+        tag = ev.get("detail") or ""
+        if tag and y <= HEIGHT - 5:
+            draw_text_centered(buf, y, fit_text(tag, WIDTH - 6),
+                               self.LIVE if ev["live"] else self.INK_DIM)
+
     # Populated as each sport gets its own renderer. Empty here means
     # every sport still takes the generic path, so this step changes
     # nothing on screen -- it only creates the seam.
@@ -9200,6 +9354,7 @@ class SportsEngine(Browsable, BigMomentSource):
         "mma": _render_mma,
         "soccer": _render_soccer,
         "golf": _render_golf,
+        "tennis": _render_tennis,
     }
 
     # ---- per-sport EXPANDED-detail dispatch -------------------------------
@@ -9857,6 +10012,60 @@ class SportsEngine(Browsable, BigMomentSource):
 
     SPORT_DETAIL_RENDERERS["golf"] = _render_golf_detail
 
+    def _render_tennis_detail(self, buf, ev):
+        """Tennis' EXPANDED view. The main row already fits the set-by-set
+        score on its own line -- the incremental value here is room for
+        FULL names instead of "N. MEJIA" (fit_person on the main row still
+        prefers the surname, but the compact row has no space for the
+        given name at all), the real tournament name, the DRAW, real
+        venue/court, and a finished match's real `notes[]` summary line
+        ("NICOLAS MEJIA (COL) BT MARCO TRUNGELLITI (ARG) 7-6 (7-5) 3-6
+        6-1" -- already panel_text()-folded in sports.py). Same y-cursor
+        discipline as every other detail renderer: what a given match
+        actually has varies (no notes pre-match, no venue for some
+        events), and a fixed offset would collide the moment content
+        changed, same lesson baseball/soccer/golf's own detail views
+        already had to learn on this exact seam.
+        """
+        accent = self._sport_accent(ev)
+        draw_event_frame(buf, 1.0 if ev["live"] else 0.35, accent, accent)
+
+        tag = self._state_tag(ev)
+        head = ev.get("league_name") or "TENNIS"
+        if tag:
+            head = f"{head}  {tag}"
+        draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
+                           self.LIVE if ev["live"] else color_on_dark(accent), x_min=3)
+
+        comps = ev["competitors"][:2]
+        y = 13
+        for c in comps:
+            col = self.WIN if c.get("winner") else self.HERO_INK
+            draw_text3x5(buf, 4, y, fit_person(c.get("full") or c.get("abbr") or "", WIDTH - 8), col)
+            y += 7
+        y += 1
+
+        line = self._tennis_set_line(comps)
+        if line:
+            draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.INK, x_min=3)
+            y += 7
+        elif ev["state"] == "pre":
+            draw_text_centered(buf, y, "NOT STARTED", self.INK_DIM, x_min=3)
+            y += 7
+
+        foot_lines = [x for x in (ev.get("class_label"), ev.get("name"), ev.get("venue")) if x]
+        for fline in foot_lines:
+            if y > HEIGHT - 5:
+                break
+            draw_text_centered(buf, y, fit_text(fline, WIDTH - 8), self.INK_DIM, x_min=3)
+            y += 7
+
+        note = ev.get("note") or ""
+        if note and y <= HEIGHT - 5:
+            draw_text_centered(buf, y, fit_text(note, WIDTH - 8), self.INK_DIM, x_min=3)
+
+    SPORT_DETAIL_RENDERERS["tennis"] = _render_tennis_detail
+
     def _frame_for_view(self):
         if self.detail is not None:
             ev = self._current_event()
@@ -9874,6 +10083,8 @@ class SportsEngine(Browsable, BigMomentSource):
             return self._frame_pinned()
         if panel == self.PANEL_GOLF:
             return self._frame_golf_pinned()
+        if panel == self.PANEL_TENNIS:
+            return self._frame_tennis_pinned()
         if panel == self.PANEL_EVENTS:
             return self._frame_universal()
         # No panel has data: fall back to whichever empty state is most
