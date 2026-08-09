@@ -2977,6 +2977,54 @@ GET, cleared afterward), real mode-switch to `followflight` and a real
 `/api/frame` pull showing the honest NOT CURRENTLY AIRBORNE state for a
 real (currently non-airborne) callsign.
 
+## Do Not Disturb / focus mode (2026-08-09)
+
+Real manual toggle (`dnd.py`, `GET`/`POST /api/dnd`, `{"enabled": bool}`)
+that suppresses DISCRETIONARY interrupts while never touching the two
+things that are never optional:
+
+- **Suppressed by DND**: the plane-in-window takeover
+  (`arcade_server._loop()`'s trigger check), sports `TIER_INTERRUPT`
+  celebrations (`AmbientEngine.tick()`'s big-moment gate), normal-
+  priority HA banners (`trigger_notify()`).
+- **Never suppressed**: severe-weather takeover
+  (`_severe_alert_frame()`, a completely separate code path, life-
+  safety), urgent-priority HA notifications (explicitly escalated by a
+  real HA automation, the same "still gets through" exception iOS/
+  Android Focus modes use), `TIER_TAKEOVER` sports moments (the rarest,
+  genuinely "go look now" tier -- matches urgent notify's own
+  escalation exception).
+
+**Suppressed, not deferred** -- a discretionary event is popped/
+discarded while DND is on, not left queued for when DND turns back off.
+A stale home run or a plane that already left the window showing up
+minutes later would be real data at the wrong time, its own kind of
+dishonest, matching this project's "never invent" spirit one step
+removed (not inventing a NEW fact, but presenting a real one as if it
+just happened when it didn't).
+
+Deliberately a plain manual toggle, not a schedule -- night/quiet-hours
+BRIGHTNESS dimming already exists (`brightness.py`, confirmed already
+live and wired into the render loop when checked this session, not a
+gap) and is a genuinely separate concern from "am I actively trying not
+to be interrupted right now."
+
+Verified: both audits clean, real service restart, and the actual
+suppression/bypass behavior confirmed live end-to-end -- a real
+`/api/notify` normal-priority POST while DND was on returned `ok: true`
+(receipt acknowledged, matching `events_log.py`'s own "a real event
+happened whether or not the panel was awake to show it" reasoning)
+without swapping mode; a real urgent POST swapped mode to `"notify"` as
+normal, confirming the bypass. `AmbientEngine`'s `TIER_INTERRUPT`-vs-
+`TIER_TAKEOVER` gating verified directly against a fake sports engine's
+real peek/pop contract (not just read): `TIER_INTERRUPT` correctly
+suppressed+discarded while DND is on, fires normally while off,
+`TIER_TAKEOVER` still fires regardless.
+
+Also added `events_log.jsonl` to `.gitignore` in this pass -- same "real
+runtime state, not source" category as `hangar_log.jsonl`/`atc_log.jsonl`,
+missed when `events_log.py` shipped earlier this session.
+
 ## Storm-tracking mini-scope + favorite aircraft (2026-08-09)
 
 **Storm mini-scope**: weather.py's `_fetch_alerts()` now parses NWS's real
