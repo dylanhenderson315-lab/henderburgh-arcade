@@ -1325,6 +1325,48 @@ appends them to the menu automatically.
   cycle/dismiss/hand-off sequence on real hardware, and confirm the
   ceremonial card against a real Hangar-logged aircraft.
 
+  **PLANE-IN-WINDOW TAKEOVER, VISUAL REFRESH (2026-08-08, follow-up
+  session).** Real review against the actual current screen (real pixel
+  dumps pulled and sent for direct visual inspection before any code
+  changed, not assumed stale) — three concrete gaps found, all fixed
+  without a rebuild:
+  - **Flat black background** was the one thing every other real
+    TIER_TAKEOVER-class event in this project already had and this one
+    didn't. Fixed by reusing `_backdrop_flights()` (the flights
+    celebration's own radar-sweep wedge, already proven cheap and
+    already shipped) rather than inventing a fourth backdrop language —
+    tinted `RING` (violet, the same `WINDOW_RING` color the small scope
+    already uses for "this is a window aircraft") instead of an altitude
+    color, so the backdrop itself carries the "why did this fire"
+    meaning and the silhouette's own altitude-band color keeps meaning
+    "what kind of traffic this is" — one color, one job, not overloaded.
+  - **Nothing on the screen visually said "window"** before this —
+    solved by the same backdrop-color choice above, not a second
+    treatment.
+  - **A window aircraft that was ALSO notable** (heavy, helicopter,
+    MAYDAY — see `flights._notable()`) got no acknowledgment, even
+    though the small scope's own `NOTABLE_GLOW_FLOOR` (added the same
+    session as the small-icon redesign) now treats that as a real,
+    separate signal worth showing. Folded into the existing `"IN VIEW"`
+    header row (`"IN VIEW: HEAVY"`) rather than a new row — this card's
+    vertical budget was already fully accounted for, and CLAUDE.md's own
+    repeated lesson about fixed-offset collisions argued against adding
+    one casually.
+  - **Verified**: `render_audit.py` has literally zero coverage of
+    `PlaneWatchEngine` (force-triggered only, excluded from the normal
+    sweep, same as `gameday` always has been) — driven directly via
+    `render_audit.Audit`'s own instrumentation against 5 real-shaped edge
+    cases (a long registration, a real MAYDAY tag, a near-rim distance,
+    both single- and multi-aircraft batches): 0 dropped glyphs, 0
+    overflow, 0 clipped pixels, 0 collisions (checked with a real
+    bounding-box overlap test across every text draw in each frame, not
+    eyeballed). Full `render_audit.py`/`fold_audit.py` suites clean.
+    Rendered against real live aircraft data and sent for direct visual
+    review before committing. **This screen has no HTTP trigger** (unlike
+    `/api/notify`), so real-panel confirmation is via direct
+    engine-driving against real data — the same verification path used
+    when the feature originally shipped, not a regression in rigor.
+
   **WINDOW FILTER, ROUND 3 — real distance cap (2026-08-08).** Real
   feedback, not a visual complaint: bearing alone (296°±40°) answers
   "is this aircraft in the right DIRECTION", never "can I actually SEE
