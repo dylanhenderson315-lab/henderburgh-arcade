@@ -67,18 +67,27 @@ import sys
 import time
 
 import engines
+import notify
 
 # Modes that scroll a marquee, which draws glyphs deliberately off-edge.
 # `ambient` inherits this: it composes real instances of the other
 # modes and delegates frame(), so a news marquee inside ambient is
-# the same marquee.
-MARQUEE_OK = {"news", "ticker", "sports", "gameday", "ambient", "flights"}
+# the same marquee. `notify` joins this set for the same reason -- its
+# own message row falls back to draw_marquee() when the wrapped text
+# doesn't fit three lines (see NotifyEngine.frame()).
+MARQUEE_OK = {"news", "ticker", "sports", "gameday", "ambient", "flights", "notify"}
 
 # Modes worth auditing: the data modes and event modes, which are the ones
 # rendering externally-sourced text. Games draw their own sprites and have
-# no API strings to damage.
+# no API strings to damage. `planewatch`/`notify` (2026-08-09) are
+# force-triggered-only takeovers -- see drive_planewatch()/drive_notify()
+# below for why they need dedicated drivers instead of the generic one.
 TEXT_MODES = ["ticker", "satellite", "flights", "sports", "news", "weather",
-              "clock", "blog", "ambient", "gameday"]
+              "clock", "blog", "ambient", "gameday", "planewatch", "notify"]
+
+# Modes with a dedicated driver instead of the generic zero-arg
+# construct-and-tick loop in drive() below.
+CUSTOM_DRIVERS = {}
 
 
 class Audit:
@@ -171,6 +180,120 @@ class Audit:
                         and ya < yb + hb and yb < ya + ha):
                     hits.append((sa, sb))
         return hits
+
+
+def _snap(audit, eng, label, frames_box, collisions):
+    """Shared single-frame probe: reset the audit's per-frame state, render
+    once, count it, and record any collision under `label`. Same shape as
+    drive()'s own inner snap(), pulled out so the dedicated drivers below
+    can reuse it without duplicating the try/except-and-report contract."""
+    audit.reset_frame()
+    try:
+        eng.frame()
+    except Exception as e:                        # noqa: BLE001 - report, don't abort
+        print("    !! %s raised %s: %s" % (label, type(e).__name__, e))
+        return
+    frames_box[0] += 1
+    for a, b in audit.collisions():
+        collisions.append((label, a, b))
+
+
+def drive_planewatch(audit):
+    """PlaneWatchEngine (2026-08-08's plane-in-window takeover) is
+    force-triggered only: reset() pops flights.FEED's real one-shot
+    window-entry batch, which requires an actual aircraft crossing the
+    configured window cone RIGHT NOW. The generic drive() below would
+    construct it, see an empty batch, and render nothing but the blank
+    fallback -- passing clean while covering none of the real content.
+    This is exactly the gap the 2026-08-09 full-project gap audit flagged:
+    every change to this engine had to be remembered and manually
+    force-verified by hand, with no permanent regression net.
+
+    Bypasses the FEED pop (there is no public "push a batch" API, by
+    design -- the real one-shot slot only exists to be filled by a real
+    detector, see flights.FEED.pop_window_takeover_batch()'s own
+    docstring) the same way this session's own ad hoc verification
+    scripts already did: construct via __new__ and set .batch/.idx/.ticks
+    directly, mirroring exactly what reset() would have set had a real
+    aircraft been popped. Three synthetic variants exercise the real
+    branches: a single notable aircraft (single-hold path, header tag
+    stacking), a two-aircraft batch (the "N/M" position counter + idx
+    cycling), and a minimal aircraft with no reg/type/notable data at all
+    (the honest-gap fallback text: "UNKNOWN" ident, no type row)."""
+    frames = [0]
+    collisions = []
+    variants = [
+        [{"hex": "a1b2c3", "ident": "UAL2847", "reg": "N182UA", "type": "B739",
+          "alt_ft": 3800, "dist_nm": 2.1, "notable": ["HEAVY"]}],
+        [{"hex": "d4e5f6", "ident": "N911PD", "reg": "N911PD", "type": "EC35",
+          "alt_ft": 900, "dist_nm": 0.8, "notable": ["LAW ENFORCEMENT HELICOPTER"]},
+         {"hex": "b7c8d9", "ident": "SWA415", "reg": "N8620E", "type": "B38M",
+          "alt_ft": 4500, "dist_nm": 3.4, "notable": None}],
+        [{"hex": "000000", "ident": None, "reg": None, "type": None,
+          "alt_ft": None, "dist_nm": None, "notable": None}],
+    ]
+    for i, batch in enumerate(variants):
+        eng = engines.PlaneWatchEngine.__new__(engines.PlaneWatchEngine)
+        eng.batch = batch
+        eng.idx = 0
+        eng.ticks = 20
+        eng.launch = None
+        _snap(audit, eng, "planewatch variant %d" % i, frames, collisions)
+        if len(batch) > 1:
+            eng.idx = 1
+            _snap(audit, eng, "planewatch variant %d idx 1" % i, frames, collisions)
+    return frames[0], collisions
+
+
+def drive_notify(audit):
+    """NotifyEngine (2026-08-08's HA notification takeover) is also
+    force-triggered only -- reset() pops notify's own one-shot pending
+    slot, populated for real only by a genuine /api/notify POST. Unlike
+    PlaneWatchEngine there IS a real public API for this
+    (notify.push_pending()), so this drives it through the actual
+    reset()/pop path rather than poking internals -- push a real payload,
+    then construct engines.NotifyEngine() normally and let its own
+    reset() consume it. Three variants: a short title/message (the
+    common case), a long message that forces the wrap-to-3-lines-or-
+    marquee-overflow branch, and an empty payload (reset()'s own
+    `str(payload.get(...) or "")` honest-empty fallback, not a crash).
+
+    Payloads are pre-folded through paneltext.panel_text() before being
+    pushed, matching arcade_server.py's own /api/notify handler EXACTLY
+    ("Fold at the boundary -- the one place external text enters this
+    endpoint") -- NotifyEngine.frame() draws self.title/self.message raw,
+    with no fold of its own, by design: this project's fold discipline is
+    ONE boundary per feed, not defense-in-depth at every draw site (see
+    CLAUDE.md/fold_audit.py's docstring). Pushing raw mixed-case here
+    would report a false DROPPED-lowercase failure that doesn't exist in
+    real production traffic, where /api/notify always folds first."""
+    import paneltext
+    frames = [0]
+    collisions = []
+    variants = [
+        {"title": "Garage Door", "message": "Left open 20 minutes", "color": None},
+        {"title": "Front Door Camera Motion Detected",
+         "message": ("A much longer message body than any single HA "
+                      "automation should realistically send, long enough "
+                      "to force either the multi-line wrap budget or the "
+                      "marquee overflow fallback, whichever this message "
+                      "actually needs."),
+         "color": None},
+        {"title": "", "message": "", "color": None},
+    ]
+    for i, payload in enumerate(variants):
+        folded = dict(payload)
+        folded["title"] = paneltext.panel_text(payload["title"])
+        folded["message"] = paneltext.panel_text(payload["message"])
+        notify.push_pending(folded)
+        eng = engines.NotifyEngine()
+        eng.ticks = 20
+        _snap(audit, eng, "notify variant %d" % i, frames, collisions)
+    return frames[0], collisions
+
+
+CUSTOM_DRIVERS["planewatch"] = drive_planewatch
+CUSTOM_DRIVERS["notify"] = drive_notify
 
 
 def drive(mode, audit, ticks=60, settle=0.25):
@@ -284,7 +407,10 @@ def main(argv):
             audit.overflow = []
             audit.truncated = []
             audit.clipped = []
-            frames, collisions = drive(mode, audit)
+            if mode in CUSTOM_DRIVERS:
+                frames, collisions = CUSTOM_DRIVERS[mode](audit)
+            else:
+                frames, collisions = drive(mode, audit)
 
             dropped = sorted(set(audit.dropped))
             overflow = sorted({o for o in audit.overflow})

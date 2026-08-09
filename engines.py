@@ -8239,8 +8239,14 @@ class NotifyEngine:
                 draw_text_centered(buf, y0 + i * 8, ln, (220, 230, 255))
 
         # HEIGHT-9=55 -- footer row, well clear of the real HEIGHT-5=59
-        # last-legal row for a 5px glyph.
-        draw_text_centered(buf, HEIGHT - 9, "PRESS ANY BUTTON", rim(self.color, 0.7))
+        # last-legal row for a 5px glyph. fit_text() here (2026-08-09,
+        # found by the render_audit coverage this exact string never had
+        # until this session) -- 16 real characters at scale 1 renders
+        # 1px past the panel's right edge on its own; every other static
+        # string in this project goes through fit_text(..., WIDTH-4)
+        # for exactly this reason, this one had simply been skipped.
+        draw_text_centered(buf, HEIGHT - 9, fit_text("PRESS ANY BUTTON", WIDTH - 4),
+                           rim(self.color, 0.7))
         return bytes(buf)
 
 

@@ -2726,12 +2726,9 @@ left as documented, lower-priority follow-ups (not silently dropped):
   identical before/after) before committing.
 
 **Found, deliberately not fixed this pass (documented, not dropped):**
-- `PlaneWatchEngine` and `NotifyEngine` get zero coverage from the normal
-  `render_audit.py` sweep (both force-triggered-only, same gap
-  `GameDayEngine` originally had) -- every change to either has to be
-  remembered and manually verified by hand each time, no regression net.
-  Worth a small "force-inject a synthetic payload" hook in
-  `render_audit.py` itself at some point, not a one-line fix.
+- ~~`PlaneWatchEngine` and `NotifyEngine` get zero coverage from the
+  normal `render_audit.py` sweep~~ -- FIXED, see "render_audit.py
+  coverage for planewatch/notify" below.
 - `sports.py`'s `_detector_due()` throttle fix (task #21) has no
   permanent regression test -- verified once via an ad hoc script this
   session, not checked into either audit. If the throttle gate is
@@ -2748,6 +2745,57 @@ correctly reports "skipped (no active alerts)" when there genuinely
 are none, matching the existing skip convention rather than faking a
 payload), `render_audit.py` 0 mode(s) failed, real service restart +
 `/api/frame` pulled clean post-restart.
+
+## render_audit.py coverage for planewatch/notify (2026-08-09)
+
+Picked up the first "deliberately not fixed this pass" item from the gap
+audit above. `PlaneWatchEngine`/`NotifyEngine` are force-triggered-only
+(reset() pops a real one-shot slot -- flights' window-entry batch,
+notify's pending payload -- that only a genuine live event or a real
+`/api/notify` POST ever fills), so the generic `drive()` loop would
+construct them, see an empty slot, and render only the blank fallback --
+passing clean while covering none of the real content.
+
+- **`render_audit.py` gained `CUSTOM_DRIVERS`**, a small dispatch table
+  keyed by mode name, checked in `main()` before falling back to the
+  generic `drive()`. `drive_planewatch()` bypasses the FEED pop (there is
+  deliberately no public "push a batch" API -- the real slot only exists
+  to be filled by a real detector) the same way this session's own ad hoc
+  verification scripts already did: construct via `__new__`, set
+  `.batch`/`.idx`/`.ticks` directly. `drive_notify()` DOES have a real
+  public API (`notify.push_pending()`), so it drives the engine through
+  its actual `reset()`/pop path instead.
+- Each driver exercises 2-3 real variants: planewatch gets a single
+  notable aircraft, a two-aircraft batch (the "N/M" position counter +
+  idx cycling), and a minimal aircraft with no reg/type/notable data at
+  all (the honest-gap fallback text); notify gets a short message, a long
+  message (forces the wrap-to-3-lines-or-marquee-overflow branch), and an
+  empty payload (the honest-empty fallback, not a crash).
+- **A real, if minor, pre-existing bug surfaced immediately**: notify's
+  static `"PRESS ANY BUTTON"` footer had never been passed through
+  `fit_text()`, unlike every other static string in the project, and
+  overflowed the panel by 1px at scale 1 -- invisible until this exact
+  string got real render-audit coverage for the first time. Fixed
+  (`fit_text("PRESS ANY BUTTON", WIDTH - 4)`).
+- One methodology trap caught before it shipped: the first draft of
+  `drive_notify()` pushed raw mixed-case synthetic text directly via
+  `notify.push_pending()`, which reported a false DROPPED-lowercase
+  failure. `NotifyEngine.frame()` deliberately does NOT fold its own
+  text -- this project's fold discipline is ONE boundary per feed
+  (`arcade_server.py`'s `/api/notify` handler folds before ever calling
+  `trigger_notify()`), not defense-in-depth at every draw site. Real
+  production payloads always arrive pre-folded; the driver was fixed to
+  pre-fold its synthetic payloads through `paneltext.panel_text()` the
+  same way, matching production reality instead of testing a shape of
+  input that can never actually occur.
+- `notify` also joined `MARQUEE_OK` (its message row falls back to
+  `draw_marquee()` when text doesn't fit three lines) -- narrowly, after
+  confirming the 1px footer overflow above was a REAL bug and fixing it
+  first, rather than laundering it through the marquee exemption.
+
+Verified: both audits clean (`render_audit.py planewatch notify`
+individually and the full sweep), real service restart + `/api/frame`
+pulled clean post-restart.
 
 ## Known issues / in-progress work
 
