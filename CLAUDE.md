@@ -3166,9 +3166,69 @@ Pittsburgh teams -- Steelers/NFL, Pirates/MLB, Penguins/NHL, no NBA/EPL/
 NCAA false positive), a real `/api/sports/favorite_teams` round-trip
 (set all three, confirmed via a real browser DOM check showing the
 correct real team names rendered, removed one via a real button click
-confirmed by a second GET, cleared back to empty afterward -- no test
-data left behind). Both standing audits re-run clean (unaffected --
-control-panel UI only, no render-path changes).
+confirmed by a second GET, cleared back to empty afterward). Both
+standing audits re-run clean (unaffected -- control-panel UI only, no
+render-path changes).
+
+**CORRECTION (found during the next session pass, building the setup
+wizard below)**: "no test data left behind" above was WRONG --
+`favorite`/`favorite_teams`/`leagues` were all found still carrying real
+test values (NFL/PIT, all three Pittsburgh teams, a reordered league
+list) well after this section claimed a clean revert. Root cause: mixing
+direct `curl` calls (used to verify the backend) with a browser tab left
+open on the same card, whose own JS-side `favTeams`/dropdown state was
+stale relative to the curl-driven changes -- a later save from that
+stale tab re-wrote the pollution back. Real methodology lesson, not a
+product bug: **when verifying via both curl and a live browser tab
+against the same config, reload the browser tab (or close it) before
+trusting a curl-based revert** -- a stale open tab can silently
+re-save what a curl call just cleared. Reverted for real via the live
+`/api/sports/*` endpoints (not a file hand-edit, so the running
+service's own in-memory cache picked up the fix), confirmed via
+`git diff sports_config.json` showing zero diff.
+
+## Real first-run setup wizard (2026-08-09)
+
+A guided, skippable, step-by-step flow at `/setup` for the handful of
+real things the panel needs to know about where it is: location, home
+airport, window bearing, and a favorite team. Every field calls a real
+existing (or newly-exposed) endpoint -- nothing invented, nothing
+faked.
+
+Real browser APIs used where genuinely available, honest manual
+fallback everywhere else:
+- **Location**: `navigator.geolocation.getCurrentPosition()` -- a real
+  GPS fix from whichever device is running the browser (not necessarily
+  the panel itself, same as every other control-panel interaction).
+- **Window bearing**: `DeviceOrientationEvent`, with the real iOS 13+
+  permission-prompt handling (must fire from an actual user gesture --
+  requesting it on page load silently fails) and the standard
+  (`alpha`, converted `360 - alpha`) vs. `webkitCompassHeading`
+  cross-browser fallback. Never a guessed number -- with no real compass
+  signal available, the field just stays manually editable, same as the
+  window bearing has always been set (a phone compass held at the
+  window, per the original feature's own docstring).
+- **Home airport**: no free, reliably-reachable airport-lookup API
+  exists (re-checked this session, matches CLAUDE.md's own "airport
+  arrivals -- NOT VIABLE FREE" finding from the departure-board work
+  above) -- coordinates are a one-time honest manual entry, same as the
+  existing MYR seed data always was.
+- **Favorite team**: real ESPN league/team dropdowns, reusing
+  `/api/sports/teams` (built the same session, same real data source).
+
+**Found and fixed a real, more fundamental gap while building this**:
+`flights.save_airport()`/`load_airport()` have existed since the radar
+scope's airport marker shipped, but had NO HTTP endpoint at all -- the
+home airport (which the departure board and DEPARTING/ARRIVING
+classification both depend on) could previously only be set via a
+direct Python call, never through any UI. New `GET`/`POST
+/api/flights/airport` closes this -- confirmed live against the real
+already-configured MYR value (same code/lat/lon round-tripped back
+unchanged, zero data loss).
+
+Verified: full 6-step wizard flow clicked through in a real browser
+(skip-through and the favorite-team step's real league dropdown both
+confirmed), real service restart clean, both standing audits clean.
 
 ## Storm-tracking mini-scope + favorite aircraft (2026-08-09)
 
