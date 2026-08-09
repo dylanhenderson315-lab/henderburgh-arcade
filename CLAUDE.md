@@ -2841,6 +2841,35 @@ running `hangar_audit.py`, both standing audits (`render_audit.py`/
 `fold_audit.py`) still clean, real service restart + `/api/frame`
 pulled clean post-restart.
 
+## Manual plane-in-window demo trigger (2026-08-09)
+
+The owner had never actually SEEN `PlaneWatchEngine`'s takeover fire on
+the real panel -- it only triggers when a real aircraft crosses the
+configured window cone, which hadn't happened to be caught live yet.
+There was no way to demonstrate an already-built, already-verified
+feature in person without waiting on real traffic.
+
+`POST /api/test/planewatch` (new, PERSONAL-RIG-ONLY, same scope
+precedent as `atc.py`'s transcription feature) pulls the closest REAL
+currently-tracked aircraft from `flights.FEED.get()`'s own live cache
+(the exact data the radar scope is already drawing) and seeds it into
+the SAME real one-shot slot (`flights.FEED._window_batch`) the real
+window-entry detector fills. Never fabricates an aircraft -- this
+manually satisfies the trigger condition for a real, currently-tracked
+aircraft, it does not invent one. The render loop's existing
+`_loop()` plane-in-window check pops it and swaps modes on its own very
+next tick, reusing that real path end to end rather than duplicating any
+trigger logic.
+
+Returns `{"ok": false, "error": "no tracked aircraft right now"}` (404)
+honestly rather than faking a result when the sky is genuinely empty --
+confirmed this working as designed: first live call after this shipped
+found zero aircraft currently tracked, an honest real-time state, not a
+bug in the endpoint.
+
+Verified: both audits clean, real service restart + `/api/frame` pulled
+clean post-restart.
+
 ## Known issues / in-progress work
 
 ### Panel lockup hazard — RESOLVED 2026-07-30, but the rule stands

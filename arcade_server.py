@@ -1361,6 +1361,36 @@ class Handler(BaseHTTPRequestHandler):
                             "title": title_f, "message": message_f})
             except (ValueError, KeyError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/test/planewatch":
+            # MANUAL DEMO TRIGGER (2026-08-09), PERSONAL-RIG-ONLY -- same
+            # scope precedent as atc.py's transcription feature. Exists
+            # because the real plane-in-window takeover only ever fires
+            # when a real aircraft crosses the configured window cone,
+            # which the owner may not have caught happening organically
+            # yet -- there was no way to actually SEE the feature on the
+            # real panel without waiting for real traffic.
+            #
+            # Never fabricates an aircraft: pulls the closest REAL
+            # currently-tracked aircraft from flights.FEED's own live
+            # cache (the exact same data the radar scope is already
+            # drawing right now) and seeds it into the SAME real one-shot
+            # slot (flights.FEED._window_batch) the real window-entry
+            # detector fills -- this is "manually satisfy the trigger
+            # condition for a real aircraft", not a synthetic render. The
+            # render loop's own existing planewatch check (_loop(), see
+            # its "PLANE-IN-WINDOW TAKEOVER" comment) pops it and swaps
+            # modes on its own very next tick, so this reuses that real
+            # path end to end rather than duplicating any trigger logic.
+            aircraft = flights.FEED.get().get("aircraft") or []
+            with_dist = [a for a in aircraft if isinstance(a.get("dist_nm"), (int, float))]
+            if not with_dist:
+                self._json({"ok": False, "error": "no tracked aircraft right now"}, 404)
+                return
+            closest = min(with_dist, key=lambda a: a["dist_nm"])
+            with flights.FEED._lock:
+                flights.FEED._window_batch = [closest]
+            self._json({"ok": True, "reg": closest.get("reg"),
+                        "ident": closest.get("ident"), "dist_nm": closest.get("dist_nm")})
         elif parsed.path == "/api/sports/leagues":
             try:
                 j = json.loads(body or b"{}")
