@@ -2725,20 +2725,16 @@ left as documented, lower-priority follow-ups (not silently dropped):
   called twice back-to-back on the real `market_config.json`, file
   identical before/after) before committing.
 
-**Found, deliberately not fixed this pass (documented, not dropped):**
+**Found, all three now fixed (documented, not dropped):**
 - ~~`PlaneWatchEngine` and `NotifyEngine` get zero coverage from the
   normal `render_audit.py` sweep~~ -- FIXED, see "render_audit.py
   coverage for planewatch/notify" below.
-- `sports.py`'s `_detector_due()` throttle fix (task #21) has no
-  permanent regression test -- verified once via an ad hoc script this
-  session, not checked into either audit. If the throttle gate is
-  accidentally removed later, nothing would catch the regression back to
-  20 req/s against ESPN's summary endpoint.
-- `hangar.py`'s `HANGAR_MAX_ENTRIES = 500` LRU eviction has no test that
-  actually exercises the boundary at 501 entries -- asserted in prose,
-  never demonstrated. Low urgency (a real collection won't hit 500 for a
-  long time) but the one bounded-resource in the project without a
-  demonstrated eviction path.
+- ~~`sports.py`'s `_detector_due()` throttle fix (task #21) has no
+  permanent regression test~~ -- FIXED, see "Two remaining gap-audit
+  follow-ups" below.
+- ~~`hangar.py`'s `HANGAR_MAX_ENTRIES = 500` LRU eviction has no test that
+  actually exercises the boundary~~ -- FIXED, see "Two remaining
+  gap-audit follow-ups" below.
 
 Verified: `fold_audit.py` 0 feeds NOT folding (weather alerts case
 correctly reports "skipped (no active alerts)" when there genuinely
@@ -2795,6 +2791,54 @@ passing clean while covering none of the real content.
 
 Verified: both audits clean (`render_audit.py planewatch notify`
 individually and the full sweep), real service restart + `/api/frame`
+pulled clean post-restart.
+
+## Two remaining gap-audit follow-ups (2026-08-09)
+
+Picked up the last two "deliberately not fixed this pass" items. Both
+needed a NEW small dedicated script rather than fitting into
+`render_audit.py`/`fold_audit.py` -- neither is a text/render/fold
+concern, so forcing them in would have muddied what each existing tool
+actually promises.
+
+- **`detector_throttle_audit.py`** (new) -- proves `SportsEngine.
+  _detector_due()` (the task #21 throttle fix) actually caps the real
+  call rate, not just that isolated before/after timestamp comparisons
+  look right. The real regression check simulates the ORIGINAL bug's
+  exact cadence -- 400 calls at the real `tick_rate` (0.05s) spacing,
+  ~20 simulated seconds -- by monkeypatching `engines.time.time` (not
+  the global `time` module; only the one reference `_detector_due()`
+  itself reads) so the real function runs unmodified against a
+  fast-forwarded fake clock instead of the test needing to sleep 20 real
+  seconds. Asserts at most ~1 due call in that window, not 400 -- if the
+  throttle gate is ever removed or inverted, this fails immediately
+  instead of silently regressing to hammering ESPN's summary endpoint
+  again. Also covers: first-call-is-always-due, independent detector
+  keys never gate each other, and the gate correctly resets its own
+  timestamp on becoming due.
+- **`hangar_audit.py`** (new) -- proves `HANGAR_MAX_ENTRIES = 500`
+  eviction actually happens at the boundary, LRU by `last_seen`, not
+  merely asserted in `hangar.py`'s own docstring. NEVER touches the real
+  `hangar.LOG` singleton or `hangar_log.jsonl` (which holds a real,
+  live collection -- 500 real logged aircraft as of this session) --
+  every check constructs a fresh `HangarLog()` against a temp path,
+  with `hangar.HANGAR_PATH` patched for the duration and restored (and
+  the real path captured at IMPORT time, before any patching, so the
+  safety assertion can't be fooled by comparing the patched value to
+  itself). Fills to exactly the cap, confirms a 501st distinct
+  registration evicts EXACTLY the least-recently-seen entry (not an
+  off-by-one neighbor), confirms a REPEAT sighting of an existing entry
+  never evicts anything (eviction only fires on `record_sighting()`'s
+  genuinely-new-registration branch), confirms touching an old entry's
+  `last_seen` protects it from being the next victim (real LRU, not
+  insertion order), and confirms a fresh `HangarLog()` reloading the same
+  temp file gets back exactly what was saved.
+
+Verified: both new scripts pass clean (`detector_throttle_audit.py`
+8/8 checks, `hangar_audit.py` 12/12 checks), confirmed via `git status`
+that `hangar_log.jsonl` (the real collection) has zero diff after
+running `hangar_audit.py`, both standing audits (`render_audit.py`/
+`fold_audit.py`) still clean, real service restart + `/api/frame`
 pulled clean post-restart.
 
 ## Known issues / in-progress work
