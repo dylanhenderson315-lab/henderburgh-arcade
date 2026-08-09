@@ -83,7 +83,7 @@ MARQUEE_OK = {"news", "ticker", "sports", "gameday", "ambient", "flights", "noti
 # force-triggered-only takeovers -- see drive_planewatch()/drive_notify()
 # below for why they need dedicated drivers instead of the generic one.
 TEXT_MODES = ["ticker", "satellite", "flights", "sports", "news", "weather",
-              "clock", "blog", "ambient", "gameday", "planewatch", "notify"]
+              "clock", "blog", "events", "ambient", "gameday", "planewatch", "notify"]
 
 # Modes with a dedicated driver instead of the generic zero-arg
 # construct-and-tick loop in drive() below.
@@ -292,8 +292,45 @@ def drive_notify(audit):
     return frames[0], collisions
 
 
+def drive_events(audit):
+    """EventsLogEngine (2026-08-09's recent-events log) reads
+    events_log.LOG.get(), which on a real fresh device is honestly empty
+    -- the generic drive() below would cover only the "NO EVENTS YET"
+    fallback and never exercise a populated page. A dedicated driver
+    injects real-shaped synthetic entries directly onto the engine's own
+    `.entries` list (bypassing events_log.LOG entirely, same "__new__ +
+    set attributes directly" technique drive_planewatch() already uses)
+    -- this NEVER touches the real events_log.jsonl file, matching the
+    task's own constraint. Three variants: a full page of all three real
+    kinds (plane/sports/notify) to check row spacing/collision across
+    every kind color, a single very-long summary (fit_text() truncation
+    path), and an aircraft-shaped entry with a long age (multi-day, the
+    DAYS-aware branch of FlightEngine._fmt_age_long)."""
+    frames = [0]
+    collisions = []
+    now = time.time()
+    variants = [
+        [
+            {"ts": now - 300, "kind": "plane", "summary": "N182UA (737-900)"},
+            {"ts": now - 1800, "kind": "sports", "summary": "HOME RUN: NYY 4, BOS 2"},
+            {"ts": now - 7200, "kind": "notify", "summary": "GARAGE DOOR: LEFT OPEN 20 MIN"},
+        ],
+        [{"ts": now - 60,
+          "kind": "notify",
+          "summary": "FRONT DOOR CAMERA MOTION DETECTED AT THE MAIN ENTRANCE"}],
+        [{"ts": now - 400000, "kind": "plane", "summary": "N911PD (EC135)"}],
+    ]
+    for i, entries in enumerate(variants):
+        eng = engines.EventsLogEngine.__new__(engines.EventsLogEngine)
+        eng.entries = entries
+        eng.page = 0
+        _snap(audit, eng, "events variant %d" % i, frames, collisions)
+    return frames[0], collisions
+
+
 CUSTOM_DRIVERS["planewatch"] = drive_planewatch
 CUSTOM_DRIVERS["notify"] = drive_notify
+CUSTOM_DRIVERS["events"] = drive_events
 
 
 def drive(mode, audit, ticks=60, settle=0.25):

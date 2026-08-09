@@ -37,6 +37,7 @@ from pathlib import Path
 
 import paneltext
 
+import events_log
 import hangar
 import satellite
 
@@ -970,6 +971,20 @@ class FlightFeed:
                     # consumed -- same "only the most recent real event
                     # matters" shape as _set_big_moment()'s one-slot queue.
                     self._window_batch = entered
+                # RECENT EVENTS LOG (events_log.py) -- one entry per real
+                # aircraft that newly entered the window, same real batch
+                # the takeover/detail hand-off consumes. Summary reuses
+                # _ident()/_type_name(), the same fold-safe label-building
+                # helpers every other real aircraft label in this module
+                # already uses -- not reinvented here. Folded already (both
+                # helpers fold at their own boundary), so this call site
+                # passes an already-folded string, matching events_log.py's
+                # own "caller folds" contract.
+                for a in entered:
+                    label = _ident(a)
+                    tname = _type_name(a.get("type"))
+                    summary = f"{label} ({tname})" if tname else label
+                    events_log.LOG.record("plane", paneltext.panel_text(summary))
             self._seen_window = now_in_window
 
         with self._lock:
