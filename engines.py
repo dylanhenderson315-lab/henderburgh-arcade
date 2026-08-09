@@ -8423,6 +8423,169 @@ class FollowFlightEngine:
         return bytes(buf)
 
 
+class DepartureBoardEngine(Browsable):
+    """DEPARTURE BOARD (2026-08-09) -- a real, honest FIDS-style board of
+    aircraft currently departing from or arriving at the configured home
+    airport, built entirely from data this project already fetches.
+
+    WHY THIS SHAPE, NOT A REAL SCHEDULED-FLIGHTS FIDS. A traditional
+    departure board (flight number, scheduled/estimated time, gate,
+    status) needs a real airline-schedule data source, and CLAUDE.md's
+    own "Data sources CHECKED AND REJECTED" section already covers this
+    exact ground: OpenSky's flights endpoints now need OAuth2 (confirmed
+    live again this session: still a real 403), adsb.lol has no airport
+    endpoint (confirmed live again: still a real 404), every other real
+    candidate (AviationStack/AirLabs/AeroDataBox) needs a paid key, and
+    the one genuinely free source (nasstatus.faa.gov) is national delay/
+    closure status, not a per-flight board. That rejection stands.
+
+    What IS real and free: `FlightEngine._route_status()` already
+    classifies a currently-tracked aircraft as DEPARTING/ARRIVING against
+    the configured home airport, using adsbdb's real resolved route --
+    built for the DETAIL card's header tag, reused here VERBATIM rather
+    than re-derived, applied across every currently-tracked aircraft
+    instead of just the selected one. This is not a claimed official
+    schedule; it is real, live traffic that IS currently departing from
+    or arriving at the configured home airport, right now, which is
+    honestly the more useful board for a specific home location anyway
+    (a real MYR departure board full of scheduled Atlanta/Charlotte
+    regional hops nobody at this house is watching for vs. this: exactly
+    the real traffic actually overhead).
+
+    DESIGN CHOICE: a standalone engine (`ENGINES["departures"]`), not a
+    fifth `FlightEngine` view -- matches `FollowFlightEngine`'s own
+    precedent immediately above: this is a genuinely different
+    PRESENTATION (a scannable board, not one-aircraft-at-a-time) of the
+    same underlying data, and `FlightEngine`'s up/down axis is already
+    claimed by THE HANGAR toggle -- adding a competing view there would
+    mean overloading that binding rather than keeping "one axis, one
+    meaning". Zero new I/O: reads `flights.FEED.get()`'s already-cached
+    aircraft list (each dict already carries a real `route` from the
+    feed's own background enrichment) and `flights.load_airport()`.
+    """
+
+    name = "departures"
+    tick_rate = 0.2
+
+    BG = (0, 0, 0)
+    INK = (150, 160, 185)
+    INK_DIM = (80, 88, 108)
+    ACCENT = (120, 200, 255)
+    DEPARTING_COL = (255, 200, 90)   # warm -- "leaving here"
+    ARRIVING_COL = (110, 220, 140)   # cool green -- "coming home"
+
+    ROWS_PER_PAGE = 3
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.airport = None
+        self.rows = []      # [{status, ac}, ...]
+        self.page = 0
+        self._init_scroll()
+
+    def has_content(self):
+        # Real content only when a home airport is configured AND at
+        # least one currently-tracked aircraft is genuinely departing
+        # from or arriving at it -- an honest empty state otherwise
+        # (either "no airport configured" or "nothing to/from it right
+        # now", distinguished in frame(), never conflated).
+        return bool(self.airport) and bool(self.rows)
+
+    def _step(self, direction):
+        pages = max(1, -(-len(self.rows) // self.ROWS_PER_PAGE))
+        self.page = (self.page + direction) % pages
+
+    def input(self, cmd):
+        self._browse_input(cmd)
+
+    def auto(self):
+        pass
+
+    def tick(self):
+        self._scroll_tick()
+        self.airport = flights.load_airport()
+        aircraft = (flights.FEED.get() or {}).get("aircraft") or []
+        rows = []
+        if self.airport:
+            for ac in aircraft:
+                status = FlightEngine._route_status(ac.get("route"), self.airport)
+                if status:
+                    rows.append({"status": status, "ac": ac})
+            # DEPARTING first (leaving here, the more actionable "did my
+            # flight get off the ground" question for a home airport),
+            # then ARRIVING, each group nearest-first -- reuses the real
+            # dist_nm every aircraft dict already carries, never a new
+            # sort key.
+            rows.sort(key=lambda r: (r["status"] != "DEPARTING",
+                                     r["ac"].get("dist_nm") if r["ac"].get("dist_nm") is not None else 1e9))
+        self.rows = rows
+        pages = max(1, -(-len(self.rows) // self.ROWS_PER_PAGE))
+        if self.page >= pages:
+            self.page = pages - 1
+        self.score = len(self.rows)
+
+    def frame(self):
+        buf = blank()
+        fill(buf, self.BG)
+        n = len(self.rows)
+        pages = max(1, -(-n // self.ROWS_PER_PAGE))
+        code = (self.airport or {}).get("code") or "HOME"
+        tag = f"{self.page + 1}/{pages}" if n else None
+        draw_header(buf, f"{code} BOARD", self.ACCENT, right_tag=tag)
+        draw_divider(buf, 9)
+
+        if not self.airport:
+            # Honest gap: no configured home airport means no possible
+            # DEPARTING/ARRIVING match, not "nothing happening today".
+            draw_text_centered(buf, 28, "NO HOME AIRPORT", self.INK_DIM)
+            draw_text_centered(buf, 36, "CONFIGURED", self.INK_DIM)
+            return bytes(buf)
+
+        if not n:
+            draw_text_centered(buf, 28, "NOTHING TO/FROM", self.INK_DIM)
+            draw_text_centered(buf, 36, code, self.INK_DIM)
+            return bytes(buf)
+
+        start = self.page * self.ROWS_PER_PAGE
+        page_rows = self.rows[start:start + self.ROWS_PER_PAGE]
+        y = 12
+        for r in page_rows:
+            ac = r["ac"]
+            status = r["status"]
+            col = self.DEPARTING_COL if status == "DEPARTING" else self.ARRIVING_COL
+            ident = ac.get("reg") or ac.get("ident") or "UNKNOWN"
+            route = ac.get("route") or {}
+            # DEPARTING shows where it's headed; ARRIVING shows where it
+            # came from -- the informative end, same framing
+            # _route_status()'s own DETAIL-card caller uses.
+            other_city = (route.get("dest_city") if status == "DEPARTING"
+                         else route.get("origin_city"))
+            other_code = (route.get("dest") if status == "DEPARTING"
+                         else route.get("origin"))
+            other = other_city or other_code or ""
+            line1 = fit_text(f"{status[:4]} {ident}", WIDTH - 4)
+            draw_text3x5(buf, 2, y, line1, col)
+            if other:
+                # fit_text() drops whole trailing words -- gluing
+                # "ARROW CITY" through it in one call meant a long city
+                # name got dropped ENTIRELY, leaving just the arrow (a
+                # real bug render_audit.py's TRUNCATED check caught:
+                # "< RALEIGH/DURHAM" -> "<"). Fit the city text into its
+                # own reserved budget instead, so the arrow always
+                # survives and the city degrades to a normal truncation
+                # (word-safe, never a total loss).
+                arrow = ">" if status == "DEPARTING" else "<"
+                city_budget = WIDTH - 4 - text_w(arrow + " ")
+                draw_text3x5(buf, 2, y + 6, arrow + " " + fit_text(other, city_budget), self.INK)
+            y += 15
+            if y > HEIGHT - 5:
+                break
+        return bytes(buf)
+
+
 class NotifyEngine:
     """URGENT-priority Home Assistant notification takeover (task #8,
     2026-08-08). Built with the EXACT same shape as PlaneWatchEngine
@@ -12495,6 +12658,7 @@ class MenuEngine:
         ("satellite", "ISS",     (255, 226, 60)),
         ("flights",  "FLIGHTS",  (120, 200, 255)),
         ("followflight", "FOLLOW", (255, 200, 90)),
+        ("departures", "BOARD", (120, 200, 255)),
         ("sports",   "SPORTS",   (255, 140, 40)),
         ("news",     "NEWS",     (255, 226, 60)),
         ("weather",  "WEATHER",  (90, 190, 255)),
@@ -12753,6 +12917,17 @@ class MenuEngine:
             put_px(buf, x0 + 2, y0 + 1, c)
             put_px(buf, x0 + 1, y0 + 0, c)
             put_px(buf, x0 + 1, y0 + 2, c)
+        elif gid == "departures":
+            # A board outline with two stacked row-ticks -- "a list of
+            # rows", distinct from sports' scoreboard divider+marks and
+            # from events' clock-hand list glyph.
+            block(0, 0, 8, 1, c)
+            block(0, 7, 8, 1, c)
+            for yy in range(1, 7):
+                put_px(buf, x0, y0 + yy, c)
+                put_px(buf, x0 + 7, y0 + yy, c)
+            block(1, 2, 5, 1, w)
+            block(1, 5, 5, 1, w)
         elif gid == "sports":
             # A scoreboard: a frame with a divider and two blocky "score"
             # marks -- reads as "live score" distinct from the ticker's
@@ -15258,6 +15433,10 @@ ENGINES = {
     # mode, same shape as "flights"/"satellite", NOT force-triggered
     # (unlike "planewatch"/"notify" right below).
     "followflight": FollowFlightEngine,
+    # DEPARTURE BOARD (2026-08-09) -- ordinary selectable data mode, real
+    # local ADS-B traffic classified against the configured home
+    # airport, zero new I/O (see DepartureBoardEngine's own docstring).
+    "departures": DepartureBoardEngine,
     "sports": SportsEngine,
     "news": NewsEngine,
     "weather": WeatherEngine,

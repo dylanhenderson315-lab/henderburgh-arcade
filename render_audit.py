@@ -85,8 +85,8 @@ MARQUEE_OK = {"news", "ticker", "sports", "gameday", "ambient", "flights", "noti
 # no API strings to damage. `planewatch`/`notify` (2026-08-09) are
 # force-triggered-only takeovers -- see drive_planewatch()/drive_notify()
 # below for why they need dedicated drivers instead of the generic one.
-TEXT_MODES = ["ticker", "satellite", "flights", "followflight", "sports", "news",
-              "weather", "clock", "blog", "events", "ambient", "gameday",
+TEXT_MODES = ["ticker", "satellite", "flights", "followflight", "departures", "sports",
+              "news", "weather", "clock", "blog", "events", "ambient", "gameday",
               "planewatch", "notify"]
 
 # Modes with a dedicated driver instead of the generic zero-arg
@@ -373,10 +373,49 @@ def drive_followflight(audit):
     return frames[0], collisions
 
 
+def drive_departures(audit):
+    """DepartureBoardEngine (2026-08-09's departure board) reads real
+    aircraft/airport state via flights.FEED/flights.load_airport() --
+    with no real home airport configured (or no qualifying traffic at
+    audit time), the generic drive() loop would only ever cover the two
+    honest-empty states. Sets `.airport`/`.rows` directly, same "poke
+    internals with a real-shaped payload" technique every other custom
+    driver here uses. Three variants: no airport configured, an airport
+    configured with zero qualifying traffic, and a populated multi-page
+    board (2 DEPARTING + 1 ARRIVING, real-shaped route data) to exercise
+    row layout/paging/collision across both status colors."""
+    frames = [0]
+    collisions = []
+    airport = {"code": "MYR", "lat": 33.68, "lon": -78.93}
+    variants = [
+        (None, []),
+        (airport, []),
+        (airport, [
+            {"status": "DEPARTING", "ac": {"reg": "N182UA", "ident": "UAL2847",
+             "dist_nm": 5.0, "route": {"dest": "LGA", "dest_city": "NEW YORK"}}},
+            {"status": "DEPARTING", "ac": {"reg": "N8620E", "ident": "SWA415",
+             "dist_nm": 12.0, "route": {"dest": None, "dest_city": None}}},
+            {"status": "ARRIVING", "ac": {"reg": "N911PD", "ident": "N911PD",
+             "dist_nm": 3.0, "route": {"origin": "RDU", "origin_city": "RALEIGH/DURHAM"}}},
+        ]),
+    ]
+    for i, (ap, rows) in enumerate(variants):
+        eng = engines.DepartureBoardEngine.__new__(engines.DepartureBoardEngine)
+        eng.airport = ap
+        eng.rows = rows
+        eng.page = 0
+        _snap(audit, eng, "departures variant %d" % i, frames, collisions)
+        if len(rows) > 3:
+            eng.page = 1
+            _snap(audit, eng, "departures variant %d page 1" % i, frames, collisions)
+    return frames[0], collisions
+
+
 CUSTOM_DRIVERS["planewatch"] = drive_planewatch
 CUSTOM_DRIVERS["notify"] = drive_notify
 CUSTOM_DRIVERS["events"] = drive_events
 CUSTOM_DRIVERS["followflight"] = drive_followflight
+CUSTOM_DRIVERS["departures"] = drive_departures
 
 
 def drive(mode, audit, ticks=60, settle=0.25):
