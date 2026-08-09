@@ -21,6 +21,7 @@ import time
 from collections import deque
 from pathlib import Path
 
+import events_log
 import market
 import satellite
 import skypass
@@ -1311,6 +1312,21 @@ class BigMomentSource:
         moment = {"kind": kind, "line1": line1, "line2": line2,
                   "color": color or (255, 200, 40), "tier": tier, "system": system,
                   "sport": sport}
+        # RECENT EVENTS LOG (events_log.py) -- record every REAL big
+        # sports moment right where the celebration text is finalized, so
+        # the log shows the SAME real text the celebration itself draws,
+        # not a re-derived summary. Deliberately gated to SYSTEM_SPORTS
+        # only -- this same _set_big_moment() call also fires for flights
+        # (airship/emergency-squawk/new-type) and satellite (go-outside
+        # passes), and the owner's ask was specifically "big sports
+        # moments", not every BigMomentSource event across all three
+        # engines. `kind`/`line1`/`line2` are already panel_text()-folded
+        # by the caller per this method's own docstring, so no re-fold
+        # is needed here -- same "caller folds" contract events_log.py
+        # itself documents.
+        if system == SYSTEM_SPORTS:
+            summary = f"{kind}: {line1}" if line1 else kind
+            events_log.LOG.record("sports", summary)
         if tier == TIER_FLASH:
             self._flash = moment
             self._flash_t = TIER_TICKS[TIER_FLASH]
@@ -11647,6 +11663,124 @@ class BlogEngine(Browsable):
         return bytes(buf)
 
 
+class EventsLogEngine(Browsable):
+    """"RECENT EVENTS" -- what just happened: planes that entered the
+    configured window, big sports moments, and Home Assistant
+    notifications received. Reads events_log.LOG (a persistent JSON-lines
+    file, same shape as hangar.py), most-recent-first, one page at a
+    time.
+
+    DESIGN CHOICE, stated per the task's own instruction to justify a
+    deviation: this is a NEW STANDALONE ENGINE (registered in
+    ENGINES["events"]), not a fourth thing bolted onto an existing mode.
+    The two closest real precedents in this project both went the
+    "standalone engine, own menu tile" route for exactly this shape of
+    feature -- THE HANGAR (flights.py's persistent aircraft collection)
+    is its own paged list view, and the ATC log (atc.py) is its own
+    view too. This log is even less tied to any ONE existing mode than
+    either of those: a Hangar entry is inherently about flights, but this
+    log spans three genuinely separate systems (flights, sports, home
+    automation) that don't otherwise share an engine, so it doesn't
+    belong bolted onto any single one of them the way the Hangar
+    reasonably bolts onto FlightEngine. A standalone engine is the
+    honest structural fit.
+
+    Zero I/O here, same discipline as every other engine -- reads
+    whatever events_log.LOG.get() already has cached in memory (that
+    module's own lazy-load, never blocks).
+    """
+
+    name = "events"
+    tick_rate = 0.05
+
+    BG = (0, 0, 0)
+    INK = (150, 160, 185)
+    INK_DIM = (80, 88, 108)
+    ACCENT = (255, 190, 90)   # warm amber -- distinct from every other mode's accent
+
+    # One kind-tag color per real event source -- plane/sports/notify,
+    # the exact three kinds events_log.py's own docstring documents.
+    KIND_COLOR = {
+        "plane": (120, 200, 255),   # same family as the flights mode's blue
+        "sports": (255, 140, 40),   # same family as the sports mode's orange
+        "notify": (176, 96, 255),   # same family as blog's violet (an HA "message")
+    }
+    KIND_TAG = {"plane": "PLANE", "sports": "SPORT", "notify": "NOTIFY"}
+
+    # Two lines per event (kind/age, then summary), 15px per row --
+    # y=12,27,42 leaves the last summary line at y=48+6=54, safely inside
+    # HEIGHT-5=59, the real bound a 5px glyph must start at or before.
+    ROWS_PER_PAGE = 3
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.entries = []
+        self.page = 0
+        self._init_scroll()
+
+    def has_content(self):
+        return bool(self.entries)
+
+    def _step(self, direction):
+        pages = max(1, -(-len(self.entries) // self.ROWS_PER_PAGE))
+        self.page = (self.page + direction) % pages
+
+    def input(self, cmd):
+        self._browse_input(cmd)
+
+    def auto(self):
+        pass
+
+    def tick(self):
+        self._scroll_tick()
+        self.entries = events_log.LOG.get()
+        pages = max(1, -(-len(self.entries) // self.ROWS_PER_PAGE))
+        if self.page >= pages:
+            self.page = pages - 1
+        self.score = len(self.entries)
+
+    def frame(self):
+        buf = blank()
+        fill(buf, self.BG)
+        n = len(self.entries)
+        pages = max(1, -(-n // self.ROWS_PER_PAGE))
+        tag = f"{self.page + 1}/{pages}" if n else None
+        draw_header(buf, "RECENT EVENTS", self.ACCENT, right_tag=tag)
+        draw_divider(buf, 9)
+
+        if not n:
+            # Honest empty state -- never a guess, never fabricated rows.
+            draw_text_centered(buf, 30, "NO EVENTS", self.INK_DIM)
+            draw_text_centered(buf, 37, "YET", self.INK_DIM)
+            return bytes(buf)
+
+        # Two lines per row (kind + age on one, summary on the next), 8px
+        # apart within a row and 16px between rows -- room for exactly 3
+        # rows per page at this budget (y=12..60), not ROWS_PER_PAGE(6)'s
+        # original single-line assumption. ROWS_PER_PAGE stays the paging
+        # unit (matches events_log.LOG.get()'s own page-worth-of-entries
+        # granularity); the two-line layout is a render-time choice only.
+        start = self.page * self.ROWS_PER_PAGE
+        rows = self.entries[start:start + self.ROWS_PER_PAGE]
+        y = 12
+        now = time.time()
+        for e in rows:
+            kind = e.get("kind") or "notify"
+            color = self.KIND_COLOR.get(kind, self.INK)
+            tag_txt = self.KIND_TAG.get(kind, kind.upper()[:6])
+            age = FlightEngine._fmt_age_long(max(0.0, now - e.get("ts", now)))
+            draw_text3x5(buf, 2, y, fit_text(f"{tag_txt} {age} AGO", WIDTH - 4), color)
+            summary = fit_text(e.get("summary") or "", WIDTH - 4)
+            draw_text3x5(buf, 2, y + 6, summary, self.INK)
+            y += 15
+            if y > HEIGHT - 5:
+                break
+        return bytes(buf)
+
+
 class AmbientEngine(Browsable):
     """Master rotation: flights -> ISS -> weather -> sports -> news, on a
     loop, skipping anything that has nothing to show right now.
@@ -12077,6 +12211,7 @@ class MenuEngine:
         ("weather",  "WEATHER",  (90, 190, 255)),
         ("clock",    "CLOCK",    (120, 200, 255)),
         ("blog",     "BLOG",     (176, 96, 255)),
+        ("events",   "EVENTS",   (255, 190, 90)),
         ("ambient",  "AMBIENT",  (176, 96, 255)),
         ("gameday",  "GAME DAY", GAMEDAY_ACCENT),
     ]
@@ -12356,6 +12491,15 @@ class MenuEngine:
             block(3, 4, 3, 1, w)
             put_px(buf, x0 + 2, y0 + 6, c)      # tail
             put_px(buf, x0 + 2, y0 + 7, c)
+        elif gid == "events":
+            # A short stacked list with a clock hand -- "a log of things
+            # over time", distinct from blog's speech-bubble and news's
+            # newspaper-column language.
+            for i, yy in enumerate((2, 5, 8)):
+                block(1, yy, 6, 1, dim and c or tuple(v * 2 // 3 for v in color))
+            put_px(buf, x0 + 8, y0 + 1, w)
+            put_px(buf, x0 + 8, y0 + 2, w)
+            put_px(buf, x0 + 7, y0 + 2, w)
         elif gid == "gameday":
             # A full border with a filled centre -- the icon IS the mode's
             # identity (see GameDayEngine._occasion_frame): every other
@@ -14809,6 +14953,7 @@ ENGINES = {
     "weather": WeatherEngine,
     "clock": ClockEngine,
     "blog": BlogEngine,
+    "events": EventsLogEngine,
     "ambient": AmbientEngine,
     "gameday": GameDayEngine,
     # PLANE-IN-WINDOW takeover -- same shape as "gameday": registered so

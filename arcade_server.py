@@ -42,6 +42,7 @@ import mma
 from engines import ENGINES, WIDTH, HEIGHT, TicCartEngine, CARTS_DIR
 from display import get_renderer
 import backgrounds
+import events_log
 import market
 import satellite
 import flights
@@ -1356,6 +1357,15 @@ class Handler(BaseHTTPRequestHandler):
                 # fabricated.
                 title_f = paneltext.panel_text(title)
                 message_f = paneltext.panel_text(message)
+                # RECENT EVENTS LOG (events_log.py) -- record right after
+                # the fold, using the same real folded title/message the
+                # banner/takeover itself will draw. Recorded regardless of
+                # whether trigger_notify() actually displays it (e.g. the
+                # panel is off) -- a real notification was genuinely
+                # received, which is the event this log is about, not
+                # whether the panel happened to be awake to show it.
+                summary = f"{title_f}: {message_f}" if message_f else title_f
+                events_log.LOG.record("notify", summary)
                 ok = ARCADE.trigger_notify(priority, title_f, message_f)
                 self._json({"ok": ok, "priority": priority,
                             "title": title_f, "message": message_f})
