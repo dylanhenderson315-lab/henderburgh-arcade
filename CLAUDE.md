@@ -2531,6 +2531,39 @@ MMA-name truncation warnings only), `fold_audit.py` 0 feeds not folding,
 real service restart + `/api/frame` pulled clean post-restart. Reviewed
 via synthetic 8x-zoom PNG sent for visual confirmation before commit.
 
+## Planewatch -> Hangar hand-off gets its own transition (2026-08-08)
+
+Every mode swap in the project used the same `transitions.DEFAULT_STYLE`
+(`push_up`) at the single `transitions.blend()` call site in the render
+loop -- including the plane-in-window takeover handing off into flights'
+ceremonial Hangar detail card, despite that hand-off being (per the
+owner) one of the two moments that "carry almost all the emotional
+value." Gave it its own transition without touching any other swap:
+
+- **`transitions.radial_open()`** (new) -- a circular iris reveal from
+  panel centre outward (both axes, unlike `iris_open`'s horizontal-only
+  band). Same cost class as every other style in the file: one
+  slice-pair per row via a circle equation, zero per-pixel Python.
+  Registered in `STYLES`, `DEFAULT_STYLE` untouched. Reserved for exactly
+  this one hand-off -- `iris_open` stays owned by `SportsEngine`'s own
+  internal ticker->detail expansion, a different mechanism entirely (that
+  one blends an engine's own two frames directly, not a `set_mode()`
+  swap).
+- **`Arcade._trans_style`** (new attr on `Arcade`, `arcade_server.py`) --
+  a single override slot, set inside `set_mode()` via one narrow explicit
+  check (`"radial_open" if prev == "planewatch" and mode == "flights"
+  else None`), not a general per-mode style table -- this is the only
+  swap in the whole project that needs to differ, so a table would be an
+  abstraction with a single real entry. The render loop's `blend()` call
+  now reads `self._trans_style or transitions.DEFAULT_STYLE`.
+
+Verified: both audits clean, real service restart + `/api/frame` pulled
+clean post-restart (this touches the render loop directly, so the live
+restart mattered more than usual here), plus a direct behavioral check
+against a throwaway `Arcade` instance confirming `planewatch->flights`
+resolves `radial_open` while `menu->gameday` and the reverse
+`flights->planewatch` both stay on the untouched default.
+
 ## Hero silhouette elevation (2026-08-08)
 
 Both hero moments -- the plane-in-window takeover (`PlaneWatchEngine`)
