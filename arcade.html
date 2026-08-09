@@ -276,19 +276,40 @@
 
   <div id="sportscard" class="card hide">
     <h2>Sports — leagues &amp; pinned team</h2>
-    <div class="row"><label>Leagues</label><input type="text" id="sp-leagues"
-      placeholder="NFL, NBA, MLB, NHL"></div>
+    <div class="row"><label>Leagues</label>
+      <select id="sp-leagues" multiple style="min-height:96px;flex:1;"></select></div>
     <div class="row"><button id="sp-lg-save">Save leagues</button>
       <span id="sp-lg-msg" class="badge"></span></div>
-    <div class="hint" id="sp-known" style="margin-bottom:10px;"></div>
+    <div class="hint" style="margin-bottom:10px;">Ctrl/Cmd-click (or tap
+      each) to select more than one. More leagues = more requests against
+      ESPN's undocumented API.</div>
     <div class="row"><label>Pin team</label>
-      <input type="text" id="sp-fav-lg" placeholder="league" style="max-width:88px;">
-      <input type="text" id="sp-fav-tm" placeholder="team abbr" style="max-width:110px;"></div>
+      <select id="sp-fav-lg" style="max-width:88px;"><option value="">league</option></select>
+      <select id="sp-fav-tm" style="max-width:150px;"><option value="">team</option></select></div>
     <div class="row"><button id="sp-fav-save">Pin</button>
       <button id="sp-fav-clear">Unpin</button>
       <span id="sp-fav-msg" class="badge"></span></div>
     <div class="hint">The pinned team gets a full-screen score with live game
-      state. More leagues = more requests against ESPN's undocumented API.</div>
+      state.</div>
+
+    <h2 style="margin-top:14px;">Favorite teams — ticker watchlist</h2>
+    <div class="row"><label>Add team</label>
+      <select id="sp-wl-lg" style="max-width:88px;"><option value="">league</option></select>
+      <select id="sp-wl-tm" style="max-width:150px;"><option value="">team</option></select>
+      <button id="sp-wl-add">+ Add</button></div>
+    <div class="row"><label>Add by city</label>
+      <input type="text" id="sp-wl-city" placeholder="e.g. Pittsburgh" style="max-width:150px;">
+      <button id="sp-wl-city-add">+ Add all</button></div>
+    <div class="row"><label>Filter ticker</label>
+      <button id="sp-wl-filter" class="badge">—</button></div>
+    <div id="sp-wl-list" class="vlist"></div>
+    <span id="sp-wl-msg" class="badge"></span>
+    <div class="hint">A cross-sport watchlist, separate from the one
+      pinned team above — when the filter is on, the rotating ticker
+      only shows games involving a team on this list. "Add all" matches
+      every real team (across every league) whose real home city
+      contains what you typed, e.g. "Pittsburgh" adds the Steelers,
+      Penguins, and Pirates in one click.</div>
     <h2 style="margin-top:14px;">Golf — pinned player</h2>
     <div class="row"><label>Player</label>
       <input type="text" id="sp-golf" placeholder="e.g. Hojgaard"></div>
@@ -785,12 +806,43 @@ $('fa-reg').addEventListener('keydown', e => {
   if (e.key === 'Enter'){ e.preventDefault(); $('fa-add').click(); }
 });
 
+/* ---------- real team dropdowns (2026-08-09) ----------
+   allTeams: {league: [{abbr, location, name}, ...]}, fetched once from
+   /api/sports/teams (real ESPN data, cached server-side for 24h -- see
+   sports.fetch_teams()) and reused for every dropdown/city-match on this
+   card, rather than re-fetching per select. */
+let allTeams = {};
+let knownLeagues = [];
+function teamLabel(t){ return `${t.location} ${t.name} (${t.abbr})`; }
+function fillTeamSelect(sel, league, selectedAbbr){
+  const teams = allTeams[league] || [];
+  sel.innerHTML = '<option value="">team</option>' +
+    teams.map(t => `<option value="${t.abbr}"${t.abbr===selectedAbbr?' selected':''}>${teamLabel(t)}</option>`).join('');
+}
+function fillLeagueSelect(sel, selectedValues){
+  const sel1 = new Set(selectedValues || []);
+  sel.innerHTML = knownLeagues.map(lg =>
+    `<option value="${lg}"${sel1.has(lg)?' selected':''}>${lg}</option>`).join('');
+}
+async function loadTeams(){
+  try{ const j = await (await fetch('/api/sports/teams')).json();
+       allTeams = j.teams || {}; }catch(_){}
+}
+
 async function loadSports(){
   try{ const j = await (await fetch('/api/sports/config')).json();
-       $('sp-leagues').value = (j.leagues || []).join(', ');
-       $('sp-known').innerHTML = 'Known: <b>' + (j.known_leagues || []).join(' · ') + '</b>';
-       if (j.favorite){ $('sp-fav-lg').value = j.favorite.league || '';
-                        $('sp-fav-tm').value = j.favorite.team_abbr || ''; }
+       knownLeagues = j.known_leagues || [];
+       if (!Object.keys(allTeams).length) await loadTeams();
+       fillLeagueSelect($('sp-leagues'), j.leagues || []);
+       fillLeagueSelect($('sp-fav-lg'), j.favorite ? [j.favorite.league] : []);
+       fillLeagueSelect($('sp-wl-lg'), []);
+       if (j.favorite && j.favorite.league){
+         fillTeamSelect($('sp-fav-tm'), j.favorite.league, j.favorite.team_abbr);
+       }
+       if ($('sp-wl-lg').value) fillTeamSelect($('sp-wl-tm'), $('sp-wl-lg').value);
+       favTeams = j.favorite_teams || [];
+       favTeamsFilter = !!j.favorite_teams_filter;
+       renderFavTeams();
        if (j.golf_player && !$('sp-golf').matches(':focus')) $('sp-golf').value = j.golf_player;
        const g = j.golf_status, live = (j.golf_live || []);
        // Say plainly whether the saved name actually matched someone, so a
@@ -831,12 +883,13 @@ $('sp-tennis-clear').addEventListener('click', async () => {
   $('sp-tennis').value = ''; say('sp-tennis-msg', 'unpinned'); loadSports();
 });
 $('sp-lg-save').addEventListener('click', async () => {
-  const lg = $('sp-leagues').value.split(',').map(x=>x.trim()).filter(Boolean);
+  const lg = [...$('sp-leagues').selectedOptions].map(o => o.value).filter(Boolean);
   const j = await (await post('/api/sports/leagues', {leagues: lg})).json();
   say('sp-lg-msg', j.rejected && j.rejected.length ? 'rejected: '+j.rejected.join(' ') : 'saved',
       !(j.rejected && j.rejected.length));
   loadSports();
 });
+$('sp-fav-lg').addEventListener('change', () => fillTeamSelect($('sp-fav-tm'), $('sp-fav-lg').value));
 $('sp-fav-save').addEventListener('click', async () => {
   const j = await (await post('/api/sports/favorite',
     {league: $('sp-fav-lg').value, team_abbr: $('sp-fav-tm').value})).json();
@@ -845,9 +898,67 @@ $('sp-fav-save').addEventListener('click', async () => {
 });
 $('sp-fav-clear').addEventListener('click', async () => {
   await post('/api/sports/favorite', {});
-  $('sp-fav-lg').value = ''; $('sp-fav-tm').value = '';
+  $('sp-fav-lg').value = ''; fillTeamSelect($('sp-fav-tm'), '');
   say('sp-fav-msg', 'unpinned');
 });
+
+/* ---------- favorite teams (ticker watchlist) --------------------------
+   Real growable list of {league, team_abbr}, same interaction shape as
+   favorite-aircraft's own add/remove list. "Add all" is a client-side
+   match against the already-fetched real allTeams data -- no new
+   endpoint needed, matches every real team (any league) whose real
+   `location` contains the typed text, case-insensitively. */
+let favTeams = [];
+let favTeamsFilter = false;
+function teamKey(t){ return t.league + ':' + t.team_abbr; }
+function renderFavTeams(){
+  const el = $('sp-wl-list');
+  el.innerHTML = favTeams.length ? favTeams.map(t => {
+    const teams = allTeams[t.league] || [];
+    const info = teams.find(x => x.abbr === t.team_abbr);
+    const label = info ? `${t.league} ${teamLabel(info)}` : `${t.league} ${t.team_abbr}`;
+    return `<button data-key="${teamKey(t)}">✕ ${label}</button>`;
+  }).join('') : '<div class="empty">No favorite teams yet.</div>';
+  el.querySelectorAll('button').forEach(b => b.addEventListener('click', () =>
+    saveFavTeams(favTeams.filter(t => teamKey(t) !== b.dataset.key), favTeamsFilter)));
+  const fb = $('sp-wl-filter');
+  fb.textContent = favTeamsFilter ? 'ON — showing only these' : 'OFF — showing every game';
+  fb.classList.toggle('on', favTeamsFilter);
+}
+async function saveFavTeams(list, filterEnabled){
+  mark();
+  const j = await (await post('/api/sports/favorite_teams',
+    {teams: list, filter_enabled: filterEnabled})).json();
+  favTeams = j.favorite_teams || list;
+  favTeamsFilter = j.favorite_teams_filter ?? filterEnabled;
+  renderFavTeams();
+  say('sp-wl-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
+}
+$('sp-wl-lg').addEventListener('change', () => fillTeamSelect($('sp-wl-tm'), $('sp-wl-lg').value));
+$('sp-wl-add').addEventListener('click', () => {
+  const league = $('sp-wl-lg').value, team_abbr = $('sp-wl-tm').value;
+  if (!league || !team_abbr) return;
+  if (favTeams.some(t => t.league === league && t.team_abbr === team_abbr)) return;
+  saveFavTeams([...favTeams, {league, team_abbr}], favTeamsFilter);
+});
+$('sp-wl-city-add').addEventListener('click', () => {
+  const city = $('sp-wl-city').value.trim().toLowerCase();
+  if (!city) return;
+  const additions = [];
+  for (const league of Object.keys(allTeams)){
+    for (const t of (allTeams[league] || [])){
+      if ((t.location || '').toLowerCase().includes(city) &&
+          !favTeams.some(f => f.league === league && f.team_abbr === t.abbr) &&
+          !additions.some(a => a.league === league && a.team_abbr === t.abbr)){
+        additions.push({league, team_abbr: t.abbr});
+      }
+    }
+  }
+  if (!additions.length){ say('sp-wl-msg', 'no real teams matched "' + $('sp-wl-city').value + '"', false); return; }
+  saveFavTeams([...favTeams, ...additions], favTeamsFilter);
+  $('sp-wl-city').value = '';
+});
+$('sp-wl-filter').addEventListener('click', () => saveFavTeams(favTeams, !favTeamsFilter));
 
 async function loadNews(){
   try{ const j = await (await fetch('/api/news/config')).json();

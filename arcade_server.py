@@ -1154,6 +1154,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"configured": s["configured"], "callsign": s["callsign"],
                         "airborne": s["airborne"], "age": s["age"],
                         "aircraft": s["aircraft"], "err": s["err"]})
+        elif path == "/api/sports/teams":
+            # Real team lists (2026-08-09), for the control panel's
+            # league/team dropdowns and the favorite-teams city-quick-add
+            # -- every real LEAGUE_PATHS league in one response, each
+            # independently cached/degraded (see sports.fetch_all_teams()).
+            self._json({"teams": sports.fetch_all_teams()})
         elif path == "/api/sports/config":
             leagues, favorite = sports.FEED.get_config()
             u = sports.FEED.get_universal()

@@ -113,6 +113,63 @@ def _get_json(url):
         return json.load(r)
 
 
+# ---- real team lists, for the control panel's dropdowns (2026-08-09) -----
+# TEAMS_URL uses the SAME site.web.api.espn.com host every other endpoint
+# here already switched to (site.api.espn.com blanket-403s from this
+# network, see the module note above `SCOREBOARD_URL`) -- confirmed live
+# that /teams serves the identical real shape on that host before using
+# it, same "checked live for every endpoint before switching" discipline
+# this file already followed for scoreboard/summary/the golf field/the
+# universal header.
+TEAMS_URL = "https://site.web.api.espn.com/apis/site/v2/sports/{path}/teams"
+
+TEAMS_REFRESH = 86400.0   # 24h -- real team rosters/abbreviations change
+                          # maybe once a year (relocations/rebrands), not
+                          # worth polling on any faster cadence than this
+
+_teams_cache = {}          # league -> [{abbr, location, name}, ...]
+_teams_cache_ts = {}       # league -> epoch seconds of last real fetch
+
+
+def fetch_teams(league):
+    """Real team list for one real league -- [{"abbr", "location", "name"}],
+    sorted by location. Cached per-process for TEAMS_REFRESH; a real
+    fetch failure falls back to whatever was last cached (even if stale)
+    rather than an empty list, same "stale but honest beats a blank
+    screen" rule every other feed here follows -- and if nothing has
+    EVER been cached, returns [] honestly rather than inventing a team
+    list. `league` must be a real LEAGUE_PATHS key; an unknown league
+    returns [] without a network call."""
+    path = LEAGUE_PATHS.get(league)
+    if not path:
+        return []
+    now = time.time()
+    if league in _teams_cache and now - _teams_cache_ts.get(league, 0) < TEAMS_REFRESH:
+        return _teams_cache[league]
+    try:
+        data = _get_json(TEAMS_URL.format(path=path))
+        raw = data["sports"][0]["leagues"][0]["teams"]
+        teams = sorted(
+            ({"abbr": paneltext.panel_text(t["team"].get("abbreviation")),
+              "location": paneltext.panel_text(t["team"].get("location")),
+              "name": paneltext.panel_text(t["team"].get("name"))}
+             for t in raw if t.get("team", {}).get("abbreviation")),
+            key=lambda t: t["location"] or "")
+    except Exception:                                  # noqa: BLE001 - never die
+        return _teams_cache.get(league, [])
+    _teams_cache[league] = teams
+    _teams_cache_ts[league] = now
+    return teams
+
+
+def fetch_all_teams():
+    """{league: [team, ...]} for every real LEAGUE_PATHS entry -- one call
+    per league, each independently cached/degraded via fetch_teams()
+    above, so one league's real fetch failure never blanks out the
+    others."""
+    return {league: fetch_teams(league) for league in LEAGUE_PATHS}
+
+
 def load_config():
     """Read sports_config.json, seeding sane defaults on first run -- same
     contract as market.load_config(). favorite is {league, team_abbr} or
