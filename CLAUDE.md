@@ -3836,6 +3836,54 @@ Discoverability is one affordance per axis: a **league rail** down the
 right edge (pip per league, current lit and widened) for vertical, and the
 header's **league-relative** N/M counter for horizontal.
 
+### Favorite-teams ticker filter (2026-08-08)
+
+A cross-sport watchlist for the universal ticker, deliberately SEPARATE
+from the existing `favorite` field. `favorite` is ONE team with its own
+full-screen PINNED view ("show me my team's game"); this is a list of
+teams (any mix of leagues) that filters the ROTATING ticker down to only
+games involving one of them ("is anything I actually care about on right
+now"). Stored under its own `favorite_teams`/`favorite_teams_filter`
+keys in `sports_config.json` — setting one was never supposed to require
+or imply the other, and folding this into `favorite` would have forced
+that coupling.
+
+- `sports.load_favorite_teams()`/`save_favorite_teams()` — same
+  preserve-other-keys write pattern every other `save_*` in this file
+  already learned (the recurring `location_config.json`/`golf_player`
+  lesson, one file deeper). `filter_enabled` is a separate bool from the
+  team list itself, so toggling the filter off and back on doesn't
+  require re-entering every team.
+- `sports.event_matches_favorite_teams(ev, teams)` — matches against the
+  SAME `abbr` field the ticker already displays (`_header_competitor`'s
+  output), not a second name representation that could quietly drift
+  from what's actually shown. Only checks `is_team` competitors — golf/
+  tennis are individual-athlete sports with no "team" here, and both
+  already have their own dedicated pinned-player mechanism, so both are
+  explicitly EXEMPT from this filter rather than silently dropped by it.
+- **Filtered once, at the source** — inside `SportsFeed.get_universal()`,
+  before any downstream consumer (league grouping, the ticker index,
+  `has_content()`) ever sees the event list. Same "filter at the source,
+  not at every call site" reasoning the window filter's `in_window` flag
+  already established for flights. This meant **zero changes to
+  `engines.py`** — `SportsEngine` already just reads `self.universal`
+  unchanged, so the filter is fully invisible to the render layer.
+- `POST /api/sports/favorite_teams` (`{"teams": [{"league","team_abbr"}],
+  "filter_enabled": bool}`), status folded into the existing
+  `/api/sports/config` GET response (`favorite_teams`/
+  `favorite_teams_filter` keys) rather than a new GET endpoint, same
+  shape golf/tennis pinned status already uses.
+- **Verified against real live data**: set a real favorite
+  (`MLB`/`LAD`), confirmed 613 of 648 real live universal events survived
+  the filter, every surviving non-golf/tennis event genuinely involved
+  LAD (checked programmatically, not spot-checked), and all 612 real
+  golf/tennis events stayed fully unfiltered as designed. Reverted the
+  test favorite afterward — `sports_config.json`'s real baseline now
+  carries the new keys at their honest empty/off defaults (`[]`/`false`),
+  the same "new key, safe default" pattern every prior config addition
+  this project has made. `render_audit.py`/`fold_audit.py` both clean;
+  real panel restarted and confirmed healthy.
+
 ### Panels replaced the contested view slot (2026-08-01)
 
 `view` used to be `0=PINNED / 1=TICKER` where **slot 0 was contested** —
