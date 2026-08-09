@@ -7412,13 +7412,20 @@ class FlightEngine(Browsable, BigMomentSource):
     _ICON_TAIL = 2.8                 # tailplane half-span, at fx=tail
 
     @classmethod
-    def _draw_plane_icon(cls, buf, cx, cy, heading_deg, color, kind=None):
+    def _draw_plane_icon(cls, buf, cx, cy, heading_deg, color, kind=None, scale=1.0):
         """Same top-down/side-view split as the scope's
         `draw_scope_aircraft`, logically consistent with it: a
         helicopter is a fixed 2D side-view sprite (mirrored, not
         rotated), everything else is a real top-down silhouette rotated
         to heading, now thickened (a second parallel fuselage line) to
-        read as a filled shape at this bigger DETAIL-card size."""
+        read as a filled shape at this bigger DETAIL-card size.
+
+        `scale` (added for the Hangar's first-sighting hierarchy cue,
+        2026-08-08) multiplies every geometry extent -- nose/wing/tail
+        offsets, the heli sprite's dot cluster, and the heading-unknown
+        ring's radius -- so "important = bigger" can reuse this one
+        primitive instead of a second bitmap, matching
+        `draw_hero_silhouette(..., scale=...)`'s own pattern."""
         theta = math.radians(heading_deg if heading_deg is not None else 0)
 
         if kind == SCOPE_ICON_HELI:
@@ -7426,7 +7433,8 @@ class FlightEngine(Browsable, BigMomentSource):
             xi, yi = int(round(cx)), int(round(cy))
             for dx, dy in [(0, 0), (0, 2), (-4, -4), (-2, -4), (0, -4), (2, -4), (4, -4),
                            (-4, 4), (-6, 6)]:
-                put_px(buf, xi + (dx if face_right else -dx), yi + dy, color)
+                dx, dy = dx * scale, dy * scale
+                put_px(buf, xi + int(round(dx if face_right else -dx)), yi + int(round(dy)), color)
             return
 
         # Forward unit vector (0 deg = up on screen); right unit vector is
@@ -7435,6 +7443,7 @@ class FlightEngine(Browsable, BigMomentSource):
         right = (math.cos(theta), math.sin(theta))
 
         def pt(fx, fy):
+            fx, fy = fx * scale, fy * scale
             return (cx + fx * fwd[0] + fy * right[0],
                     cy + fx * fwd[1] + fy * right[1])
 
@@ -7450,9 +7459,10 @@ class FlightEngine(Browsable, BigMomentSource):
         # Heading-unknown (no track data) gets a dim ring instead of a
         # confidently-pointed icon that would be showing a fake direction.
         if heading_deg is None:
+            r = 8 * scale
             for i in range(16):
                 a = i / 16 * 2 * math.pi
-                put_px(buf, int(round(cx + 8 * math.cos(a))), int(round(cy + 8 * math.sin(a))), rim(color, 0.4))
+                put_px(buf, int(round(cx + r * math.cos(a))), int(round(cy + r * math.sin(a))), rim(color, 0.4))
 
     AMBIENT_STYLE = "push_up"       # aircraft climb away
 
@@ -7551,6 +7561,22 @@ class FlightEngine(Browsable, BigMomentSource):
         e = self.hangar_entries[idx]
         draw_header(buf, e.get("reg") or "UNKNOWN", self.HANGAR, right_tag=f"{idx + 1}/{n}")
 
+        # HIERARCHY (2026-08-08): a first sighting had ZERO visual
+        # distinction before this beyond the "FIRST SIGHTING" text row --
+        # every other "this matters" signal in the project (the scope's
+        # NOTABLE_GLOW_FLOOR/WINDOW_GLOW_FLOOR, the hero silhouette's
+        # breathing glow) expresses importance as brightness+size, not
+        # text alone. Same ordered-floor language here, just with no
+        # sweep to float above: a REPEAT visitor (the routine case) is
+        # the one that dims, via rim(), so a genuine first sighting reads
+        # as brighter/bigger than the routine baseline rather than the
+        # reverse -- consistent with "important floats up", not "normal
+        # floats down and importance is merely undimmed".
+        times = e.get("times_seen") or 1
+        first_sighting = times <= 1
+        icon_col = self.HANGAR if first_sighting else rim(self.HANGAR, 0.55)
+        icon_scale = 1.2 if first_sighting else 1.0
+
         # Static, non-rotating sprite -- owner decision #3: the Hangar is
         # browsed one entry at a time (same interaction pattern as the
         # flight DETAIL card, never more than one sprite drawn per
@@ -7566,30 +7592,43 @@ class FlightEngine(Browsable, BigMomentSource):
         # (owner decision #2's real-seeded lookup table), falling back to
         # GA for anything unmatched (owner decision #1) rather than a
         # distinct "unknown" mark.
-        self._draw_plane_icon(buf, WIDTH // 2, 19, None, self.HANGAR,
-                              kind=self._hangar_kind(e.get("type")))
+        self._draw_plane_icon(buf, WIDTH // 2, 19, None, icon_col,
+                              kind=self._hangar_kind(e.get("type")), scale=icon_scale)
+
+        # SPACING (2026-08-08): a Y-CURSOR replaces the old fixed rows
+        # (19/31/38/45/52) -- when airline was absent, 31->45 was a real
+        # unexplained 14px dead zone doing nothing, the exact fixed-offset
+        # trap CLAUDE.md's own docstring on _frame_detail_ceremonial
+        # warns about. Each row now starts immediately after whatever
+        # actually drew before it, not a guessed advance amount. The
+        # bigger first-sighting icon (scale 1.2) reaches a little further
+        # than the old fixed budget assumed, so the cursor starts a touch
+        # lower to clear it rather than risking a collision.
+        y = 30 if not first_sighting else 32
 
         # Real, readable type name (flights.ICAO_TYPE_NAMES -- same
         # static reference table the DETAIL card already uses), falling
         # back honestly to "TYPE UNKNOWN" for the small real fraction of
         # aircraft that never broadcast a type code.
         typ = flights._type_name(e.get("type")) or "TYPE UNKNOWN"
-        draw_text_centered(buf, 31, fit_text(typ, WIDTH - 4), self.INK)
+        draw_text_centered(buf, y, fit_text(typ, WIDTH - 4), self.INK)
+        y += 7
 
         airline = e.get("airline")
         if airline:
-            draw_text_centered(buf, 38, fit_text(airline, WIDTH - 4), self.INK_DIM)
+            draw_text_centered(buf, y, fit_text(airline, WIDTH - 4), self.INK_DIM)
+            y += 7
 
         # Repeat visitors get the SAME green treatment as an ATC
         # confidence-match -- "this one's been here before" is the
         # collection's own version of a confirmed, notable fact.
-        times = e.get("times_seen") or 1
         seen_col = self.ATC_MATCH if times > 1 else self.INK_DIM
         seen_txt = f"SEEN {times}X" if times > 1 else "FIRST SIGHTING"
-        draw_text_centered(buf, 45, fit_text(seen_txt, WIDTH - 4), seen_col)
+        draw_text_centered(buf, y, fit_text(seen_txt, WIDTH - 4), seen_col)
+        y += 7
 
         age = max(0.0, time.time() - (e.get("first_seen") or 0))
-        draw_text_centered(buf, 52, fit_text(f"{self._fmt_age_long(age)} AGO", WIDTH - 4),
+        draw_text_centered(buf, min(y, HEIGHT - 5), fit_text(f"{self._fmt_age_long(age)} AGO", WIDTH - 4),
                            (86, 94, 116))
         return bytes(buf)
 
@@ -7776,7 +7815,25 @@ class FlightEngine(Browsable, BigMomentSource):
         # Heading-oriented icon, the visual centerpiece -- colour-coded by
         # altitude band (see ALT_BANDS) since that reads as "kind of
         # traffic" better than raw distance would at this size.
-        self._draw_plane_icon(buf, WIDTH // 2, 22, ac.get("track_deg"), col, kind=self._ac_kind(ac))
+        #
+        # HIERARCHY (2026-08-08): the scope already gives a notable
+        # aircraft a real brightness floor (NOTABLE_GLOW_FLOOR, via
+        # max(glow, floor) against the sweep's dim/bright cycle) and a
+        # bigger icon (big=True) -- this card, reached by ordinary
+        # select-to-expand browsing, had NO equivalent, so a MAYDAY
+        # squawk and a routine regional jet looked visually identical
+        # here even though the scope already treats them differently.
+        # There's no sweep to float above on a static card, so the same
+        # ordering is expressed the way the Hangar's first-sighting cue
+        # above does: full, undimmed colour + a touch more scale for
+        # notable, never a NEW constant (reuses NOTABLE_GLOW_FLOOR
+        # itself as the rim() floor for the routine case, so "notable"
+        # here means literally the same brightness value the scope
+        # would show this aircraft at if it were sitting off-beam).
+        icon_col = col if note else rim(col, NOTABLE_GLOW_FLOOR)
+        icon_scale = 1.1 if note else 1.0
+        self._draw_plane_icon(buf, WIDTH // 2, 22, ac.get("track_deg"), icon_col,
+                              kind=self._ac_kind(ac), scale=icon_scale)
 
         # Phase arrow: climbing/descending only, nothing drawn for cruise
         # or an undetermined phase -- same "no badge for the mundane
