@@ -2921,6 +2921,62 @@ real mode-switch to `events` via `/api/mode/events` and a real `/api/frame`
 pull showing the honest empty state (nothing has been logged on this
 device yet — the wiring only just shipped).
 
+## Follow-a-specific-flight mode (2026-08-09)
+
+Competitive-research ask: "track any specific flight by number, one of
+the most loved features on products like Mach 2." Confirmed live before
+committing to building it: `api.adsb.lol` has a global
+`/v2/callsign/{callsign}` lookup, genuinely separate from the local-
+radius `POSITION_URL` this project's radar scope already uses -- same
+`{"ac": [...]}` payload envelope and per-aircraft field names, just not
+bounded to `RADIUS_NM` of home. A callsign that isn't currently airborne
+returns a real, honest `"ac": []` (confirmed: `curl .../callsign/UAL123`
+-> `{"ac": [], "total": 0}`), not an error.
+
+- **`flights.FollowFlightFeed`** (new) -- its own feed class, not a
+  second mode bolted onto `FlightFeed`: that class's identity is "every-
+  thing within `RADIUS_NM`, a list re-sorted by notability"; this is
+  "one specific real flight, wherever it is," a single optional value
+  with a genuinely different honest-empty state. `get()` returns a real
+  tri-state `airborne`: `None` (not configured), `False` (real lookup
+  ran, genuinely not airborne right now), `True` (a real cached
+  position). Own config file (`follow_flight_config.json`), read-modify-
+  write from the start per the 2026-08-09 destructive-overwrite lesson.
+  Reuses the existing adsbdb route-enrichment cache verbatim -- zero new
+  I/O beyond the one 15s-interval callsign poll itself.
+- **`FollowFlightEngine`** (new, `ENGINES["followflight"]`) -- a
+  standalone engine, not a fifth `FlightEngine` view: `FlightEngine`'s
+  DETAIL/ceremonial views are built entirely around home-relative
+  framing (bearing, DEPARTING/ARRIVING vs. the configured home airport,
+  local-plane trail math in x_nm/y_nm), none of which applies to a
+  flight that could be anywhere on Earth. Reuses what generalizes
+  cleanly (`draw_hero_silhouette`, `FlightEngine._ac_kind`/`_alt_color`/
+  `_compass`, `flights.ICAO_TYPE_NAMES`) rather than threading a "no
+  home concept" branch through the existing local scope/window/Hangar
+  code -- matches this project's own standing rule not to touch that
+  code for a genuinely separate feature.
+- **`GET`/`POST /api/flights/follow`** (`{"callsign": "UAL123"}`), same
+  JSON-body shape as every other config POST endpoint here.
+- Accepts callsigns as typed (ICAO flight-number format --
+  airline-ICAO + number, e.g. "UAL123", not the IATA "UA123" a traveler
+  would recognize) -- no IATA<->ICAO translation table was built
+  (real, deliberate scope limit, stated in `FollowFlightFeed`'s own
+  docstring); a callsign that doesn't resolve just honestly shows NOT
+  CURRENTLY AIRBORNE rather than being rejected or guessed at.
+
+**Merge note**: this and the recent-events log agent both independently
+added a `drive_*`/`CUSTOM_DRIVERS` entry to `render_audit.py` -- a real
+merge conflict, resolved by keeping both (`drive_events` and
+`drive_followflight` are fully independent, no logic changed from
+either).
+
+Verified: both audits clean (including the merged `render_audit.py`'s
+combined driver set), real service restart, real endpoint round-trip
+live (`POST /api/flights/follow` with a real callsign, confirmed via
+GET, cleared afterward), real mode-switch to `followflight` and a real
+`/api/frame` pull showing the honest NOT CURRENTLY AIRBORNE state for a
+real (currently non-airborne) callsign.
+
 ## Storm-tracking mini-scope + favorite aircraft (2026-08-09)
 
 **Storm mini-scope**: weather.py's `_fetch_alerts()` now parses NWS's real
