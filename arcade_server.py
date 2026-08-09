@@ -51,6 +51,7 @@ import news
 import weather
 import blog
 import brightness
+import dnd
 import notify
 import paneltext
 import transitions
@@ -333,13 +334,27 @@ class Arcade:
             color = engines.NOTIFY_URGENT_COLOR if priority == "urgent" \
                 else engines.NOTIFY_NORMAL_COLOR
             if priority != "urgent":
-                # Lightweight composite overlay -- see _notify_banner_frame().
-                # No mode swap, no input capture; whatever's running keeps
-                # running untouched underneath it.
-                self._notify_banner = {
-                    "title": title, "message": message, "color": color,
-                    "expires": time.time() + NOTIFY_BANNER_SECONDS,
-                }
+                # DO NOT DISTURB (2026-08-09) -- a normal-priority banner
+                # is exactly the "ambient noise" DND exists to suppress
+                # (a garage-door FYI, not something that needs seeing
+                # right now). Reports success back to the real caller
+                # (Home Assistant) rather than a fake failure -- the
+                # notification was genuinely received and processed, DND
+                # is a display-side choice, not a delivery failure; the
+                # events log (events_log.py) already records the real
+                # receipt regardless of whether the panel showed it, same
+                # "a real event happened, whether or not the panel was
+                # awake to show it" reasoning that module's own docstring
+                # states.
+                if not dnd.is_enabled():
+                    # Lightweight composite overlay -- see
+                    # _notify_banner_frame(). No mode swap, no input
+                    # capture; whatever's running keeps running untouched
+                    # underneath it.
+                    self._notify_banner = {
+                        "title": title, "message": message, "color": color,
+                        "expires": time.time() + NOTIFY_BANNER_SECONDS,
+                    }
                 return True
             # Urgent: real mode swap. Capture "what was running right
             # before this interrupted it" -- the same `prev = self.mode`
@@ -821,9 +836,24 @@ class Arcade:
                 if mode != "planewatch":
                     batch = flights.FEED.pop_window_takeover_batch()
                     if batch:
-                        self.set_mode("planewatch")
-                        with self.lock:
-                            mode, eng = self.mode, self.engine
+                        # DO NOT DISTURB (2026-08-09) -- a discretionary
+                        # interrupt (a plane is nice to see, not urgent),
+                        # so it is suppressed while DND is on, same as
+                        # every other discretionary interrupt (sports
+                        # celebrations, normal-priority HA banners). The
+                        # batch is still POPPED (consumed), not left
+                        # queued -- a plane that already left the window
+                        # by the time DND turns back off should not
+                        # trigger a takeover for traffic no longer there;
+                        # "suppressed" is the honest DND semantic, not
+                        # "deferred". Severe weather is a completely
+                        # separate code path (_severe_alert_frame(),
+                        # below) and is NEVER gated by DND -- life-safety
+                        # stays life-safety regardless of this toggle.
+                        if not dnd.is_enabled():
+                            self.set_mode("planewatch")
+                            with self.lock:
+                                mode, eng = self.mode, self.engine
 
                 # Pause DDP and sample the real Apollo effect into a loop cache
                 # so game underlays are exact (Polar_Waves ≠ Fire, Yves exact, …).
@@ -1183,6 +1213,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(cfg)
         elif path == "/api/flights/favorites":
             self._json({"favorite_aircraft": flights.load_favorite_aircraft()})
+        elif path == "/api/dnd":
+            self._json(dnd.load_config())
         elif path == "/api/blog/config":
             self._json({"api_url": blog.FEED.get_config(),
                         "default_api_url": blog.DEFAULT_API_URL})
@@ -1502,6 +1534,17 @@ class Handler(BaseHTTPRequestHandler):
                 cleaned = flights.save_favorite_aircraft(regs)
                 self._json({"ok": True, "favorite_aircraft": cleaned})
             except (ValueError, KeyError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/dnd":
+            # DO NOT DISTURB (2026-08-09) -- {"enabled": bool}. Suppresses
+            # discretionary interrupts (plane-in-window takeover, sports
+            # TIER_INTERRUPT celebrations, normal-priority HA banners);
+            # severe weather and urgent HA notifications are never gated
+            # by this, see dnd.py's own module docstring.
+            try:
+                j = json.loads(body or b"{}")
+                self._json({"ok": True, **dnd.save_config(bool(j.get("enabled")))})
+            except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/gameday/config":
             try:

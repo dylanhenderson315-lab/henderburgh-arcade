@@ -21,6 +21,7 @@ import time
 from collections import deque
 from pathlib import Path
 
+import dnd
 import events_log
 import market
 import satellite
@@ -12230,16 +12231,32 @@ class AmbientEngine(Browsable):
         started_or_preempted = False
         if best_moment is not None:
             tier = best_moment.get("tier", TIER_INTERRUPT)
-            playing = self._celebration_t > 0 and self._celebration
-            cur_tier = playing.get("tier", TIER_INTERRUPT) if playing else None
-            may_start = not playing
-            may_preempt = (cur_tier is not None and tier == TIER_TAKEOVER
-                          and cur_tier < TIER_TAKEOVER)
-            if may_start or may_preempt:
+            # DO NOT DISTURB (2026-08-09) -- TIER_INTERRUPT is a
+            # discretionary full-panel celebration (a home run, a goal),
+            # exactly the "nice to see, not urgent" class DND exists to
+            # suppress -- gated here. TIER_TAKEOVER is deliberately
+            # EXEMPT: it's reserved (per its own tier definition above)
+            # for the rarest, most genuinely "go look now" events, the
+            # same "explicitly escalated, still gets through" exception
+            # trigger_notify()'s own urgent tier uses. Popped (consumed),
+            # not left queued -- a stale home run from 20 minutes ago
+            # showing the moment DND turns off would be real data shown
+            # at the wrong time, which is its own kind of dishonest;
+            # "suppressed", not "deferred", matches the plane-in-window
+            # takeover's own DND handling in arcade_server.py.
+            if dnd.is_enabled() and tier < TIER_TAKEOVER:
                 best_engine.pop_big_moment()
-                self._celebration = best_moment
-                self._celebration_t = TIER_TICKS.get(tier, CELEBRATION_TICKS)
-                started_or_preempted = True
+            else:
+                playing = self._celebration_t > 0 and self._celebration
+                cur_tier = playing.get("tier", TIER_INTERRUPT) if playing else None
+                may_start = not playing
+                may_preempt = (cur_tier is not None and tier == TIER_TAKEOVER
+                              and cur_tier < TIER_TAKEOVER)
+                if may_start or may_preempt:
+                    best_engine.pop_big_moment()
+                    self._celebration = best_moment
+                    self._celebration_t = TIER_TICKS.get(tier, CELEBRATION_TICKS)
+                    started_or_preempted = True
 
         if not started_or_preempted and self._celebration_t > 0:
             self._celebration_t -= 1

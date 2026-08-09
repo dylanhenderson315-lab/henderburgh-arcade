@@ -29,4 +29,10 @@ atc_log.jsonl
 # THE HANGAR -- persistent aircraft collection, real runtime state (real
 # tail numbers with real timestamps), not source (see hangar.py).
 hangar_log.jsonl
+
+# Recent-events log -- same category as hangar_log.jsonl/atc_log.jsonl,
+# real runtime state (real event summaries with real timestamps), not
+# source (see events_log.py).
+events_log.jsonl
+
 .claude/worktrees/
