@@ -3025,6 +3025,61 @@ Also added `events_log.jsonl` to `.gitignore` in this pass -- same "real
 runtime state, not source" category as `hangar_log.jsonl`/`atc_log.jsonl`,
 missed when `events_log.py` shipped earlier this session.
 
+## Control panel companion dashboard (2026-08-09)
+
+Owner ask: `arcade.html` should be "the perfect companion page for this
+device" -- the real, primary way to see and control everything the
+panel can do, now that henderburgh.com/arcade is explicitly out of
+scope (no local access to that site's source, and its own "Control
+Panel" link points at a LAN-only IP anyway -- confirmed live via
+WebFetch before deciding to skip it, not assumed).
+
+**Real audit before building**: cross-checked `engines.ENGINES` against
+`arcade.html`'s own `data-mode="..."` buttons. Result: every real
+selectable mode already had a button except `boot`/`menu`/`notify`/
+`planewatch`, correctly excluded (force-triggered/internal). The one
+real, confirmed gap: `favorite_aircraft` had a real, working, live-
+tested API (`GET`/`POST /api/flights/favorites`) and ZERO control-panel
+UI.
+
+- **Favorite-aircraft card** -- add/remove real registrations, same
+  growable-list interaction `favorite_teams`'s own card already
+  established (add input, real list with per-item remove, calling the
+  real endpoint). Shown only under `flights` (not `followflight`, which
+  has no home-relative concept at all per its own docstring).
+- **`GET /api/events`** (new) -- `events_log.py`'s log had genuinely
+  zero HTTP surface before this (only ever read from inside
+  `EventsLogEngine`). Small, read-only, `limit` query param.
+- **Status overview card** (right rail) -- current mode (with
+  `planewatch`/`notify` labeled plainly as takeovers, off `/api/state`,
+  already polled every render tick, no new request), real severe-weather
+  alert state (from weather's own real `alerts` list), and a real
+  recent-events feed (`/api/events`). Confirmed working end-to-end live,
+  not just built: after DND testing (see above), this card correctly
+  showed the real HA notification events that testing actually
+  generated.
+- **Do Not Disturb toggle** -- added into this same status card
+  (`dnd.py` was built in the same session pass but after this dashboard
+  work started, so the agent's version had no DND UI yet; added
+  directly afterward). Verified live in a real browser: clicked the
+  real toggle, confirmed via a direct `curl /api/dnd` that the backend
+  state actually flipped both directions, confirmed zero console
+  errors, reset to the default OFF state afterward.
+
+**Final cross-check** (per the agent's own task instructions): every
+real `data-mode` button maps to a real `engines.ENGINES` key (or the
+special-cased `mirror`/`video`/`cast`), and every real config endpoint
+now has a UI card. Nothing removed or hidden.
+
+**Merge note**: a real merge conflict in `arcade_server.py` -- this and
+the DND work both independently added a new GET endpoint
+(`/api/dnd`, `/api/events`) at the same insertion point. Resolved by
+keeping both, no logic changed from either.
+
+Verified: `ast.parse()` clean, real service restart, page loaded in a
+real browser with zero console errors, the DND toggle exercised live
+end-to-end as described above.
+
 ## Storm-tracking mini-scope + favorite aircraft (2026-08-09)
 
 **Storm mini-scope**: weather.py's `_fetch_alerts()` now parses NWS's real
