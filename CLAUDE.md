@@ -3132,6 +3132,44 @@ Verified: both audits clean, real service restart, real mode-switch to
 right now -- no real MYR-bound traffic at check time, the correct empty
 state, not a bug).
 
+## Real dropdowns + favorite-teams UI + city bulk-add (2026-08-09)
+
+Two real gaps in `arcade.html`'s sports card, closed together: leagues/
+pin-team were free-text (a raw comma string, a raw team-abbreviation
+input -- typo-prone, no discoverability), and `favorite_teams` (the
+cross-sport ticker watchlist -- backend + `/api/sports/favorite_teams`
+already built and documented earlier this session) had genuinely NO
+control-panel UI at all, missed by the earlier dashboard cross-check
+(that pass only checked "does a config endpoint have SOME card", not
+"is every field on that card actually usable").
+
+- **`sports.fetch_teams()`/`fetch_all_teams()`** (new) -- real ESPN team
+  lists (`location`/`abbreviation`/`name`) via `site.web.api.espn.com`,
+  the same host every other endpoint here already switched to
+  (`site.api.espn.com` blanket-403s from this network -- re-confirmed
+  live before adding a new endpoint against it, not assumed still true).
+  Cached 24h per league in-process -- real rosters/abbreviations don't
+  change faster than that. New `GET /api/sports/teams`.
+- **Leagues** is now a real multi-select; **pin team** is two real
+  dropdowns (team list populated from whichever league is selected).
+- **New favorite-teams section**: real add/remove list (same growable-
+  list pattern `favorite_aircraft`'s card already established) plus a
+  **city bulk-add** -- type "Pittsburgh", click Add all, and every real
+  team (any configured or unconfigured league) whose real ESPN
+  `location` contains that text gets added in one click. Pure client-
+  side match against the already-fetched real team data, no new
+  endpoint needed for the matching itself.
+
+Verified end-to-end live, not just built: real `/api/sports/teams` pull,
+the real city-match logic run against it (found exactly the 3 real
+Pittsburgh teams -- Steelers/NFL, Pirates/MLB, Penguins/NHL, no NBA/EPL/
+NCAA false positive), a real `/api/sports/favorite_teams` round-trip
+(set all three, confirmed via a real browser DOM check showing the
+correct real team names rendered, removed one via a real button click
+confirmed by a second GET, cleared back to empty afterward -- no test
+data left behind). Both standing audits re-run clean (unaffected --
+control-panel UI only, no render-path changes).
+
 ## Storm-tracking mini-scope + favorite aircraft (2026-08-09)
 
 **Storm mini-scope**: weather.py's `_fetch_alerts()` now parses NWS's real
