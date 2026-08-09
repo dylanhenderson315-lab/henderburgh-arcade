@@ -1407,6 +1407,16 @@ SCOPE_TARGET_FLOOR = 0.38
 # correctly shows both at once rather than either overriding the other.
 NOTABLE_GLOW_FLOOR = 0.75
 
+# WINDOW_GLOW_FLOOR (2026-08-08, hierarchy round 2) -- strictly above
+# NOTABLE_GLOW_FLOOR, expressing "window beats notable" as an ORDERING of
+# floors (max() picks the higher one when an aircraft is both) rather than
+# stacking two boosts into a value that could exceed 1.0 and clip. 0.92,
+# not 1.0 flat: leaving a hair of headroom means the sweep passing an
+# in-window aircraft is still a visible (if small) brightening, so the
+# sweep's own heartbeat motion never goes fully invisible on the single
+# most important class of target this scope can show.
+WINDOW_GLOW_FLOOR = 0.92
+
 
 def scope_xy(bearing_deg, r_frac, cx=SCOPE_CX, cy=SCOPE_CY, radius=SCOPE_R):
     """(bearing, normalised radius) -> pixel. The ONE place the polar->screen
@@ -1527,6 +1537,25 @@ SCOPE_ICON_BIZJET = "BIZJET"
 SCOPE_ICON_GA = "GA"
 
 
+# SCOPE_CATEGORY_COLOR (2026-08-08, radar-icon redesign round 2) -- real
+# feedback: the previous pass fixed SHAPE (dash/aft-wing/centred-cross/T)
+# but kept altitude-band COLOR, which meant two aircraft of different
+# kinds at the same altitude were the same color, undercutting the very
+# shape distinction just built. Category now owns color; altitude is not
+# lost, it was always redundant with the DETAIL card's own text readout
+# (the original reason altitude got a text field instead of relying on
+# color alone) -- this just stops asking one visual channel to carry two
+# different facts. Colors chosen to be maximally distinct from each
+# other AND from every other scope color already in use (WINDOW_RING
+# violet-pink, ATC_MATCH green, the white "selected" mark).
+SCOPE_CATEGORY_COLOR = {
+    "AIRLINER": (150, 225, 255),   # cool cyan-white -- reads as "airplane" first
+    "BIZJET":   (255, 175, 60),    # warm gold/orange -- same dart family, visibly different
+    "GA":       (110, 220, 120),   # green -- a completely different visual language
+    "HELI":     (230, 90, 230),    # magenta -- the one kind that must never look like a plane
+}
+
+
 def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, big=False):
     """One aircraft blip, shaped by `kind` (one of the SCOPE_ICON_*
     constants) and rotated to `heading_deg` (real ADS-B track, not
@@ -1540,34 +1569,33 @@ def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, big=False
     heading-unknown treatment for whichever aircraft is actually
     selected.
 
-    REDESIGNED 2026-08-08 after real feedback: the four kinds only
-    differed by SIZE before this (same cross, scaled), which is why they
-    didn't read as different categories at 3-5px -- and the helicopter
-    was 9 disconnected `put_px` dots with no connecting stroke, which is
-    why it read as a violet blob rather than a shape (confirmed against
-    a real rendered screenshot, not just described). Every kind below is
-    now a genuinely different SILHOUETTE FAMILY, not a scaled copy of
-    one shape, and every stroke is connected -- no shape here is drawn as
-    loose unconnected points:
-      - GA:       a single stroke -- a lone dash, no wings at all.
-      - BIZJET:   a small cross with the wing set AFT of centre (closer
-                  to the tail than the nose), a real structural cue most
-                  business jets share (low, rear-mounted wing).
-      - AIRLINER: a wide cross, wing centred on the fuselage -- the
-                  "biggest, most symmetric" silhouette, matching a
-                  widebody/narrowbody's actual proportions best.
-      - HELI:     a connected T -- a horizontal rotor bar that stays
-                  screen-level (drawn fixed, only mirrored left/right by
-                  which way the aircraft is facing, never rotated to
-                  heading -- a helicopter's rotor disk doesn't visually
-                  "point" anywhere) sitting over a short vertical mast
-                  with one tail-boom pixel kicked out behind it. The
-                  rotor bar staying perfectly horizontal while every
-                  fixed-wing icon rotates with real heading is itself a
-                  recognition cue over time, not just the shape alone.
-    Still 2 strokes (or fewer) per icon, same budget this project
-    already proved safe against a real lag complaint earlier this
-    session -- this redesign changes SHAPE, not stroke COUNT.
+    REDESIGNED AGAIN 2026-08-08 (round 2), on top of round 1's shape fix
+    (dash/aft-wing/centred-cross/T replacing a shared scaled cross and a
+    disconnected-dot helicopter). Round 1 fixed shape; this round fixes
+    the two things that survived it:
+      - GA:       unchanged -- a single stroke, a lone dash, no wings.
+                  Already "a completely different language" from the
+                  dart family; round 2 only recolors it (green).
+      - BIZJET:   now a true swept DART -- nose point + two strokes
+                  sweeping back to tight wingtips (a chevron/arrowhead),
+                  not a perpendicular cross. Tighter sweep angle and
+                  shorter reach than AIRLINER -- "same family, visibly
+                  tighter", not a different family.
+      - AIRLINER: the long, clean, wide dart -- same chevron construction
+                  as BIZJET, longer nose and wider wingtip spread. This
+                  is the shape family's biggest, most symmetric member.
+      - HELI:     now a small FILLED DISC (a real rotor silhouette, not
+                  a bar) plus one body-stub pixel -- the shape round 1's
+                  own docstring said was needed ("the one shape that
+                  stays clear at 3px") but didn't yet build. A filled
+                  disc reads as "rotor from above" unambiguously and
+                  cannot be mistaken for a dart at any heading, which a
+                  thin bar-and-mast silhouette still risked. Deliberately
+                  still NOT heading-rotated (a rotor disk doesn't point
+                  anywhere) -- only the stub mirrors L/R by facing.
+    Stroke/pixel budget stays in the same class round 1 already proved
+    safe (2 lines, or a small fixed put_px cluster) -- this round changes
+    SHAPE PRECISION and COLOR, not the cost profile.
     """
     col = (int(color[0] * glow), int(color[1] * glow), int(color[2] * glow))
     theta = math.radians(heading_deg if heading_deg is not None else 0.0)
@@ -1575,20 +1603,27 @@ def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, big=False
     scale = 1.25 if big else 1.0
 
     if kind == SCOPE_ICON_HELI:
-        # Fixed screen-space T, mirrored only -- see the docstring above
-        # for why this deliberately does NOT rotate with heading.
+        # Filled disc, screen-space, mirrored only -- see the docstring
+        # above for why this deliberately does NOT rotate with heading.
         face_right = math.sin(theta) >= 0
         fx = 1 if face_right else -1
-        span = int(round(3 * scale))
-        mast_top = -2
-        mast_bot = int(round(2 * scale))
-        draw_line(buf, xi - span, yi + mast_top, xi + span, yi + mast_top, col)
-        draw_line(buf, xi, yi + mast_top, xi, yi + mast_bot, col)
-        # Tail boom kicks out BEHIND the facing direction -- a real
+        r = 2 if big else 1
+        # A small filled circle via a fixed offset cluster -- cheaper and
+        # more predictable at this pixel density than a general circle
+        # algorithm, same reasoning draw_window_ring()'s fixed-diamond
+        # already uses. r=1 is a plus-shaped 5px disc; r=2 (big/selected)
+        # adds the diagonal corners for a rounder, larger disc.
+        put_px(buf, xi, yi, col)
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            put_px(buf, xi + dx, yi + dy, col)
+        if r >= 2:
+            for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+                put_px(buf, xi + dx, yi + dy, col)
+        # Body stub kicks out BEHIND the facing direction -- a real
         # helicopter's tail trails away from its nose, so this one pixel
         # is what actually tells left-facing from right-facing at a
-        # glance, not just the mirrored rotor bar (which is symmetric).
-        put_px(buf, xi - fx * (span - 1), yi + mast_bot, col)
+        # glance, not just the disc itself (which is symmetric).
+        put_px(buf, xi - fx * (r + 1), yi, col)
         return
 
     # Every fixed-wing kind still shares ONE rotation convention (the
@@ -1604,24 +1639,30 @@ def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, big=False
     if kind == SCOPE_ICON_GA:
         # A lone dash -- no wing stroke at all. "Less drawn" is the
         # point: the smallest, simplest real silhouette on this scope,
-        # deliberately not a shrunk copy of the cross family below.
+        # deliberately not a shrunk copy of the dart family below.
         nose_fx = 2.2 * scale
         a, b = pt(nose_fx, 0), pt(-nose_fx, 0)
         draw_line(buf, a[0], a[1], b[0], b[1], col)
         return
 
-    nose_fx, wing_fy, wing_fx = {
-        # wing_fx is where the wing stroke sits along the fuselage axis,
-        # relative to the fuselage's own centre (0 = centred on the
-        # aircraft, negative = set back toward the tail).
-        SCOPE_ICON_AIRLINER: (3.2, 2.6, 0.0),
-        SCOPE_ICON_BIZJET:   (2.6, 1.5, -0.9),
+    # AIRLINER/BIZJET: a real swept DART -- nose point, two strokes back
+    # to the wingtips (a chevron), not a perpendicular cross. This is
+    # what actually makes it read as "pointed at something" (heading)
+    # rather than "a plus sign that happens to rotate".
+    nose_fx, wing_fx, wing_fy = {
+        # wing_fx: how far BACK from the nose the wingtips sit (fraction
+        # of nose_fx, not an absolute -- keeps the sweep proportional at
+        # both the small scope scale and the `big` selected/matched
+        # scale). wing_fy: half-span of the wingtips.
+        SCOPE_ICON_AIRLINER: (3.4, 0.85, 2.4),   # long nose, wide, shallow sweep
+        SCOPE_ICON_BIZJET:   (2.5, 0.75, 1.3),   # shorter nose, tighter sweep, narrower span
     }[kind]
-    nose_fx, wing_fy, wing_fx = nose_fx * scale, wing_fy * scale, wing_fx * scale
-    a, b = pt(nose_fx, 0), pt(-nose_fx, 0)
-    draw_line(buf, a[0], a[1], b[0], b[1], col)
-    a, b = pt(wing_fx, -wing_fy), pt(wing_fx, wing_fy)
-    draw_line(buf, a[0], a[1], b[0], b[1], col)
+    nose_fx, wing_fy = nose_fx * scale, wing_fy * scale
+    tail_fx = -nose_fx * wing_fx
+    nose = pt(nose_fx, 0)
+    wl, wr = pt(tail_fx, -wing_fy), pt(tail_fx, wing_fy)
+    draw_line(buf, nose[0], nose[1], wl[0], wl[1], col)
+    draw_line(buf, nose[0], nose[1], wr[0], wr[1], col)
 
 
 def draw_window_ring(buf, x, y, color):
@@ -7277,7 +7318,13 @@ class FlightEngine(Browsable, BigMomentSource):
             if frac is None or brg is None:
                 continue          # no position fix -- plot nothing, guess nothing
             x, y = scope_xy(brg, frac, cx=cx, cy=cy, radius=r)
-            col = self._alt_color(ac.get("alt_ft"))
+            # CATEGORY COLOR (2026-08-08, radar-icon redesign round 2):
+            # color now identifies KIND, not altitude -- see
+            # SCOPE_CATEGORY_COLOR's own module-level note on why that
+            # tradeoff is fine (altitude is still real, on the DETAIL
+            # card's text, which is where it lived even before this).
+            kind = self._ac_kind(ac)
+            col = SCOPE_CATEGORY_COLOR[kind]
             # IDENTITY-keyed, not positional -- see reset()'s note on
             # self.sel_key. A reordering list can no longer silently move
             # the highlight to a different real aircraft.
@@ -7291,26 +7338,34 @@ class FlightEngine(Browsable, BigMomentSource):
             # keeps drawing regardless of match status.
             matched = ac.get("ident") and ac["ident"] == self.atc_match_ident
             mark_col = self.ATC_MATCH if matched else ((255, 255, 255) if sel else col)
+            in_window = bool(ac.get("in_window"))
             # WINDOW FILTER (2026-08-07): a small ring under the icon for
             # any aircraft currently visible out the configured window --
             # see satellite.in_window()/draw_window_ring()'s own notes.
             # Drawn BEFORE the aircraft icon so the ring never covers it.
-            if ac.get("in_window"):
+            # ROUND 2 (2026-08-08): the ring is now the SECONDARY window
+            # signal, not the primary one -- brightness+size (below) leads,
+            # the ring just confirms it for anyone who's learned what it
+            # means, same "categorical marker stacks with, never replaces,
+            # a brightness marker" reasoning NOTABLE_GLOW_FLOOR's own note
+            # already established for notable aircraft.
+            if in_window:
                 draw_window_ring(buf, x, y, self.WINDOW_RING)
-            # PART 3: a real, heading-oriented icon instead of a plain
-            # dot -- see draw_scope_aircraft()'s own honesty note on how
-            # distinctly each kind actually reads at this pixel density.
-            kind = self._ac_kind(ac)
-            # NOTABLE_GLOW_FLOOR: see its own module-level docstring for
-            # why this is a SEPARATE signal from the window ring above,
-            # not a merged one. max(), not replace -- the sweep can still
-            # push a notable aircraft brighter than the floor as it
-            # passes, this only raises the OFF-beam baseline.
+            # HIERARCHY (2026-08-08): brightness+size now encodes real
+            # importance, one consistent rule across every aircraft here
+            # -- window beats notable beats routine, matching the same
+            # ordering the owner asked for explicitly. Never additive
+            # (two max()es, not a sum) so a window+notable aircraft caps
+            # at the window floor rather than blowing past 1.0 and
+            # clipping -- the ordering is expressed by which floor is
+            # highest, not by stacking them.
             glow = scope_glow(brg, self.sweep)
             if ac.get("notable"):
                 glow = max(glow, NOTABLE_GLOW_FLOOR)
+            if in_window:
+                glow = max(glow, WINDOW_GLOW_FLOOR)
             draw_scope_aircraft(buf, x, y, ac.get("track_deg"), kind, mark_col,
-                                glow=glow, big=(sel or matched))
+                                glow=glow, big=(sel or matched or in_window))
 
         draw_scope_home(buf, cx=cx, cy=cy)
         # Tried an alternating text legend ("<>=HOME +=MYR") same session,

@@ -2489,6 +2489,48 @@ one, because the whole point of the notable tag is that it is trustworthy.
 **Revisit only alongside an airport dataset**, not by inference. Until
 then this is a deferred enhancement, not a gap in the notable criteria.
 
+## Radar-scope icon redesign round 2 (2026-08-08)
+
+Owner-driven spec, aimed at making the aircraft kind readable at a glance
+and giving the helicopter icon a shape that can never be mistaken for a
+fixed-wing dash/cross.
+
+- **Category color replaces altitude color** on the scope icon itself:
+  `SCOPE_CATEGORY_COLOR` = airliner cool cyan-white, bizjet warm
+  gold/orange, GA green, heli magenta. This is a real trade-off, not a
+  free upgrade — altitude color is gone from the icon. Resolved
+  deliberately: altitude is still shown as text on the DETAIL card (that
+  was already the primary place altitude is read), so nothing is lost,
+  only de-duplicated, and category at a glance is worth more on a 64x64
+  scope than a second color channel for altitude.
+- **Airliner/bizjet are now true swept darts**, not a nose+wing cross:
+  one line from nose to each wingtip, computed from
+  `SCOPE_ICON_AIRLINER = (3.4, 0.85, 2.4)` / `SCOPE_ICON_BIZJET = (2.5,
+  0.75, 1.3)` (nose length, wingtip-fraction, wing spread) — bizjet
+  reads shorter-nosed and narrower-swept than airliner at the same
+  pixel budget.
+- **Helicopter is now a filled disc + one body-stub pixel** pointing
+  opposite the facing direction, replacing the old connected-T (rotor
+  bar + mast + tail nub). Still mirrored by facing, not rotated by
+  heading — a helicopter's nose direction isn't a reliable "forward"
+  signal the way a fixed-wing heading is, so we don't fake one.
+- **Window/notable brightness+size hierarchy, now combined correctly**:
+  `WINDOW_GLOW_FLOOR = 0.92` (new, sits above the existing
+  `NOTABLE_GLOW_FLOOR = 0.75`) is applied via `max(glow, floor)`, never
+  additive — additive would risk exceeding 1.0 and clipping on an
+  aircraft that's both notable and in-window. `big` is now true for
+  `sel or matched or in_window`, so a plane inside the window physically
+  draws larger, not just brighter. The violet diamond ring
+  (`draw_window_ring()`) still marks window membership, but it's now
+  explicitly the secondary signal — brightness/size carries the primary
+  "this matters most" read, matching the same hierarchy language used
+  for notable aircraft elsewhere.
+
+Verified: `render_audit.py` 0 modes failed (pre-existing unrelated
+MMA-name truncation warnings only), `fold_audit.py` 0 feeds not folding,
+real service restart + `/api/frame` pulled clean post-restart. Reviewed
+via synthetic 8x-zoom PNG sent for visual confirmation before commit.
+
 ## Known issues / in-progress work
 
 ### Panel lockup hazard — RESOLVED 2026-07-30, but the rule stands
