@@ -8182,6 +8182,22 @@ class PlaneWatchEngine:
         if ac is None:
             return bytes(buf)
 
+        # BACKDROP (2026-08-08 refresh): this takeover shipped with a flat
+        # black background, the one thing every genuine TIER_TAKEOVER-class
+        # event elsewhere in this project already has (see
+        # CELEBRATION_BACKDROPS / _backdrop_flights). Reused here rather
+        # than invented -- same radar-sweep wedge the flights celebration
+        # already uses, tinted RING (violet) instead of an altitude color:
+        # this event fired BECAUSE of the window, so the backdrop itself
+        # is the piece that visually says "window", freeing the
+        # silhouette's own color to keep meaning "kind of traffic" (see
+        # ALT_BANDS below) instead of overloading one color with two
+        # meanings. Only one aircraft draws per frame here (same
+        # reasoning the sports celebration's own cost note already
+        # makes), so the backdrop's ~500 put_px cost is the same
+        # already-proven-safe budget, not a new one.
+        _backdrop_flights(buf, self.ticks, self.RING)
+
         kind = FlightEngine._ac_kind(ac)
         col = FlightEngine._alt_color(ac.get("alt_ft"))
 
@@ -8196,7 +8212,19 @@ class PlaneWatchEngine:
             draw_first_sighting_ring(buf, WIDTH // 2, cy, self.RING, phase=self.ticks * 0.08)
         draw_hero_silhouette(buf, WIDTH // 2, cy, kind, col, scale=1.1)
 
-        draw_text_centered(buf, 3, "IN VIEW", self.ACCENT)
+        # NOTABLE STACKING (2026-08-08 refresh): a window aircraft that is
+        # ALSO notable (heavy/helicopter/MAYDAY/etc, see
+        # flights._notable()) got no acknowledgment of that before --
+        # every window aircraft looked the same regardless of what kind
+        # of "interesting" it also was, even though the small scope's own
+        # NOTABLE_GLOW_FLOOR now treats that as a real, separate signal.
+        # Folded into the SAME header row rather than a new one -- this
+        # card's vertical budget is already fully accounted for (see the
+        # dist/alt row below), and a plain text suffix costs nothing a
+        # new row would risk (collision/overflow).
+        note = ac.get("notable")
+        header = f"IN VIEW: {note[0]}" if note else "IN VIEW"
+        draw_text_centered(buf, 3, fit_text(header, WIDTH - 4), self.ACCENT)
         ident = reg or (ac.get("ident") or "UNKNOWN")
         draw_text_centered(buf, 11, fit_text(ident, WIDTH - 4), (255, 255, 255))
 
