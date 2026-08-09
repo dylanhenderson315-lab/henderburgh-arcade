@@ -3080,6 +3080,58 @@ Verified: `ast.parse()` clean, real service restart, page loaded in a
 real browser with zero console errors, the DND toggle exercised live
 end-to-end as described above.
 
+## Departure board -- built from data already fetched, no paid API (2026-08-09)
+
+CLAUDE.md's own "Data sources CHECKED AND REJECTED" section already
+covered a traditional departure board (OpenSky flights endpoints need
+OAuth2, adsb.lol has no airport endpoint, AviationStack/AirLabs/
+AeroDataBox all need paid keys, nasstatus.faa.gov is national delay
+status, not a flight board) -- re-confirmed BOTH free-source rejections
+still hold with a live check before building anything (`curl
+api.adsb.lol/v2/airport/KMYR` -> still 404, `curl opensky-network.org/
+.../flights/arrival` -> still 403).
+
+The honest, real, free alternative: `FlightEngine._route_status()`
+already classifies a currently-tracked aircraft as DEPARTING/ARRIVING
+against the configured home airport, using adsbdb's real resolved
+route -- built for the DETAIL card's header tag, reused verbatim here
+(not re-derived) across every currently-tracked aircraft instead of
+just the selected one. Real local traffic actually departing from or
+arriving at the configured home airport right now -- not a claimed
+schedule, and honestly more useful for one specific home location than
+a generic FIDS full of regional hops nobody there is watching for.
+
+New standalone engine (`DepartureBoardEngine`, `ENGINES["departures"]`),
+same design precedent as `FollowFlightEngine`: a genuinely different
+presentation (a scannable board) of data `FlightEngine` already has,
+kept off `FlightEngine`'s own up/down axis (already claimed by THE
+HANGAR toggle) rather than overloading it. Zero new I/O -- reads
+`flights.FEED.get()`'s already-cached aircraft list (each dict already
+carries a real `route` from the feed's own background enrichment) and
+`flights.load_airport()`.
+
+**Real bug caught by `render_audit.py`'s own TRUNCATED check before
+shipping**: the arrow+city line was built as one `fit_text()` call
+(`f"{arrow} {other}"`) -- `fit_text()` drops whole trailing words, so a
+long city name (`"RALEIGH/DURHAM"`) got dropped ENTIRELY, leaving just
+the bare arrow with nothing else on the line. Fixed by fitting the city
+into its own reserved width budget (`WIDTH - 4 - text_w(arrow + " ")`)
+so the arrow always survives and the city truncates normally instead of
+vanishing.
+
+**Also found and fixed, unrelated to this feature**: `sports_config.json`
+had lost its `golf_player` key (Yealimi Noh, documented above as
+intentionally pinned to give the golf big-moment detector a real live
+target) -- real state drift, not caused by anything touched this pass.
+Restored via the real `sports.save_golf_player()` function, not a
+hand-edit, so the config's own read-modify-write path is what wrote it
+back.
+
+Verified: both audits clean, real service restart, real mode-switch to
+`departures` and a real `/api/frame` pull confirmed live (honestly empty
+right now -- no real MYR-bound traffic at check time, the correct empty
+state, not a bug).
+
 ## Storm-tracking mini-scope + favorite aircraft (2026-08-09)
 
 **Storm mini-scope**: weather.py's `_fetch_alerts()` now parses NWS's real
