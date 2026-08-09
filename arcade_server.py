@@ -1094,6 +1094,10 @@ def _remote_page():
     return (HERE / "remote.html").read_bytes()
 
 
+def _setup_page():
+    return (HERE / "setup.html").read_bytes()
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -1125,6 +1129,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, "text/html; charset=utf-8", _page())
         elif path in ("/remote", "/controller", "/play"):
             self._send(200, "text/html; charset=utf-8", _remote_page())
+        elif path == "/setup":
+            self._send(200, "text/html; charset=utf-8", _setup_page())
         elif path == "/api/state":
             s = ARCADE.snapshot()
             s["rgb"] = base64.b64encode(s.pop("frame")).decode()
@@ -1138,6 +1144,14 @@ class Handler(BaseHTTPRequestHandler):
             lat, lon, label = satellite.FEED.get_location()
             self._json({"lat": lat, "lon": lon, "label": label,
                         "configured": satellite.FEED.configured})
+        elif path == "/api/flights/airport":
+            # Home airport (2026-08-09) -- confirmed genuinely missing
+            # before adding: flights.load_airport()/save_airport() have
+            # existed since the radar scope's airport marker shipped, but
+            # NO HTTP endpoint or control-panel UI ever called them --
+            # the real config could previously only be set via a direct
+            # Python call. Same shape as /api/satellite/location above.
+            self._json({"airport": flights.load_airport()})
         elif path == "/api/window":
             # Window bearing/FOV config -- confirmed genuinely missing
             # before adding (satellite.py already owns load_window()/
@@ -1368,6 +1382,21 @@ class Handler(BaseHTTPRequestHandler):
                 lat, lon, label = satellite.FEED.set_location(
                     j["lat"], j["lon"], j.get("label", "HOME"))
                 self._json({"ok": True, "lat": lat, "lon": lon, "label": label})
+            except (ValueError, KeyError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/flights/airport":
+            # {"code": "MYR", "lat": .., "lon": ..} to set, or a falsy
+            # code to clear -- same shape flights.save_airport() itself
+            # already has (code, lat, lon), just exposed over HTTP for
+            # the first time (see the GET handler's own note above).
+            try:
+                j = json.loads(body or b"{}")
+                code = j.get("code")
+                if code:
+                    ap = flights.save_airport(code, j["lat"], j["lon"])
+                else:
+                    ap = flights.save_airport(None, 0, 0)
+                self._json({"ok": True, "airport": ap})
             except (ValueError, KeyError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/window":

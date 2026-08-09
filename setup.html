@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0a0a0b">
+<title>HENDERBURGH ARCADE — Setup</title>
+<style>
+  :root{--bg:#0a0a0b;--panel:#141416;--line:#26262b;--ink:#e8e8ea;--dim:#8a8a92;
+        --accent:#3ddc84;--red:#ff6b6b;}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+       padding:18px 16px calc(28px + env(safe-area-inset-bottom));min-height:100vh;}
+  h1{font-size:14px;letter-spacing:.32em;font-weight:600;margin:2px 0 0;text-align:center;}
+  .sub{font-size:10.5px;color:var(--dim);letter-spacing:.16em;margin-top:4px;text-align:center;}
+  .wrap{max-width:420px;margin:0 auto;}
+
+  /* Step dots -- always visible progress, never a mystery how much is
+     left, same "importance obvious at a glance" principle the panel
+     itself follows. */
+  .steps{display:flex;justify-content:center;gap:7px;margin:22px 0 18px;}
+  .steps .dot{width:8px;height:8px;border-radius:50%;background:var(--line);
+              transition:.2s;}
+  .steps .dot.done{background:var(--accent);}
+  .steps .dot.cur{background:var(--ink);transform:scale(1.3);}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+        padding:20px;width:100%;}
+  .card h2{font-size:13px;letter-spacing:.14em;margin:0 0 6px;}
+  .card p{font-size:12px;line-height:1.55;color:var(--dim);margin:0 0 16px;}
+  .row{display:flex;gap:8px;align-items:center;margin:10px 0;flex-wrap:wrap;}
+  .row label{font-size:11px;color:var(--dim);min-width:64px;}
+  input,select{font-family:inherit;font-size:13px;background:#0d0d0f;
+               border:1px solid var(--line);border-radius:8px;color:var(--ink);
+               padding:9px 10px;flex:1;min-width:0;}
+  input:focus,select:focus{outline:none;border-color:var(--accent);}
+  button{font-family:inherit;font-size:12.5px;letter-spacing:.06em;color:var(--ink);
+         background:#0d0d0f;border:1px solid var(--line);border-radius:10px;
+         padding:10px 16px;cursor:pointer;transition:.15s;}
+  button:hover{border-color:var(--accent);color:var(--accent);}
+  button.primary{background:var(--accent);color:#08210f;border-color:var(--accent);
+                 font-weight:700;}
+  button.primary:hover{opacity:.9;color:#08210f;}
+  button.ghost{background:transparent;color:var(--dim);border-color:transparent;}
+  button.ghost:hover{color:var(--ink);}
+  .nav{display:flex;justify-content:space-between;gap:10px;margin-top:18px;}
+  .badge{font-size:11px;padding:2px 8px;border-radius:6px;background:#0d0d0f;
+         border:1px solid var(--line);color:var(--dim);}
+  .badge.ok{color:var(--accent);border-color:var(--accent);}
+  .badge.err{color:var(--red);border-color:#5c2b2b;}
+  .hint{font-size:10.5px;color:#5c5c64;line-height:1.5;margin-top:10px;}
+  .heading-live{font-size:28px;font-weight:700;color:var(--accent);text-align:center;
+                margin:10px 0;letter-spacing:.04em;}
+  .step{display:none;}
+  .step.active{display:block;}
+  a.plain{color:var(--dim);text-decoration:none;}
+  a.plain:hover{color:var(--accent);}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>HENDERBURGH ARCADE</h1>
+  <div class="sub">first-time setup</div>
+  <div class="steps" id="steps"></div>
+
+  <!-- STEP 0: welcome -->
+  <div class="step" data-step="0">
+    <div class="card">
+      <h2>Welcome</h2>
+      <p>This walks through the handful of real things the panel needs to
+        know about where you are: your location, your home airport (for
+        the flight tracker and departure board), a window bearing (for
+        the plane-in-window takeover), and a team to follow. Every step
+        is optional and skippable — you can always change any of this
+        later from the <a class="plain" href="/">control panel</a>.</p>
+      <div class="nav"><span></span><button class="primary" id="s0-next">Get started →</button></div>
+    </div>
+  </div>
+
+  <!-- STEP 1: location -->
+  <div class="step" data-step="1">
+    <div class="card">
+      <h2>Where is the panel?</h2>
+      <p>Drives the ISS/satellite tracker, the flight radar's range rings,
+        and sunrise/sunset on the clock. Real GPS from this device, or
+        enter coordinates by hand.</p>
+      <div class="row"><button id="loc-geo">📍 Use this device's location</button>
+        <span id="loc-geo-msg" class="badge"></span></div>
+      <div class="row"><label>Lat</label><input type="text" id="loc-lat" placeholder="33.735277"></div>
+      <div class="row"><label>Lon</label><input type="text" id="loc-lon" placeholder="-78.908947"></div>
+      <div class="row"><label>Label</label><input type="text" id="loc-label" placeholder="HOME"></div>
+      <div class="nav">
+        <button class="ghost" id="s1-skip">Skip</button>
+        <button class="primary" id="s1-next">Save &amp; continue →</button>
+      </div>
+      <div class="hint" id="s1-msg"></div>
+    </div>
+  </div>
+
+  <!-- STEP 2: home airport -->
+  <div class="step" data-step="2">
+    <div class="card">
+      <h2>Home airport (optional)</h2>
+      <p>Marks the airport on the flight radar and powers the departure
+        board (real local traffic classified as departing from/arriving
+        at this airport). There's no free airport lookup this project
+        could verify works reliably, so the coordinates are a one-time
+        manual entry — search "[code] airport coordinates" if you don't
+        have them handy.</p>
+      <div class="row"><label>Code</label><input type="text" id="ap-code" placeholder="MYR" style="max-width:100px;"></div>
+      <div class="row"><label>Lat</label><input type="text" id="ap-lat" placeholder="33.679699"></div>
+      <div class="row"><label>Lon</label><input type="text" id="ap-lon" placeholder="-78.928299"></div>
+      <div class="nav">
+        <button class="ghost" id="s2-skip">Skip</button>
+        <button class="primary" id="s2-next">Save &amp; continue →</button>
+      </div>
+      <div class="hint" id="s2-msg"></div>
+    </div>
+  </div>
+
+  <!-- STEP 3: window bearing -->
+  <div class="step" data-step="3">
+    <div class="card">
+      <h2>Window bearing (optional)</h2>
+      <p>The bearing your favorite window faces, so the flight tracker can
+        flag a real aircraft actually visible out it. Stand at the window
+        facing straight out and tap Capture — this uses your phone's real
+        compass (a permission prompt may appear once). No compass? Enter
+        the bearing by hand (0° = north, clockwise).</p>
+      <div class="heading-live" id="win-live">—°</div>
+      <div class="row"><button id="win-capture">🧭 Capture heading now</button>
+        <span id="win-cap-msg" class="badge"></span></div>
+      <div class="row"><label>Bearing</label><input type="text" id="win-center" placeholder="296"></div>
+      <div class="row"><label>Width</label><input type="text" id="win-fov" placeholder="80" value="80"></div>
+      <div class="row"><label>Range</label><input type="text" id="win-max" placeholder="8" value="8">
+        <span class="badge">nm</span></div>
+      <div class="nav">
+        <button class="ghost" id="s3-skip">Skip</button>
+        <button class="primary" id="s3-next">Save &amp; continue →</button>
+      </div>
+      <div class="hint" id="s3-msg"></div>
+    </div>
+  </div>
+
+  <!-- STEP 4: favorite team -->
+  <div class="step" data-step="4">
+    <div class="card">
+      <h2>A team to follow (optional)</h2>
+      <p>Gets a full-screen score with live game state whenever they're
+        playing. You can add more later, or set up a whole city's teams
+        at once, from the control panel's Sports card.</p>
+      <div class="row"><label>League</label>
+        <select id="tm-league"><option value="">choose a league</option></select></div>
+      <div class="row"><label>Team</label>
+        <select id="tm-team"><option value="">choose a team</option></select></div>
+      <div class="nav">
+        <button class="ghost" id="s4-skip">Skip</button>
+        <button class="primary" id="s4-next">Save &amp; continue →</button>
+      </div>
+      <div class="hint" id="s4-msg"></div>
+    </div>
+  </div>
+
+  <!-- STEP 5: done -->
+  <div class="step" data-step="5">
+    <div class="card">
+      <h2>All set</h2>
+      <p>Everything above can be changed any time from the control panel
+        — favorite aircraft, night dimming, follow-a-flight, the events
+        log, and every other mode all live there too.</p>
+      <div class="nav">
+        <span></span>
+        <a href="/"><button class="primary">Open the control panel →</button></a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const post = (url, body) => fetch(url, {method:'POST',
+  headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+
+const STEP_COUNT = 6;
+let step = 0;
+function renderSteps(){
+  $('steps').innerHTML = Array.from({length: STEP_COUNT}, (_, i) =>
+    `<div class="dot ${i < step ? 'done' : ''} ${i === step ? 'cur' : ''}"></div>`).join('');
+  document.querySelectorAll('.step').forEach(el =>
+    el.classList.toggle('active', Number(el.dataset.step) === step));
+}
+function goto(n){ step = Math.max(0, Math.min(STEP_COUNT - 1, n)); renderSteps(); }
+renderSteps();
+
+$('s0-next').addEventListener('click', () => goto(1));
+
+/* ---------- step 1: location -- real browser geolocation ---------- */
+$('loc-geo').addEventListener('click', () => {
+  if (!navigator.geolocation){
+    $('loc-geo-msg').textContent = 'not supported on this browser';
+    $('loc-geo-msg').className = 'badge err';
+    return;
+  }
+  $('loc-geo-msg').textContent = 'locating…';
+  $('loc-geo-msg').className = 'badge';
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      $('loc-lat').value = pos.coords.latitude.toFixed(6);
+      $('loc-lon').value = pos.coords.longitude.toFixed(6);
+      $('loc-geo-msg').textContent = 'got it — real GPS fix';
+      $('loc-geo-msg').className = 'badge ok';
+    },
+    err => {
+      $('loc-geo-msg').textContent = err.message || 'denied — enter manually below';
+      $('loc-geo-msg').className = 'badge err';
+    },
+    {enableHighAccuracy: true, timeout: 10000}
+  );
+});
+$('s1-skip').addEventListener('click', () => goto(2));
+$('s1-next').addEventListener('click', async () => {
+  const lat = parseFloat($('loc-lat').value), lon = parseFloat($('loc-lon').value);
+  if (!isFinite(lat) || !isFinite(lon)){
+    $('s1-msg').textContent = 'enter a real lat/lon, or use the location button above';
+    return;
+  }
+  const j = await (await post('/api/satellite/location',
+    {lat, lon, label: $('loc-label').value || 'HOME'})).json();
+  $('s1-msg').textContent = j.ok === false ? (j.error || 'error saving') : '';
+  if (j.ok !== false) goto(2);
+});
+
+/* ---------- step 2: home airport ---------- */
+$('s2-skip').addEventListener('click', () => goto(3));
+$('s2-next').addEventListener('click', async () => {
+  const code = $('ap-code').value.trim();
+  if (!code){ goto(3); return; }
+  const lat = parseFloat($('ap-lat').value), lon = parseFloat($('ap-lon').value);
+  if (!isFinite(lat) || !isFinite(lon)){
+    $('s2-msg').textContent = 'enter real coordinates for that airport, or skip';
+    return;
+  }
+  const j = await (await post('/api/flights/airport', {code, lat, lon})).json();
+  $('s2-msg').textContent = j.ok === false ? (j.error || 'error saving') : '';
+  if (j.ok !== false) goto(3);
+});
+
+/* ---------- step 3: window bearing -- real DeviceOrientation compass ----
+   iOS 13+ requires an explicit permission prompt, triggered only from a
+   real user gesture (the Capture button click itself) -- requesting it
+   on page load would silently fail. `webkitCompassHeading` (Safari) is
+   already a true compass heading (0=north); the standard `alpha` field
+   from `deviceorientationabsolute` is used as the cross-browser
+   fallback, converted to a compass bearing (360-alpha). Never a guessed
+   number -- if neither real signal is available, the field stays
+   editable for manual entry, same as every other step here. */
+let watchingCompass = false;
+function useHeading(deg){
+  $('win-live').textContent = Math.round(deg) + '°';
+  $('win-center').value = Math.round(deg);
+}
+function handleOrientation(e){
+  let heading = null;
+  if (typeof e.webkitCompassHeading === 'number'){
+    heading = e.webkitCompassHeading;               // already a real compass bearing
+  } else if (e.absolute && typeof e.alpha === 'number'){
+    heading = (360 - e.alpha) % 360;                 // alpha is counter-clockwise from device start
+  }
+  if (heading !== null) useHeading(heading);
+}
+$('win-capture').addEventListener('click', async () => {
+  const msg = $('win-cap-msg');
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function'){
+    try{
+      const perm = await DeviceOrientationEvent.requestPermission();
+      if (perm !== 'granted'){
+        msg.textContent = 'compass permission denied — enter bearing manually';
+        msg.className = 'badge err';
+        return;
+      }
+    }catch(err){
+      msg.textContent = 'compass unavailable — enter bearing manually';
+      msg.className = 'badge err';
+      return;
+    }
+  }
+  if (!watchingCompass){
+    window.addEventListener('deviceorientationabsolute', handleOrientation, true);
+    window.addEventListener('deviceorientation', handleOrientation, true);
+    watchingCompass = true;
+  }
+  msg.textContent = 'reading live — hold the phone flat, facing out the window';
+  msg.className = 'badge ok';
+});
+$('s3-skip').addEventListener('click', () => goto(4));
+$('s3-next').addEventListener('click', async () => {
+  const center = parseFloat($('win-center').value);
+  const fov = parseFloat($('win-fov').value || '80');
+  const max_nm = parseFloat($('win-max').value || '8');
+  if (!isFinite(center)){ goto(4); return; }
+  const j = await (await post('/api/window', {center_deg: center, fov_deg: fov, max_nm})).json();
+  $('s3-msg').textContent = j.ok === false ? (j.error || 'error saving') : '';
+  if (j.ok !== false) goto(4);
+});
+
+/* ---------- step 4: favorite team -- real ESPN data ---------- */
+let allTeams = {};
+async function loadTeamsStep(){
+  try{
+    const [cfgR, teamsR] = await Promise.all([
+      fetch('/api/sports/config'), fetch('/api/sports/teams')]);
+    const cfg = await cfgR.json(), teamsJ = await teamsR.json();
+    allTeams = teamsJ.teams || {};
+    $('tm-league').innerHTML = '<option value="">choose a league</option>' +
+      (cfg.known_leagues || []).map(lg => `<option value="${lg}">${lg}</option>`).join('');
+  }catch(_){}
+}
+$('tm-league').addEventListener('change', () => {
+  const teams = allTeams[$('tm-league').value] || [];
+  $('tm-team').innerHTML = '<option value="">choose a team</option>' +
+    teams.map(t => `<option value="${t.abbr}">${t.location} ${t.name} (${t.abbr})</option>`).join('');
+});
+$('s4-skip').addEventListener('click', () => goto(5));
+$('s4-next').addEventListener('click', async () => {
+  const league = $('tm-league').value, team_abbr = $('tm-team').value;
+  if (!league || !team_abbr){ goto(5); return; }
+  const j = await (await post('/api/sports/favorite', {league, team_abbr})).json();
+  $('s4-msg').textContent = j.ok === false ? (j.error || 'error saving') : '';
+  if (j.ok !== false) goto(5);
+});
+loadTeamsStep();
+</script>
+</body>
+</html>
