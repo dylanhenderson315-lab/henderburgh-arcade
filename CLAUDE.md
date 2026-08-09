@@ -2870,6 +2870,54 @@ bug in the endpoint.
 Verified: both audits clean, real service restart + `/api/frame` pulled
 clean post-restart.
 
+## Storm-tracking mini-scope + favorite aircraft (2026-08-09)
+
+**Storm mini-scope**: weather.py's `_fetch_alerts()` now parses NWS's real
+`eventMotionDescription` parameter (present on real polygon-warning-tier
+alerts -- Severe Thunderstorm/Tornado/Special Marine, confirmed live that
+only ~3.6% of nationwide active alerts carry ANY geometry, and it's
+specifically this tier, not the broader zone-based watches) into real
+storm centroid bearing/distance-from-home (via a local
+`_bearing_distance_nm()`, same math as `flights.bearing_distance()`, kept
+as its own copy rather than a new cross-module import -- matches this
+project's existing per-module-copy precedent) plus real motion
+direction/speed. `draw_alert_frame()` plots this on a small corner
+mini-scope using `scope_xy()` -- the SAME bearing/radius->pixel
+convention the flight radar and satellite dome already use -- when
+present, and correctly stays off (no empty ring implying data that
+doesn't exist) for watches/advisories that genuinely have no point
+position. This is the "logical weather tracking, using the radar from
+flights and satellites" the owner asked for, NOT the pixel radar imagery
+already researched and recommended against earlier this session (that
+recommendation stands; this is a different, viable angle on the same
+underlying goal). Verified against a real live Severe Thunderstorm
+Warning near Kenosha/Racine, WI while building this.
+
+**Favorite aircraft**: `flights.py` gained `load_favorite_aircraft()`/
+`save_favorite_aircraft()` (own new file, `flights_config.json` -- this
+module's first, since everything else it owns lives in satellite.py's
+shared location config, but a favorites list isn't a location fact) and
+a real `is_favorite` field computed at the same per-aircraft enrichment
+site every other real fact (notable, in_window) already comes from.
+`FAVORITE_GLOW_FLOOR = 1.0` joins `NOTABLE_GLOW_FLOOR`/`WINDOW_GLOW_FLOOR`
+as the TOP of the existing ordered-floor hierarchy language (favorite
+beats window beats notable beats routine), applied consistently across
+the scope, the normal DETAIL card, and the Hangar list -- extending the
+established pattern, not inventing a fourth one. Also boosts sort
+ranking (`FAVORITE_BOOST = 1.5`, the largest of the three boosts,
+deliberately -- this is the one signal that's entirely the owner's own
+choice rather than something ADS-B/geometry decided) so a favorite can
+lead the list even over a HEAVY/HELI on its own. New
+`GET`/`POST /api/flights/favorites` endpoint, same shape as
+`/api/sports/favorite_teams`.
+
+Verified: both audits clean, real service restart + `/api/frame` pulled
+clean post-restart, real endpoint round-trip tested live (set a real
+logged Hangar registration as favorite, confirmed via `/api/flights/
+favorites` GET, cleared it back to `[]` afterward -- no test data left
+behind), synthetic proof renders (scope + Hangar, real registration data)
+reviewed before commit.
+
 ## Known issues / in-progress work
 
 ### Panel lockup hazard — RESOLVED 2026-07-30, but the rule stands
