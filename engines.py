@@ -881,6 +881,44 @@ def draw_alert_frame(alert, ticks, place="", n_alerts=1, cur_alert=0):
         draw_dots(buf, HEIGHT - 6, n_alerts, cur_alert, on=pulse)
     elif place:
         draw_text_centered(buf, HEIGHT - 9, fit_text(place, WIDTH - 10), rim(col, 0.8))
+
+    # STORM MINI-SCOPE (2026-08-09) -- real bearing/distance/motion, ONLY
+    # when NWS's own warning carried real geometry (see weather.py's
+    # _parse_storm_motion() note: real polygon warnings like Severe
+    # Thunderstorm/Tornado/Special Marine carry this; the broader zone-
+    # based watches/advisories honestly don't, and this correctly stays
+    # off for those rather than drawing an empty ring that implies data
+    # that doesn't exist). Reuses scope_xy() -- the SAME bearing/radius->
+    # pixel convention the flight radar and satellite dome already use --
+    # tucked in the top-right corner, clear of the severity label (row 6,
+    # centred) and the pulse border (rows/cols 0-2). Deliberately small
+    # and quiet: this screen's job is the life-safety text, the mini-scope
+    # is a supporting fact, not a second focal point.
+    brg = alert.get("storm_bearing_deg")
+    if brg is not None:
+        mcx, mcy, mr = WIDTH - 9, 11, 6
+        for i in range(16):
+            a = i / 16 * 2 * math.pi
+            put_px(buf, int(round(mcx + mr * math.cos(a))),
+                   int(round(mcy + mr * math.sin(a))), rim(col, 0.35))
+        put_px(buf, mcx, mcy, rim(col, 0.6))          # home, at scope centre
+        dist_nm = alert.get("storm_dist_nm") or 0.0
+        # Capped display range -- a storm 100nm out and one 10nm out both
+        # need to fit inside a 6px radius; the RING itself is the real
+        # signal ("something is out there and roughly which direction"),
+        # not a precise ruler. 50nm chosen to match the flight scope's own
+        # RADIUS_NM-family of real-world caps, not an arbitrary round number.
+        frac = min(1.0, dist_nm / 50.0)
+        sx, sy = scope_xy(brg, frac, cx=mcx, cy=mcy, radius=mr)
+        sx, sy = int(round(sx)), int(round(sy))
+        put_px(buf, sx, sy, (255, 255, 255))
+        motion_dir = alert.get("storm_motion_dir_deg")
+        if motion_dir is not None:
+            # Short motion arrow from the storm's own position, same
+            # scope_xy() convention, radius 3 -- real reported motion
+            # direction, not a guess.
+            ax, ay = scope_xy(motion_dir, 1.0, cx=sx, cy=sy, radius=3)
+            put_px(buf, int(round(ax)), int(round(ay)), (255, 255, 255))
     return bytes(buf)
 
 
@@ -1416,6 +1454,17 @@ NOTABLE_GLOW_FLOOR = 0.75
 # sweep's own heartbeat motion never goes fully invisible on the single
 # most important class of target this scope can show.
 WINDOW_GLOW_FLOOR = 0.92
+
+# FAVORITE_GLOW_FLOOR (2026-08-09) -- the TOP of the ordering, strictly
+# above WINDOW_GLOW_FLOOR, for the same max()-not-additive reason: a
+# favorited aircraft that is ALSO in-window shows the favorite's own
+# floor (already the highest), not an over-1.0 stack of both. 1.0 flat,
+# not left-a-hair-short like WINDOW_GLOW_FLOOR -- this is the one signal
+# on the whole scope that is entirely the owner's own choice rather than
+# something ADS-B/geometry decided, so it is allowed to be the single
+# brightest thing the scope can show, full stop, not merely brighter than
+# the sweep's own heartbeat.
+FAVORITE_GLOW_FLOOR = 1.0
 
 
 def scope_xy(bearing_deg, r_frac, cx=SCOPE_CX, cy=SCOPE_CY, radius=SCOPE_R):
@@ -6666,6 +6715,7 @@ class FlightEngine(Browsable, BigMomentSource):
         # uses, branched on view exactly like ATC_LOG's paging already is.
         self.hangar_entries = []
         self.hangar_idx = 0
+        self.favorite_aircraft = set()
         self.hold = 0
         self.cycling = True
         self.ticks = 0
@@ -6969,6 +7019,12 @@ class FlightEngine(Browsable, BigMomentSource):
         self._dr_age_prev = _age
         _t_ref = (_now - _age) if _age is not None else _now
         self.airport = flights.load_airport()
+        # FAVORITE AIRCRAFT (2026-08-09) -- same "cheap config read every
+        # tick" precedent as load_airport() just above, so THE HANGAR
+        # (which has no live ac dict with its own is_favorite field the
+        # way the scope/DETAIL do) can still mark a favorited registration
+        # without a new I/O pattern.
+        self.favorite_aircraft = set(flights.load_favorite_aircraft())
         # THE HANGAR -- read every tick, same as every other FEED here
         # (hangar.LOG.get() is a pure in-memory read, never blocks).
         # Clamped with %, same cursor-safety idiom every other list in
@@ -7427,21 +7483,24 @@ class FlightEngine(Browsable, BigMomentSource):
             # already established for notable aircraft.
             if in_window:
                 draw_window_ring(buf, x, y, self.WINDOW_RING)
-            # HIERARCHY (2026-08-08): brightness+size now encodes real
-            # importance, one consistent rule across every aircraft here
-            # -- window beats notable beats routine, matching the same
-            # ordering the owner asked for explicitly. Never additive
-            # (two max()es, not a sum) so a window+notable aircraft caps
-            # at the window floor rather than blowing past 1.0 and
-            # clipping -- the ordering is expressed by which floor is
-            # highest, not by stacking them.
+            # HIERARCHY (2026-08-08, extended 2026-08-09): brightness+size
+            # now encodes real importance, one consistent rule across every
+            # aircraft here -- favorite beats window beats notable beats
+            # routine, matching the same ordering the owner asked for
+            # explicitly. Never additive (three max()es, not a sum) so a
+            # favorite+window+notable aircraft caps at the favorite floor
+            # rather than blowing past 1.0 and clipping -- the ordering is
+            # expressed by which floor is highest, not by stacking them.
+            is_favorite = bool(ac.get("is_favorite"))
             glow = scope_glow(brg, self.sweep)
             if ac.get("notable"):
                 glow = max(glow, NOTABLE_GLOW_FLOOR)
             if in_window:
                 glow = max(glow, WINDOW_GLOW_FLOOR)
+            if is_favorite:
+                glow = max(glow, FAVORITE_GLOW_FLOOR)
             draw_scope_aircraft(buf, x, y, ac.get("track_deg"), kind, mark_col,
-                                glow=glow, big=(sel or matched or in_window))
+                                glow=glow, big=(sel or matched or in_window or is_favorite))
 
         draw_scope_home(buf, cx=cx, cy=cy)
         # Tried an alternating text legend ("<>=HOME +=MYR") same session,
@@ -7635,23 +7694,37 @@ class FlightEngine(Browsable, BigMomentSource):
 
         idx = self.hangar_idx % n
         e = self.hangar_entries[idx]
-        draw_header(buf, e.get("reg") or "UNKNOWN", self.HANGAR, right_tag=f"{idx + 1}/{n}")
+        is_favorite = bool(e.get("reg")) and e["reg"] in self.favorite_aircraft
+        # FAVORITE (2026-08-09) takes the header's tag slot when set --
+        # same highest-priority-in-the-corner convention the DETAIL card's
+        # own right_tag now uses -- otherwise the existing page counter.
+        right_tag = "FAVORITE" if is_favorite else f"{idx + 1}/{n}"
+        draw_header(buf, e.get("reg") or "UNKNOWN", self.HANGAR, right_tag=right_tag)
 
-        # HIERARCHY (2026-08-08): a first sighting had ZERO visual
-        # distinction before this beyond the "FIRST SIGHTING" text row --
-        # every other "this matters" signal in the project (the scope's
-        # NOTABLE_GLOW_FLOOR/WINDOW_GLOW_FLOOR, the hero silhouette's
-        # breathing glow) expresses importance as brightness+size, not
-        # text alone. Same ordered-floor language here, just with no
-        # sweep to float above: a REPEAT visitor (the routine case) is
-        # the one that dims, via rim(), so a genuine first sighting reads
-        # as brighter/bigger than the routine baseline rather than the
-        # reverse -- consistent with "important floats up", not "normal
-        # floats down and importance is merely undimmed".
+        # HIERARCHY (2026-08-08, extended 2026-08-09): a first sighting had
+        # ZERO visual distinction before this beyond the "FIRST SIGHTING"
+        # text row -- every other "this matters" signal in the project
+        # (the scope's NOTABLE_GLOW_FLOOR/WINDOW_GLOW_FLOOR/
+        # FAVORITE_GLOW_FLOOR, the hero silhouette's breathing glow)
+        # expresses importance as brightness+size, not text alone. Same
+        # ordered-floor language here, just with no sweep to float above:
+        # a REPEAT visitor (the routine case) is the one that dims, via
+        # rim(), so a genuine first sighting reads as brighter/bigger than
+        # the routine baseline rather than the reverse -- consistent with
+        # "important floats up", not "normal floats down and importance is
+        # merely undimmed". A FAVORITE now sits at the top of that same
+        # ordering, same as it does on the scope/DETAIL card -- full color
+        # + the largest scale, outranking even a first sighting, since
+        # (per FAVORITE_GLOW_FLOOR's own note) it is the one signal here
+        # that is entirely the owner's own choice.
         times = e.get("times_seen") or 1
         first_sighting = times <= 1
-        icon_col = self.HANGAR if first_sighting else rim(self.HANGAR, 0.55)
-        icon_scale = 0.95 if first_sighting else 0.85
+        if is_favorite:
+            icon_col, icon_scale = self.HANGAR, 1.0
+        elif first_sighting:
+            icon_col, icon_scale = self.HANGAR, 0.95
+        else:
+            icon_col, icon_scale = rim(self.HANGAR, 0.55), 0.85
 
         # HERO TREATMENT (2026-08-08, round 2): this used to call
         # `_draw_plane_icon`, the thin STROKED sprite (single fuselage
@@ -7889,8 +7962,14 @@ class FlightEngine(Browsable, BigMomentSource):
         # above). The common TRANSIT case (neither matches) falls through
         # to the existing notable/position behavior unchanged.
         note = ac.get("notable")
+        is_favorite = bool(ac.get("is_favorite"))
         route_status = self._route_status(ac.get("route"), self.airport)
-        right_tag = route_status or (note[0] if note else f"{idx + 1}/{len(aircraft)}")
+        # FAVORITE (2026-08-09) leads the same right_tag slot, highest
+        # priority of the three -- a real, owner-chosen fact outranks a
+        # route/notable status the same way it outranks them in glow/scale
+        # below and in the scope's own ranking (flights.FAVORITE_BOOST).
+        right_tag = ("FAVORITE" if is_favorite else
+                     route_status or (note[0] if note else f"{idx + 1}/{len(aircraft)}"))
         draw_header(buf, ident, self.pulse.mix(col),
                     right_tag=right_tag,
                     stale=bool(self.data.get("age") and self.data["age"] > 60))
@@ -7913,8 +7992,18 @@ class FlightEngine(Browsable, BigMomentSource):
         # itself as the rim() floor for the routine case, so "notable"
         # here means literally the same brightness value the scope
         # would show this aircraft at if it were sitting off-beam).
-        icon_col = col if note else rim(col, NOTABLE_GLOW_FLOOR)
-        icon_scale = 1.1 if note else 1.0
+        # FAVORITE (2026-08-09): same ordering as the scope -- favorite
+        # beats notable beats routine. A favorited aircraft draws at full
+        # brightness + the largest scale even if it isn't independently
+        # notable, since being a favorite is itself the highest-ranked
+        # reason to look, per FAVORITE_GLOW_FLOOR's own note. `is_favorite`
+        # already computed above for the header's right_tag.
+        if is_favorite:
+            icon_col, icon_scale = col, 1.2
+        elif note:
+            icon_col, icon_scale = col, 1.1
+        else:
+            icon_col, icon_scale = rim(col, NOTABLE_GLOW_FLOOR), 1.0
         self._draw_plane_icon(buf, WIDTH // 2, 22, ac.get("track_deg"), icon_col,
                               kind=self._ac_kind(ac), scale=icon_scale)
 

@@ -1173,6 +1173,8 @@ class Handler(BaseHTTPRequestHandler):
             cfg = brightness.load_config()
             cfg["current_level"] = round(brightness.level_now(cfg), 3)
             self._json(cfg)
+        elif path == "/api/flights/favorites":
+            self._json({"favorite_aircraft": flights.load_favorite_aircraft()})
         elif path == "/api/blog/config":
             self._json({"api_url": blog.FEED.get_config(),
                         "default_api_url": blog.DEFAULT_API_URL})
@@ -1449,6 +1451,22 @@ class Handler(BaseHTTPRequestHandler):
                     teams, bool(j.get("filter_enabled", True)))
                 self._json({"ok": True, "favorite_teams": cleaned,
                             "favorite_teams_filter": enabled})
+            except (ValueError, KeyError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/flights/favorites":
+            # Watched tail numbers (2026-08-09), same shape as
+            # /api/sports/favorite_teams just above -- a real registration
+            # list, applied at flights.py's own enrichment site
+            # (_fetch_positions()) so is_favorite flows through the SAME
+            # aircraft dict every render already reads, no parallel data
+            # path.
+            try:
+                j = json.loads(body or b"{}")
+                regs = j.get("registrations")
+                if not isinstance(regs, list):
+                    raise ValueError("registrations must be a list of strings")
+                cleaned = flights.save_favorite_aircraft(regs)
+                self._json({"ok": True, "favorite_aircraft": cleaned})
             except (ValueError, KeyError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/gameday/config":

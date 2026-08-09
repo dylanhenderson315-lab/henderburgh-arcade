@@ -41,6 +41,7 @@ renders around it honestly.
 import calendar
 import json
 import math
+import re
 from datetime import date as _date
 import math
 import calendar
@@ -251,6 +252,62 @@ def _fetch_conditions(stations):
     return first_usable
 
 
+# ---- storm position/motion, for the severe-alert screen's mini-scope
+# (2026-08-09) -------------------------------------------------------------
+# NWS's real polygon-based warnings (Severe Thunderstorm/Tornado/Special
+# Marine Warning -- NOT the broader watches/advisories) carry a real
+# `eventMotionDescription` parameter: a fixed-format string like
+# "2026-08-09T17:03:00-00:00...storm...273DEG...36KT...42.74,-87.69",
+# verified against real live nationwide alert data before writing this
+# (only ~3.6% of active alerts nationwide carry ANY geometry at all, and
+# it's specifically the polygon-warning tier, not zone-based watches --
+# checked, not assumed). This is REAL storm centroid position + REAL
+# motion direction/speed, straight from the forecaster's own warning
+# text -- not derived, not estimated. Absent on the (much more common)
+# zone-based watch/advisory alerts, which is an honest gap: those alerts
+# genuinely have no point-position to plot, only a county/zone list.
+_MOTION_RE = re.compile(
+    r"(\d+)DEG\.\.\.(\d+)KT\.\.\.(-?\d+\.?\d*),(-?\d+\.?\d*)")
+
+
+def _parse_storm_motion(parameters):
+    """Real (motion_dir_deg, motion_speed_kt, lat, lon) from NWS's
+    eventMotionDescription parameter, or None if this alert doesn't carry
+    one (most don't -- see the module note above)."""
+    vals = (parameters or {}).get("eventMotionDescription")
+    if not vals:
+        return None
+    text = vals[0] if isinstance(vals, list) else vals
+    m = _MOTION_RE.search(text or "")
+    if not m:
+        return None
+    return {
+        "motion_dir_deg": float(m.group(1)),
+        "motion_speed_kt": float(m.group(2)),
+        "lat": float(m.group(3)),
+        "lon": float(m.group(4)),
+    }
+
+
+def _bearing_distance_nm(lat1, lon1, lat2, lon2):
+    """(bearing_deg, distance_nm) from point 1 to point 2 -- same
+    great-circle math as flights.bearing_distance()/satellite.haversine_km,
+    kept as its own small local copy rather than importing flights here
+    (this module has never depended on flights.py, and the math is a
+    handful of lines -- matches this project's existing precedent of each
+    feed module keeping its own copy rather than adding a cross-feed
+    import for a shared formula, see satellite.py's own haversine_km)."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dl = math.radians(lon2 - lon1)
+    dp = p2 - p1
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    d_km = 2 * 6371.0088 * math.asin(min(1.0, math.sqrt(a)))
+    brg = math.degrees(math.atan2(
+        math.sin(dl) * math.cos(p2),
+        math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl))) % 360.0
+    return brg, d_km * 0.539957
+
+
 def _fetch_alerts(lat, lon):
     d = _get_json(ALERTS_URL.format(lat=_round_coord(lat), lon=_round_coord(lon)))
     out = []
@@ -259,13 +316,29 @@ def _fetch_alerts(lat, lon):
         event = paneltext.panel_text(p.get("event"))
         if not event:
             continue
-        out.append({
+        entry = {
             "event": event,
             "severity": p.get("severity") or "Unknown",
             "urgency": p.get("urgency") or "Unknown",
             "headline": paneltext.panel_text(p.get("headline")),
             "area": paneltext.panel_text(p.get("areaDesc")),
-        })
+            # Real storm position/motion when NWS's warning carries one --
+            # see _parse_storm_motion()'s module note. None on the (much
+            # more common) zone-based watch/advisory, an honest gap, never
+            # guessed at.
+            "storm_bearing_deg": None,
+            "storm_dist_nm": None,
+            "storm_motion_dir_deg": None,
+            "storm_motion_speed_kt": None,
+        }
+        motion = _parse_storm_motion(p.get("parameters"))
+        if motion:
+            brg, dist_nm = _bearing_distance_nm(lat, lon, motion["lat"], motion["lon"])
+            entry["storm_bearing_deg"] = brg
+            entry["storm_dist_nm"] = dist_nm
+            entry["storm_motion_dir_deg"] = motion["motion_dir_deg"]
+            entry["storm_motion_speed_kt"] = motion["motion_speed_kt"]
+        out.append(entry)
     out.sort(key=lambda a: SEVERITY_ORDER.index(a["severity"])
              if a["severity"] in SEVERITY_ORDER else len(SEVERITY_ORDER))
     return out

@@ -33,6 +33,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import paneltext
 
@@ -132,6 +133,60 @@ def save_airport(code, lat, lon):
 load_window = satellite.load_window
 save_window = satellite.save_window
 in_window = satellite.in_window
+
+
+# ---- favorite aircraft / watched tail numbers (2026-08-09) ---------------
+# A real, first-class favorites layer for flights -- same shape/reasoning
+# as sports.py's favorite_teams (2026-08-08): a plain list of real
+# registration strings the owner cares about, kept in its OWN config file
+# (flights_config.json, this module's first -- everything else it owns
+# lives in satellite.py's shared location_config.json, but a favorites
+# list is not a location fact, so it does not belong there). Applied at
+# the SAME enrichment site every other per-aircraft fact already comes
+# from (_fetch_positions() below) as a real, computed `is_favorite` bool
+# -- reused everywhere an aircraft dict already flows (scope, DETAIL,
+# Hangar list), not a new parallel data path.
+FAVORITES_CONFIG_PATH = Path(__file__).parent / "flights_config.json"
+
+# Same ordering role as WINDOW_BOOST just above -- additive to the
+# existing notable/window ranking, never replacing it, so "which aircraft
+# leads the list" stays one real formula instead of a favorite silently
+# overriding an otherwise-more-notable aircraft.
+FAVORITE_BOOST = 1.5
+
+
+def load_favorite_aircraft():
+    """Real registration strings only, uppercased -- an empty list is the
+    honest default (device just set up, or the owner hasn't picked any
+    tail numbers to watch yet), never a guessed starter list."""
+    if not FAVORITES_CONFIG_PATH.exists():
+        return []
+    try:
+        data = json.loads(FAVORITES_CONFIG_PATH.read_text())
+    except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+        return []
+    raw = data.get("favorite_aircraft")
+    if not isinstance(raw, list):
+        return []
+    return sorted({str(r).strip().upper() for r in raw if str(r or "").strip()})
+
+
+def save_favorite_aircraft(regs):
+    """Read-modify-write, not a fresh dict -- same preemptive discipline
+    every save_* in this project follows since the 2026-08-09 gap audit
+    (this file is new, so there's no sibling key to preserve YET, but the
+    pattern is the same regardless of whether today's data would notice
+    the difference)."""
+    data = {}
+    if FAVORITES_CONFIG_PATH.exists():
+        try:
+            data = json.loads(FAVORITES_CONFIG_PATH.read_text()) or {}
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+            data = {}
+    cleaned = sorted({str(r).strip().upper() for r in (regs or []) if str(r or "").strip()})
+    data["favorite_aircraft"] = cleaned
+    FAVORITES_CONFIG_PATH.write_text(json.dumps(data, indent=2))
+    return cleaned
 
 
 # Soft-priority boost applied to a window aircraft's sort rank (see the
@@ -526,6 +581,7 @@ def _fetch_positions(lat, lon):
     window = load_window()   # cheap local config read, same cost class as
                               # every other per-refresh config check here
                               # (e.g. satellite's own CONFIG_CHECK reload)
+    favorites = set(load_favorite_aircraft())   # same cheap-per-refresh-read cost class
     out = []
     for ac in data.get("ac") or []:
         # .get(key, default) only supplies the default when the key is
@@ -538,6 +594,7 @@ def _fetch_positions(lat, lon):
         alt = ac.get("alt_baro") if isinstance(ac.get("alt_baro"), (int, float)) else None
         phase, rate = _phase(ac, alt=alt)
         dir_deg = ac.get("dir")
+        reg = paneltext.panel_text((ac.get("r") or "").strip()) or None
         out.append({
             "ident": _ident(ac),
             # Raw ICAO24 hex -- the one field ADS-B guarantees is stable
@@ -553,7 +610,13 @@ def _fetch_positions(lat, lon):
             # other externally-sourced string here even though real
             # registrations are plain ASCII in practice -- no exception
             # carved out for "this one's probably fine".
-            "reg": paneltext.panel_text((ac.get("r") or "").strip()) or None,
+            "reg": reg,
+            # FAVORITE AIRCRAFT (2026-08-09) -- true only when this
+            # aircraft's REAL registration matches one on the owner's real
+            # watch list. An aircraft with no broadcast registration can
+            # never match (honest -- there is nothing to compare), not a
+            # false positive.
+            "is_favorite": bool(reg and reg in favorites),
             "callsign": (ac.get("flight") or "").strip(),
             # Real ADS-B emitter category (A1 light .. A7 rotorcraft, B2
             # lighter-than-air -- see the CAT_* constants above). Was
@@ -589,16 +652,23 @@ def _fetch_positions(lat, lon):
                           and ac["dst"] <= window["max_nm"]),
         })
     # Most notable first, then nearest -- ADDITIVELY adjusted by the
-    # window boost (WINDOW_BOOST above), never replacing this ranking.
+    # window boost (WINDOW_BOOST above) and now the favorite boost
+    # (FAVORITE_BOOST, 2026-08-09), never replacing this ranking.
     # Sorting purely by distance means the mode almost always leads with
     # a routine regional jet, because "closest" and "interesting" are
     # rarely the same aircraft -- a wide-body or a helicopter a few miles
     # further out is the one worth looking up for; a window aircraft is
     # the same idea applied to "worth looking up for because it's
-    # literally visible out the window right now".
+    # literally visible out the window right now". A favorite gets the
+    # LARGEST single boost of the three (1.5 vs. window's 0.5) --
+    # deliberately: this is the one signal that is entirely the owner's
+    # own choice rather than something ADS-B/geometry decided, so it
+    # should be able to outrank even a HEAVY/HELI (rank 3) on its own,
+    # not just nudge the existing order.
     def _rank(a):
         base = a["notable"][1] if a["notable"] else 0
-        return base + (WINDOW_BOOST if a["in_window"] else 0.0)
+        return (base + (WINDOW_BOOST if a["in_window"] else 0.0)
+                     + (FAVORITE_BOOST if a["is_favorite"] else 0.0))
     out.sort(key=lambda a: (-_rank(a),
                             a["dist_nm"] if a["dist_nm"] is not None else 1e9))
     return out[:MAX_TRACKED]
