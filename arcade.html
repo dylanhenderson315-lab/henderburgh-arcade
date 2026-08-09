@@ -260,6 +260,19 @@
       position.</div>
   </div>
 
+  <div id="favaccard" class="card hide">
+    <h2>Favorite aircraft — watched tail numbers</h2>
+    <div class="row"><label>Add</label>
+      <input type="text" id="fa-reg" placeholder="e.g. N434CD"></div>
+    <div class="row"><button id="fa-add">+ Add</button>
+      <span id="fa-msg" class="badge"></span></div>
+    <div id="fa-list" class="vlist"></div>
+    <div class="hint">A favorite aircraft is flagged brightest on the
+      radar scope and in THE HANGAR — it outranks even a heavy or a
+      helicopter on its own. Registration only (a tail number), the same
+      form THE HANGAR lists entries by.</div>
+  </div>
+
   <div id="sportscard" class="card hide">
     <h2>Sports — leagues &amp; pinned team</h2>
     <div class="row"><label>Leagues</label><input type="text" id="sp-leagues"
@@ -425,6 +438,20 @@
 
   <!-- Right rail: Home Assistant dynamic backgrounds -->
   <aside class="side">
+    <!-- Status overview — "look at this ONE page and know at a glance
+         what the device is doing right now". Current mode + whether a
+         takeover is in progress come straight off /api/state (already
+         polled every tick, no new request); severe weather comes from
+         weather's own alerts list (the same data weather mode and the
+         global takeover already read); recent events is the one piece
+         that had no GET surface at all until /api/events above. -->
+    <div class="card" id="statuscard">
+      <h2>Status</h2>
+      <div class="row"><label>Mode</label><span id="st-mode" class="badge">—</span></div>
+      <div class="row"><label>Weather</label><span id="st-weather" class="badge">—</span></div>
+      <div class="hint" id="st-events" style="margin-top:8px;">loading recent events…</div>
+    </div>
+
     <div class="card" id="bgcard">
       <h2>Background</h2>
       <div class="badge" id="bg-source" style="display:block;margin-bottom:8px;">Apollo M-1 effects</div>
@@ -492,6 +519,7 @@ async function poll(){
     draw(j.rgb);
     $('mode').textContent = j.mode.toUpperCase() + (j.paused ? ' · PAUSED' : '');
     $('score').textContent = j.score;
+    renderStatusMode(j.mode, j.paused);
     $('pausebtn').textContent = j.paused ? '▶ Resume' : '⏸ Pause';
     $('pausebtn').classList.toggle('on', !!j.paused);
     if (j.background != null){
@@ -528,6 +556,53 @@ async function poll(){
   }catch(_){}
 }
 setInterval(poll, 60);
+
+/* ---------- status overview ----------
+   "planewatch"/"notify" are the two force-triggered takeover modes
+   (see CLAUDE.md) -- when /api/state reports the mode AS one of them,
+   that IS the takeover being live right now, so no separate "is a
+   takeover active" flag is needed. Severe weather is different: it
+   composites OVER whatever mode is running rather than replacing it,
+   so it has to be read from weather's own alert list instead. */
+const MODE_LABELS = {
+  planewatch: 'PLANE IN WINDOW', notify: 'HA NOTIFICATION', gameday: 'GAME DAY',
+  off: 'off (released to lighting)', menu: 'menu', boot: 'starting…',
+};
+function renderStatusMode(mode, paused){
+  const el = $('st-mode'); if (!el) return;
+  const label = MODE_LABELS[mode] || (mode || '—').toUpperCase();
+  el.textContent = label + (paused ? ' · PAUSED' : '');
+  el.style.color = (mode === 'planewatch' || mode === 'notify')
+    ? 'var(--red)' : 'var(--accent)';
+}
+async function pollStatusExtras(){
+  try{
+    const w = await (await fetch('/api/weather/current')).json();
+    const alerts = w.alerts || [];
+    const el = $('st-weather');
+    if (alerts.length){
+      const top = alerts[0];
+      el.textContent = `${alerts.length} active — ${top.event || top.headline || 'alert'}`;
+      el.style.color = 'var(--red)';
+    } else {
+      el.textContent = 'clear'; el.style.color = 'var(--accent)';
+    }
+  }catch(_){ $('st-weather').textContent = '—'; }
+  try{
+    const j = await (await fetch('/api/events?limit=5')).json();
+    const evs = j.events || [];
+    $('st-events').innerHTML = evs.length
+      ? evs.map(e => {
+          const age = Math.max(0, Math.round((Date.now()/1000 - e.ts)));
+          const m = Math.floor(age/60);
+          const when = m < 1 ? 'just now' : (m < 60 ? m+'m ago' : Math.floor(m/60)+'h ago');
+          return `<div style="margin-bottom:3px;"><b>${(e.kind||'').toUpperCase()}</b> · ${when}<br>${e.summary}</div>`;
+        }).join('')
+      : 'No events logged yet.';
+  }catch(_){ $('st-events').textContent = '—'; }
+}
+pollStatusExtras();
+setInterval(pollStatusExtras, 15000);
 
 /* ---------- background (HA dynamic modes) ---------- */
 async function loadBackgrounds(){
@@ -644,6 +719,46 @@ $('ff-save').addEventListener('click', async () => {
 $('ff-clear').addEventListener('click', async () => {
   await post('/api/flights/follow', {callsign: ''});
   $('ff-callsign').value = ''; say('ff-msg', 'stopped'); loadFollow();
+});
+
+/* Favorite aircraft — same growable-list interaction as favorite_teams
+   (see below): a text input to add, a real list of what's currently
+   saved with a per-item remove button, calling the real
+   /api/flights/favorites endpoint ({"registrations":[...]}). */
+let favAircraft = [];
+function renderFavAircraft(){
+  const el = $('fa-list');
+  if (!favAircraft.length){
+    el.innerHTML = '<div class="empty">No favorites yet.</div>';
+    return;
+  }
+  el.innerHTML = favAircraft.map(r =>
+    `<button data-reg="${r}">✕ ${r}</button>`).join('');
+  el.querySelectorAll('button').forEach(b =>
+    b.addEventListener('click', () => saveFavAircraft(
+      favAircraft.filter(r => r !== b.dataset.reg))));
+}
+async function loadFavAircraft(){
+  try{ const j = await (await fetch('/api/flights/favorites')).json();
+       favAircraft = j.favorite_aircraft || [];
+       renderFavAircraft(); }catch(_){}
+}
+async function saveFavAircraft(list){
+  mark();
+  const j = await (await post('/api/flights/favorites',
+    {registrations: list})).json();
+  favAircraft = j.favorite_aircraft || list;
+  renderFavAircraft();
+  say('fa-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
+}
+$('fa-add').addEventListener('click', () => {
+  const reg = $('fa-reg').value.trim().toUpperCase();
+  if (!reg) return;
+  if (!favAircraft.includes(reg)) saveFavAircraft([...favAircraft, reg]);
+  $('fa-reg').value = '';
+});
+$('fa-reg').addEventListener('keydown', e => {
+  if (e.key === 'Enter'){ e.preventDefault(); $('fa-add').click(); }
 });
 
 async function loadSports(){
@@ -781,7 +896,7 @@ $('br-save').addEventListener('click', async () => {
   cfgTouched = 0; loadBrightness();
 });
 
-loadTicker(); loadLoc(); loadFollow(); loadSports(); loadNews(); loadBlog(); loadBrightness();
+loadTicker(); loadLoc(); loadFollow(); loadFavAircraft(); loadSports(); loadNews(); loadBlog(); loadBrightness();
 setInterval(loadBrightness, 30000);
 
 /* ---------- power + modes ---------- */
@@ -817,6 +932,10 @@ function syncUI(){
       !['satellite','flights','weather'].includes(base));
   $('followcard').classList.toggle('hide', base !== 'followflight');
   if (base === 'followflight' && Date.now() - cfgTouched > 3000) loadFollow();
+  // Favorite aircraft affects flights' local radar/Hangar, not
+  // followflight (which has no home-relative concept at all — see
+  // FollowFlightEngine's own docstring).
+  $('favaccard').classList.toggle('hide', base !== 'flights');
   $('sportscard').classList.toggle('hide', base !== 'sports');
   $('newscard').classList.toggle('hide', base !== 'news');
   $('blogcard').classList.toggle('hide', base !== 'blog');

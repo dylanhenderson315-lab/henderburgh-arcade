@@ -1215,6 +1215,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"favorite_aircraft": flights.load_favorite_aircraft()})
         elif path == "/api/dnd":
             self._json(dnd.load_config())
+        elif path == "/api/events":
+            # Read-only peek at events_log.py's recent-events log for the
+            # control panel's status overview -- confirmed genuinely
+            # missing before adding (events_log.LOG.get() was only ever
+            # read from inside EventsLogEngine, never over HTTP). Small,
+            # single GET, same shape as every other read-only endpoint
+            # here; a `limit` query param caps how many are returned.
+            try:
+                limit = int(parse_qs(urlparse(self.path).query).get("limit", ["8"])[0])
+            except (TypeError, ValueError):
+                limit = 8
+            self._json({"events": events_log.LOG.get(limit=limit)})
         elif path == "/api/blog/config":
             self._json({"api_url": blog.FEED.get_config(),
                         "default_api_url": blog.DEFAULT_API_URL})
