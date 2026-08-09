@@ -2564,6 +2564,43 @@ against a throwaway `Arcade` instance confirming `planewatch->flights`
 resolves `radial_open` while `menu->gameday` and the reverse
 `flights->planewatch` both stay on the untouched default.
 
+## Brightness hierarchy extended to Hangar + DETAIL, Hangar dead-zone fixed (2026-08-08)
+
+The scope's "important = brighter + bigger" language
+(`NOTABLE_GLOW_FLOOR`/`WINDOW_GLOW_FLOOR`, `max(glow, floor)`, `big=`)
+had no equivalent on the Hangar list or the normal (non-ceremonial)
+select-to-expand DETAIL card -- a MAYDAY squawk and a routine regional
+jet looked identical there, and a genuine first Hangar sighting had zero
+visual distinction beyond its text label.
+
+- **`_draw_plane_icon()` gained a `scale` param**, mirroring
+  `draw_hero_silhouette(..., scale=...)`'s existing pattern -- no new
+  drawing primitive needed, it multiplies the same nose/wing/tail/heli-dot
+  geometry that was already there.
+- **Hangar (`_frame_hangar`)**: a first sighting (`times_seen <= 1`) now
+  draws at full brightness + 1.2x scale; a repeat visitor dims to
+  `rim(HANGAR, 0.55)` at normal scale. No sweep to float above on a
+  static card, so the ordering is expressed as "important floats up from
+  a dimmed routine baseline" rather than the scope's "brighten above a
+  moving sweep."
+- **DETAIL card (normal browsing, not the ceremonial one)**: a notable
+  aircraft now gets full color + 1.1x scale; routine dims via
+  `rim(col, NOTABLE_GLOW_FLOOR)` -- reusing the scope's own constant as
+  the floor value, not inventing a second one, so "notable" here means
+  literally the brightness the scope would already show it at.
+- **Hangar spacing fix**: the fixed text rows (19/31/38/45/52) became a
+  y-cursor -- when airline was absent, 31->45 was an unexplained 14px
+  dead zone. Rows now start immediately after whatever actually drew.
+
+Explicitly untouched: `_frame_detail_ceremonial` and `PlaneWatchEngine`
+(just redesigned earlier this session) and `draw_scope_aircraft`/
+`SCOPE_CATEGORY_COLOR` (round-2 icon work, also this session).
+
+Verified: both audits clean, real service restart + `/api/frame` pulled
+clean post-restart, reviewed via a synthetic 8x-zoom PNG (Hangar
+first-sighting vs. repeat, DETAIL notable vs. routine) sent for visual
+confirmation before merge.
+
 ## Hero silhouette elevation (2026-08-08)
 
 Both hero moments -- the plane-in-window takeover (`PlaneWatchEngine`)
