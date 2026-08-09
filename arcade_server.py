@@ -144,6 +144,12 @@ class Arcade:
         # OUTGOING mode; the loop slides the incoming mode in over it.
         self._trans_from = None
         self._trans_i = 0
+        # Per-swap style override -- every mode swap uses transitions'
+        # DEFAULT_STYLE except this one narrow, explicit special case (set
+        # right below in set_mode()). Not a general per-mode config table:
+        # this is the ONLY swap in the whole project that needs to differ,
+        # so a table would be an abstraction with a single real entry.
+        self._trans_style = None
         # First-light: ramp the very first frames up out of black rather
         # than snapping to a fully-lit panel.
         self._wake_i = 0
@@ -256,6 +262,16 @@ class Arcade:
             if prev != mode and mode != "off":
                 self._trans_from = prev_frame
                 self._trans_i = 0
+                # The ONE hand-off the owner wants to feel considered
+                # rather than generic: PlaneWatchEngine's takeover handing
+                # off into flights' ceremonial Hangar detail card (see
+                # CLAUDE.md's PLANE-IN-WINDOW TAKEOVER section). Every
+                # other swap in the project -- menu<->game, planewatch's
+                # own entry, everything -- keeps the untouched default.
+                self._trans_style = (
+                    "radial_open" if prev == "planewatch" and mode == "flights"
+                    else None
+                )
 
         # Do panel HTTP outside the lock — it must never stall the render loop.
         if was_off and mode != "off":
@@ -956,7 +972,8 @@ class Arcade:
                 if frame is not None and alert_frame is None and self._trans_from:
                     if self._trans_i < TRANSITION_FRAMES:
                         p = (self._trans_i + 1) / float(TRANSITION_FRAMES)
-                        frame = transitions.blend(self._trans_from, frame, p)
+                        style = self._trans_style or transitions.DEFAULT_STYLE
+                        frame = transitions.blend(self._trans_from, frame, p, style=style)
                         self._trans_i += 1
                     else:
                         self._trans_from = None
