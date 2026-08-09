@@ -449,6 +449,11 @@
       <h2>Status</h2>
       <div class="row"><label>Mode</label><span id="st-mode" class="badge">—</span></div>
       <div class="row"><label>Weather</label><span id="st-weather" class="badge">—</span></div>
+      <div class="row"><label>Do Not Disturb</label>
+        <button id="dnd-toggle" class="badge">—</button></div>
+      <div class="hint">Suppresses the plane-in-window takeover, sports
+        celebration interrupts, and normal-priority HA banners. Severe
+        weather and urgent HA notifications always still get through.</div>
       <div class="hint" id="st-events" style="margin-top:8px;">loading recent events…</div>
     </div>
 
@@ -603,6 +608,24 @@ async function pollStatusExtras(){
 }
 pollStatusExtras();
 setInterval(pollStatusExtras, 15000);
+
+/* ---------- do not disturb ---------- */
+function renderDnd(enabled){
+  const b = $('dnd-toggle');
+  b.textContent = enabled ? 'ON — tap to disable' : 'OFF — tap to enable';
+  b.classList.toggle('on', enabled);
+  b.dataset.enabled = enabled ? '1' : '0';
+}
+async function loadDnd(){
+  try{ const j = await (await fetch('/api/dnd')).json();
+       renderDnd(!!j.enabled); }catch(_){}
+}
+$('dnd-toggle').addEventListener('click', async () => {
+  const next = $('dnd-toggle').dataset.enabled !== '1';
+  const j = await (await post('/api/dnd', {enabled: next})).json();
+  renderDnd(!!(j.enabled ?? next));
+});
+loadDnd();
 
 /* ---------- background (HA dynamic modes) ---------- */
 async function loadBackgrounds(){
