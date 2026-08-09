@@ -77,13 +77,16 @@ import notify
 # doesn't fit three lines (see NotifyEngine.frame()).
 MARQUEE_OK = {"news", "ticker", "sports", "gameday", "ambient", "flights", "notify"}
 
+# followflight's route line is fit_text()-truncated, never marqueed --
+# it has no continuous scroll of its own, so it does NOT join this set.
+
 # Modes worth auditing: the data modes and event modes, which are the ones
 # rendering externally-sourced text. Games draw their own sprites and have
 # no API strings to damage. `planewatch`/`notify` (2026-08-09) are
 # force-triggered-only takeovers -- see drive_planewatch()/drive_notify()
 # below for why they need dedicated drivers instead of the generic one.
-TEXT_MODES = ["ticker", "satellite", "flights", "sports", "news", "weather",
-              "clock", "blog", "ambient", "gameday", "planewatch", "notify"]
+TEXT_MODES = ["ticker", "satellite", "flights", "followflight", "sports", "news",
+              "weather", "clock", "blog", "ambient", "gameday", "planewatch", "notify"]
 
 # Modes with a dedicated driver instead of the generic zero-arg
 # construct-and-tick loop in drive() below.
@@ -292,8 +295,50 @@ def drive_notify(audit):
     return frames[0], collisions
 
 
+def drive_followflight(audit):
+    """FollowFlightEngine (2026-08-09's follow-a-specific-flight mode)
+    reads flights.FOLLOW_FEED, an ordinary background-poll feed -- but
+    driving it through the generic drive() loop with no callsign
+    configured would only ever exercise the NO FLIGHT SET screen, since
+    this session's real environment has nothing pre-configured and a
+    real live callsign can't be relied on to be airborne at audit time.
+    Sets `.data` directly (the same dict shape flights.FOLLOW_FEED.get()
+    returns, per its own docstring), bypassing the feed's I/O entirely --
+    same "poke internals with a real-shaped payload" approach
+    drive_planewatch() already established for a different force-fed
+    engine. Three variants cover the tri-state design: not configured,
+    configured-but-not-airborne (the honest adsb.lol empty-result case),
+    and configured-and-airborne with a full real-shaped aircraft+route."""
+    frames = [0]
+    collisions = []
+    variants = [
+        {"configured": False, "callsign": None, "aircraft": None,
+         "route": None, "age": None, "airborne": None, "err": None},
+        {"configured": True, "callsign": "UAL123", "aircraft": None,
+         "route": None, "age": 12.0, "airborne": False, "err": None},
+        {"configured": True, "callsign": "DAL1362", "aircraft": {
+            "ident": "DAL1362", "hex": "A1B2C3", "reg": "N182DN", "type": "B739",
+            "callsign": "DAL1362", "category": "A3", "alt_ft": 35000,
+            "gs_kt": 480, "track_deg": 270, "lat": 39.0, "lon": -95.0,
+            "phase": None, "vrate_fpm": 0,
+            "route": {"origin": "RDU", "dest": "LGA",
+                      "origin_city": "RALEIGH/DURHAM", "dest_city": "NEW YORK",
+                      "airline": "DELTA AIR LINES"}},
+         "route": {"origin": "RDU", "dest": "LGA",
+                   "origin_city": "RALEIGH/DURHAM", "dest_city": "NEW YORK",
+                   "airline": "DELTA AIR LINES"},
+         "age": 3.0, "airborne": True, "err": None},
+    ]
+    for i, data in enumerate(variants):
+        eng = engines.FollowFlightEngine()
+        eng.data = data
+        _snap(audit, eng, "followflight variant %d" % i, frames, collisions)
+    return frames[0], collisions
+
+
 CUSTOM_DRIVERS["planewatch"] = drive_planewatch
 CUSTOM_DRIVERS["notify"] = drive_notify
+CUSTOM_DRIVERS["followflight"] = drive_followflight
 
 
 def drive(mode, audit, ticks=60, settle=0.25):

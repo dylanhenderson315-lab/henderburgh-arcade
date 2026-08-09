@@ -171,6 +171,7 @@
       <button data-mode="ticker">📈 Ticker</button>
       <button data-mode="satellite">🛰 ISS</button>
       <button data-mode="flights">✈ Flights</button>
+      <button data-mode="followflight">🎯 Follow flight</button>
       <button data-mode="sports">🏆 Sports</button>
       <button data-mode="news">📰 News</button>
       <button data-mode="weather">🌤 Weather</button>
@@ -241,6 +242,21 @@
     <div class="hint">One shared location for all three modes — ISS pass
       predictions, nearby aircraft and the NWS weather gridpoint. Weather is
       US-only (NWS coverage).</div>
+  </div>
+
+  <div id="followcard" class="card hide">
+    <h2>Follow a flight — anywhere, by callsign</h2>
+    <div class="row"><label>Callsign</label>
+      <input type="text" id="ff-callsign" placeholder="e.g. UAL123"></div>
+    <div class="row"><button id="ff-save">Follow</button>
+      <button id="ff-clear">Stop</button>
+      <span id="ff-msg" class="badge"></span></div>
+    <div id="ff-now" class="hint"></div>
+    <div class="hint">Real flight number/ICAO callsign (airline code +
+      number, e.g. UAL123 — not the IATA form UA123), tracked anywhere
+      it's currently airborne, not just nearby. If it isn't broadcasting
+      right now the panel says so honestly instead of guessing a
+      position.</div>
   </div>
 
   <div id="sportscard" class="card hide">
@@ -610,6 +626,25 @@ $('lc-save').addEventListener('click', async () => {
   say('lc-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
 });
 
+async function loadFollow(){
+  try{ const j = await (await fetch('/api/flights/follow')).json();
+       if (j.callsign && !$('ff-callsign').matches(':focus')) $('ff-callsign').value = j.callsign;
+       $('ff-now').textContent = !j.configured ? ''
+         : (j.airborne === true
+             ? ('Airborne now' + (j.aircraft && j.aircraft.alt_ft != null
+                 ? ('  ·  ' + Math.round(j.aircraft.alt_ft) + 'ft') : ''))
+             : 'Not currently airborne'); }catch(_){}
+}
+$('ff-save').addEventListener('click', async () => {
+  const j = await (await post('/api/flights/follow', {callsign: $('ff-callsign').value})).json();
+  say('ff-msg', j.ok === false ? (j.error || 'error') : 'following', j.ok !== false);
+  loadFollow();
+});
+$('ff-clear').addEventListener('click', async () => {
+  await post('/api/flights/follow', {callsign: ''});
+  $('ff-callsign').value = ''; say('ff-msg', 'stopped'); loadFollow();
+});
+
 async function loadSports(){
   try{ const j = await (await fetch('/api/sports/config')).json();
        $('sp-leagues').value = (j.leagues || []).join(', ');
@@ -745,7 +780,7 @@ $('br-save').addEventListener('click', async () => {
   cfgTouched = 0; loadBrightness();
 });
 
-loadTicker(); loadLoc(); loadSports(); loadNews(); loadBlog(); loadBrightness();
+loadTicker(); loadLoc(); loadFollow(); loadSports(); loadNews(); loadBlog(); loadBrightness();
 setInterval(loadBrightness, 30000);
 
 /* ---------- power + modes ---------- */
@@ -779,6 +814,8 @@ function syncUI(){
   $('tickercard').classList.toggle('hide', base !== 'ticker');
   $('loccard').classList.toggle('hide',
       !['satellite','flights','weather'].includes(base));
+  $('followcard').classList.toggle('hide', base !== 'followflight');
+  if (base === 'followflight' && Date.now() - cfgTouched > 3000) loadFollow();
   $('sportscard').classList.toggle('hide', base !== 'sports');
   $('newscard').classList.toggle('hide', base !== 'news');
   $('blogcard').classList.toggle('hide', base !== 'blog');

@@ -33,6 +33,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import paneltext
 
@@ -41,6 +42,18 @@ import satellite
 
 POSITION_URL = "https://api.adsb.lol/v2/point/{lat}/{lon}/{radius_nm}"
 ROUTE_URL = "https://api.adsbdb.com/v0/callsign/{callsign}"
+# GLOBAL per-callsign lookup (2026-08-09) -- "follow a specific flight"
+# mode. Confirmed live: GET https://api.adsb.lol/v2/callsign/{callsign}
+# returns the SAME {"ac": [...], "total": N, ...} shape as POSITION_URL
+# above, using the SAME per-aircraft field names _fetch_positions() below
+# already parses -- this is the correct endpoint for "anywhere on Earth
+# right now", where POSITION_URL is deliberately bounded to RADIUS_NM of
+# home. Confirmed live that a callsign that isn't currently airborne (or
+# simply wrong) returns "ac": [] -- an honest, non-error "not currently
+# airborne" result (curl https://api.adsb.lol/v2/callsign/UAL123 ->
+# {"ac": [], "total": 0, ...}), not a bug -- rendered as such, never as a
+# guessed/stale position.
+FOLLOW_URL = "https://api.adsb.lol/v2/callsign/{callsign}"
 
 RADIUS_NM = 40                  # "in the local sky" -- roughly a 15 min drive's worth of horizon
 MAX_TRACKED = 8                 # nearest N, so the mode has a bounded, meaningful list
@@ -909,3 +922,280 @@ class FlightFeed:
 
 
 FEED = FlightFeed()
+
+
+# ---- FOLLOW A SPECIFIC FLIGHT (2026-08-09) --------------------------------
+# Owner ask, straight from competitive research on products like Mach 2:
+# "track any specific flight by number, anywhere it's currently airborne,
+# not just within the local radius." This is a genuinely separate feature
+# from the local radar scope above -- global lookup by callsign vs. local
+# radius by position -- so it gets its own config file, its own feed class,
+# and its own engine, per the owner's own explicit instruction not to
+# conflate the two.
+FOLLOW_CONFIG_PATH = Path(__file__).parent / "follow_flight_config.json"
+
+FOLLOW_REFRESH = 15.0   # flat interval, not adaptive like POSITION_REFRESH's
+                        # neighbor concept -- this is a SINGLE flight lookup,
+                        # not an up-to-8-aircraft scope, so there is no
+                        # "sky full of traffic" volume concern to adapt
+                        # against. 15-20s is plenty responsive for a wall
+                        # panel glance and keeps this feed polite to
+                        # api.adsb.lol at essentially zero real cost (one
+                        # request every 15s while the mode is actually
+                        # being viewed, same IDLE_STOP-gated lifecycle as
+                        # every other feed here).
+
+
+def load_followed_flight():
+    """The currently-followed callsign, or None if nothing is configured.
+
+    Its own small file, not folded into location_config.json -- a
+    followed callsign is NOT a location fact (that file's one unifying
+    theme, see load_airport()/load_window() above); it is closer in kind
+    to market.py's watchlist or sports.py's pinned player. Read-modify-
+    write on save (see save_followed_flight() below) even though this
+    file currently owns only one key -- CLAUDE.md's own 2026-08-09 lesson
+    (market.py/news.py/blog.py/notify.py's save_config() bug) is to build
+    that discipline in from the start rather than wait for a second key
+    to make a fresh-dict write destructive.
+    """
+    path = FOLLOW_CONFIG_PATH
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text()) or {}
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return None
+    cs = data.get("callsign")
+    if not isinstance(cs, str) or not cs.strip():
+        return None
+    return cs.strip().upper()
+
+
+def save_followed_flight(callsign):
+    """Persist (or clear, with a falsy callsign) the followed callsign.
+
+    Normalizes the same way _fetch_follow() below expects to query:
+    stripped, uppercased, spaces removed (adsb.lol callsigns are the
+    ICAO flight-number format -- airline ICAO code + number, no spaces,
+    e.g. "UAL123" -- not the IATA format ("UA123") a traveler would
+    recognize; see FollowFlightFeed's own docstring for why no IATA<->
+    ICAO translation table is built here).
+    """
+    path = FOLLOW_CONFIG_PATH
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text()) or {}
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            data = {}
+    if callsign:
+        norm = str(callsign).strip().upper().replace(" ", "")
+        if norm:
+            data["callsign"] = norm
+        else:
+            data.pop("callsign", None)
+    else:
+        data.pop("callsign", None)
+    path.write_text(json.dumps(data, indent=2))
+    return data.get("callsign")
+
+
+def _fetch_follow(callsign):
+    """One real aircraft dict (same shape _fetch_positions() emits, minus
+    the home-relative fields that don't apply -- no dist_nm/dir_deg/
+    in_window, this flight may be anywhere on Earth) or None if the
+    callsign is not currently broadcasting a position.
+
+    adsb.lol's global callsign endpoint returns the identical {"ac": [...]}
+    envelope POSITION_URL does, confirmed live -- reuses the SAME per-
+    aircraft field names _fetch_positions() already parses (_ident(),
+    _type_name(), _phase(), the same alt_baro/gs/track/category/r/hex
+    keys), not a second parsing scheme for what is the same real payload
+    shape. An empty "ac" list is a REAL, honest "not currently airborne"
+    result -- not treated as an error."""
+    url = FOLLOW_URL.format(callsign=callsign)
+    data = _get_json(url)
+    ac_list = data.get("ac") or []
+    if not ac_list:
+        return None
+    # A callsign can (rarely) match more than one currently-squawking
+    # aircraft in adsb.lol's own data (e.g. a stale/duplicate entry); the
+    # one actually reporting a real altitude is the more useful pick, but
+    # absent that, the first real entry adsb.lol returned is used as-is
+    # rather than guessing which one is "more real."
+    ac = next((a for a in ac_list if isinstance(a.get("alt_baro"), (int, float))),
+              ac_list[0])
+    alt = ac.get("alt_baro") if isinstance(ac.get("alt_baro"), (int, float)) else None
+    phase, rate = _phase(ac, alt=alt)
+    lat = ac.get("lat") if isinstance(ac.get("lat"), (int, float)) else None
+    lon = ac.get("lon") if isinstance(ac.get("lon"), (int, float)) else None
+    return {
+        "ident": _ident(ac),
+        "hex": (ac.get("hex") or "").strip().upper() or None,
+        "reg": paneltext.panel_text((ac.get("r") or "").strip()) or None,
+        "callsign": (ac.get("flight") or "").strip(),
+        "category": str(ac.get("category") or ""),
+        "type": (ac.get("t") or "").strip(),
+        "alt_ft": alt,
+        "gs_kt": ac.get("gs"),
+        "track_deg": ac.get("track"),
+        "lat": lat,
+        "lon": lon,
+        "phase": phase,
+        "vrate_fpm": rate,
+        "notable": _notable(ac, phase=phase),
+    }
+
+
+class FollowFlightFeed:
+    """Background poller for a single owner-followed flight, anywhere it's
+    currently airborne -- last-good cache, never blocks, same contract as
+    every other FEED in this project.
+
+    Deliberately its OWN class, not a second mode bolted onto FlightFeed
+    above: FlightFeed's identity is "everything within RADIUS_NM of home,
+    re-sorted by notability every refresh" -- a list. This is "one
+    specific real-world flight, wherever it is" -- a single optional
+    value, with a genuinely different honest-empty state ("not currently
+    airborne" is not the same fact as "no local traffic right now").
+    Conflating them would mean threading a special-case single-item
+    exception through every list-shaped consumer of FlightFeed.get().
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._callsign = load_followed_flight()
+        self._aircraft = None       # last-good real aircraft dict, or None
+        self._updated = 0.0
+        self._last_try = 0.0
+        self._last_read = 0.0
+        self._last_config_check = 0.0
+        self._thread = None
+        self._err = None
+        self._route_cache = {}      # callsign -> route dict or None
+
+    def set_followed(self, callsign):
+        """Owner sets (or clears, with a falsy callsign) which flight to
+        follow. Persists immediately and resets the cached aircraft so a
+        stale previous flight's position is never shown against a freshly
+        chosen callsign."""
+        norm = save_followed_flight(callsign)
+        with self._lock:
+            self._callsign = norm
+            self._aircraft = None
+            self._updated = 0.0
+            self._last_try = 0.0
+            self._err = None
+        return norm
+
+    def get(self):
+        """Returns {configured, callsign, aircraft, route, age, airborne,
+        err}. Never blocks.
+
+        `airborne` is the explicit three-state signal the owner's own
+        design spec called for: None (not configured -- nothing to look
+        up), False (configured, real lookup ran, callsign genuinely is
+        not currently broadcasting a position -- "NOT CURRENTLY AIRBORNE",
+        never a guessed/stale position), True (a real current position is
+        cached). `age` is seconds since that real position was last
+        confirmed live, same "stale but honest" convention as every other
+        feed here -- the engine can show it went stale without this feed
+        ever inventing a fresher one."""
+        now = time.time()
+        with self._lock:
+            self._last_read = now
+            callsign = self._callsign
+            aircraft = dict(self._aircraft) if self._aircraft else None
+            updated, err = self._updated, self._err
+        self._ensure_thread()
+        age = (now - updated) if updated else None
+        if callsign is None:
+            airborne = None
+        else:
+            airborne = aircraft is not None
+        return {
+            "configured": callsign is not None,
+            "callsign": callsign,
+            "aircraft": aircraft,
+            "route": (aircraft or {}).get("route") if aircraft else None,
+            "age": age,
+            "airborne": airborne,
+            "err": err,
+        }
+
+    # ---- polling -----------------------------------------------------
+    def _ensure_thread(self):
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+
+    def _loop(self):
+        while True:
+            with self._lock:
+                idle = time.time() - self._last_read
+            if idle > IDLE_STOP:
+                return
+            self._maybe_reload_config()
+            self._refresh_once()
+            time.sleep(2.0)
+
+    def _maybe_reload_config(self):
+        # Picks up a callsign set via /api/flights/follow on another
+        # thread/process (e.g. the control panel), same periodic-reload
+        # cost class as FlightFeed._maybe_reload_location() above --
+        # cheap local file read, not new network I/O.
+        now = time.time()
+        if now - self._last_config_check < CONFIG_CHECK:
+            return
+        self._last_config_check = now
+        cs = load_followed_flight()
+        with self._lock:
+            if cs != self._callsign:
+                self._callsign = cs
+                self._aircraft = None
+                self._updated = 0.0
+
+    def _refresh_once(self):
+        now = time.time()
+        with self._lock:
+            if now - self._last_try < FOLLOW_REFRESH:
+                return
+            self._last_try = now
+            callsign = self._callsign
+
+        if not callsign:
+            with self._lock:
+                self._aircraft = None
+                self._updated = time.time()
+                self._err = None
+            return
+
+        try:
+            ac = _fetch_follow(callsign)
+        except Exception as e:                        # noqa: BLE001 - never die
+            with self._lock:
+                self._err = f"{type(e).__name__}"
+            return
+
+        if ac is not None:
+            cs = ac["callsign"] or callsign
+            if cs in self._route_cache:
+                ac["route"] = self._route_cache[cs]
+            else:
+                try:
+                    route = _fetch_route(cs)
+                except Exception:                      # noqa: BLE001
+                    route = None
+                self._route_cache[cs] = route
+                ac["route"] = route
+
+        with self._lock:
+            self._aircraft = ac
+            self._updated = time.time()
+            self._err = None
+
+
+FOLLOW_FEED = FollowFlightFeed()
