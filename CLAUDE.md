@@ -2870,6 +2870,57 @@ bug in the endpoint.
 Verified: both audits clean, real service restart + `/api/frame` pulled
 clean post-restart.
 
+## Persistent recent-events log (2026-08-09)
+
+Owner's own words: "A simple recent events / log view (last planes that
+came through the window, last big sports moments, last HA notifications).
+People like being able to look back." Built by a background agent,
+independently re-verified (audits, real live restart, real merge) before
+trusting it, same discipline as every other delegated build this session.
+
+`events_log.py` (new) is a persistent JSON-lines log, same proven shape
+as `hangar.py`: lock-protected in-memory list, lazy-loaded, count-bounded
+(`EVENTS_MAX_ENTRIES = 500`, reusing `hangar.py`'s exact eviction
+pattern — already proven correct at the boundary by `hangar_audit.py`
+this same session). `record(kind, summary)` takes an ALREADY-FOLDED
+summary string — same "fold at the boundary, caller folds" discipline
+every feed in this project follows; the module itself never folds.
+
+Three real wiring points, each recording at the exact place the real
+text is already finalized, not re-derived:
+- `flights.py` — one entry per real aircraft that newly enters the
+  configured window (inside the real window-entry diff block).
+- `engines.py`'s `BigMomentSource._set_big_moment()` — gated to
+  `system == SYSTEM_SPORTS` only (this same method also fires for
+  flights/satellite moments; the owner's ask was specifically "big
+  sports moments").
+- `arcade_server.py`'s `/api/notify` handler — right after the existing
+  `paneltext.panel_text()` fold, before `trigger_notify()`.
+
+`EventsLogEngine` (new, `ENGINES["events"]`) is a standalone engine, not
+bolted onto an existing mode — justified in its own docstring: this log
+spans three genuinely separate systems (flights/sports/home automation)
+that don't otherwise share an engine, unlike THE HANGAR (inherently
+about flights) or the ATC log (inherently about flights), so a
+standalone engine + its own menu tile is the honest structural fit, same
+category of decision as THE HANGAR/ATC log both making that same choice
+for their own single-system logs. Two-line rows (kind+age, then
+summary), 3 per page, real relative-age text via
+`FlightEngine._fmt_age_long` (reused, not reimplemented), honest
+"NO EVENTS / YET" empty state.
+
+`render_audit.py` gained a `drive_events` custom driver (the real log is
+honestly empty on a fresh device, so the generic sweep would only ever
+exercise the empty-state fallback) — injects real-shaped synthetic
+entries directly onto the engine's own `.entries`, never touching the
+real `events_log.jsonl` file.
+
+Verified: both audits clean (confirmed via `git status` that no stray
+`events_log.jsonl` was created by any audit run), real service restart,
+real mode-switch to `events` via `/api/mode/events` and a real `/api/frame`
+pull showing the honest empty state (nothing has been logged on this
+device yet — the wiring only just shipped).
+
 ## Storm-tracking mini-scope + favorite aircraft (2026-08-09)
 
 **Storm mini-scope**: weather.py's `_fetch_alerts()` now parses NWS's real
