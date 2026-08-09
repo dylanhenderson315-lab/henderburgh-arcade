@@ -2531,6 +2531,37 @@ MMA-name truncation warnings only), `fold_audit.py` 0 feeds not folding,
 real service restart + `/api/frame` pulled clean post-restart. Reviewed
 via synthetic 8x-zoom PNG sent for visual confirmation before commit.
 
+## Hero silhouette elevation (2026-08-08)
+
+Both hero moments -- the plane-in-window takeover (`PlaneWatchEngine`)
+and the ceremonial Hangar detail card (`FlightEngine._frame_detail_ceremonial`)
+-- got more visual mass and a subtle sense of life, per the owner's
+explicit "these two moments carry almost all the emotional value" spec.
+
+- **Takeover screen**: hero silhouette scale 1.1 -> 1.25. To let the
+  bigger silhouette clear the ident text above it instead of just eating
+  margin, `cy` moved 34->35 and the ident row moved y=11->y=9 (tighter
+  vertical rhythm, not just a bigger shape floating in the same space).
+- **Hangar ceremonial card**: hero silhouette scale 0.8 -> 0.9 -- a
+  smaller bump than the takeover's own, deliberately: this card's
+  vertical budget is tighter (header + type-name row + up to 3 more
+  status/age/airline rows below), so it doesn't have the same room to
+  grow without crowding the type-name row at y=38.
+- **Breathing glow**: both hero silhouettes now pulse brightness
+  ±6% (`0.94 + 0.06*sin(ticks*0.05)`, via `rim()`) -- slow and subtle by
+  design, meant to read as "alive," not as flicker or a distraction from
+  the ident/type text. Same technique on both cards for a consistent
+  feel across the two hero moments, per the "ruthless consistency of
+  language" principle.
+
+Verified: `render_audit.py` 0 modes failed, `fold_audit.py` 0 feeds not
+folding, real service restart + `/api/frame` pulled clean. Both cards
+have zero coverage in the normal `render_audit.py` sweep (force-triggered
+only, same as the round-1 icon work), so reviewed via a direct
+force-injected synthetic render (airliner + helicopter, both cards) sent
+as an 8x-zoom PNG for visual confirmation before commit -- confirmed no
+text collisions at the new scale on either card.
+
 ## Known issues / in-progress work
 
 ### Panel lockup hazard — RESOLVED 2026-07-30, but the rule stands

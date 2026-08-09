@@ -7946,9 +7946,16 @@ class FlightEngine(Browsable, BigMomentSource):
 
         # Hero silhouette -- same classification as every other icon in
         # this project (_ac_kind reads live category/type), new filled
-        # drawing routine, new bigger scale.
+        # drawing routine. Scale nudged 0.8 -> 0.9 (hero elevation pass,
+        # 2026-08-08) for more visual mass without crowding the type-name
+        # row at y=38 -- this card's vertical budget is tighter than the
+        # takeover screen's (header + 3 more text rows below), so it gets a
+        # smaller bump than PlaneWatchEngine's own hero, not the same one.
+        # Same subtle breathing glow as the takeover screen for a
+        # consistent "this is alive" feel across both hero moments.
         y = 27
-        draw_hero_silhouette(buf, WIDTH // 2, y, self._ac_kind(ac), col, scale=0.8)
+        breathe = 0.94 + 0.06 * math.sin(self.ticks * 0.05)
+        draw_hero_silhouette(buf, WIDTH // 2, y, self._ac_kind(ac), rim(col, breathe), scale=0.9)
 
         is_first = bool(entry and (entry.get("times_seen") or 1) <= 1)
         if is_first:
@@ -8262,10 +8269,22 @@ class PlaneWatchEngine:
             entry = next((e for e in hangar.LOG.get() if e.get("reg") == reg), None)
         is_first = bool(entry and (entry.get("times_seen") or 1) <= 1)
 
-        cy = 34
+        cy = 35
         if is_first:
             draw_first_sighting_ring(buf, WIDTH // 2, cy, self.RING, phase=self.ticks * 0.08)
-        draw_hero_silhouette(buf, WIDTH // 2, cy, kind, col, scale=1.1)
+        # BREATHING GLOW (hero elevation, 2026-08-08): a slow +-6% brightness
+        # pulse on the silhouette itself -- the one thing that told this card
+        # apart from a static printed icon was motion, and every other
+        # premium moment in this project already has some (radar sweep
+        # backdrop, first-sighting ring, transitions). Kept subtle (0.94-1.0,
+        # never brightens past the source color) so it reads as "alive", not
+        # as flicker or a distraction from the header/ident text.
+        breathe = 0.94 + 0.06 * math.sin(self.ticks * 0.05)
+        hero_col = rim(col, breathe)
+        # Scale bumped 1.1 -> 1.25 for more visual mass, and cy/ident row
+        # tightened (see below) so the bigger silhouette still clears the
+        # ident text above it instead of just leaving more empty margin.
+        draw_hero_silhouette(buf, WIDTH // 2, cy, kind, hero_col, scale=1.25)
 
         # NOTABLE STACKING (2026-08-08 refresh): a window aircraft that is
         # ALSO notable (heavy/helicopter/MAYDAY/etc, see
@@ -8281,7 +8300,7 @@ class PlaneWatchEngine:
         header = f"IN VIEW: {note[0]}" if note else "IN VIEW"
         draw_text_centered(buf, 3, fit_text(header, WIDTH - 4), self.ACCENT)
         ident = reg or (ac.get("ident") or "UNKNOWN")
-        draw_text_centered(buf, 11, fit_text(ident, WIDTH - 4), (255, 255, 255))
+        draw_text_centered(buf, 9, fit_text(ident, WIDTH - 4), (255, 255, 255))
 
         typ = flights._type_name(ac.get("type")) or ""
         if typ:
