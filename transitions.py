@@ -113,12 +113,52 @@ def iris_open(old, new, p):
     return bytes(out)
 
 
+def radial_open(old, new, p):
+    """Soft radial reveal from the panel's centre outward -- a circular
+    iris opening across BOTH axes, not just the horizontal band
+    `iris_open` sweeps. Reserved for exactly one hand-off in the whole
+    project: PlaneWatchEngine's takeover landing on flights' ceremonial
+    Hangar detail card (see CLAUDE.md's PLANE-IN-WINDOW TAKEOVER section)
+    -- the owner's own "carries almost all the emotional value" moment,
+    deliberately distinct from every ordinary `push_up` mode swap.
+
+    Same cost class as `iris_open`/`wipe_right`: one slice-pair per row,
+    the per-row bounds computed from a circle equation instead of a
+    uniform column -- still zero per-pixel arithmetic, still a pure
+    64-row Python loop over byte slices (identical shape to the two
+    existing per-row styles already in this file, not a new pattern)."""
+    k = _ease(p)
+    if k <= 0.0:
+        return old
+    if k >= 1.0:
+        return new
+    cx, cy = WIDTH / 2.0, HEIGHT / 2.0
+    max_r = (cx * cx + cy * cy) ** 0.5   # centre-to-corner, so k=1 clears every row
+    r = k * max_r
+    out = bytearray(FRAME)
+    for y in range(HEIGHT):
+        o = y * ROW
+        dy = (y + 0.5) - cy
+        if dy * dy >= r * r:
+            out[o:o + ROW] = old[o:o + ROW]
+            continue
+        dx = (r * r - dy * dy) ** 0.5
+        lo = max(0, int(cx - dx))
+        hi = min(WIDTH, int(cx + dx))
+        lo_b, hi_b = lo * 3, hi * 3
+        out[o:o + lo_b] = old[o:o + lo_b]
+        out[o + lo_b:o + hi_b] = new[o + lo_b:o + hi_b]
+        out[o + hi_b:o + ROW] = old[o + hi_b:o + ROW]
+    return bytes(out)
+
+
 STYLES = {
     "push_up": push_up,
     "push_down": push_down,
     "wipe_right": wipe_right,
     "fade": fade,
     "iris_open": iris_open,
+    "radial_open": radial_open,
 }
 DEFAULT_STYLE = "push_up"
 
