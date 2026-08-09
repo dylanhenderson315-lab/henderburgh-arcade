@@ -2592,14 +2592,70 @@ visual distinction beyond its text label.
   y-cursor -- when airline was absent, 31->45 was an unexplained 14px
   dead zone. Rows now start immediately after whatever actually drew.
 
-Explicitly untouched: `_frame_detail_ceremonial` and `PlaneWatchEngine`
-(just redesigned earlier this session) and `draw_scope_aircraft`/
-`SCOPE_CATEGORY_COLOR` (round-2 icon work, also this session).
+Explicitly untouched at the time: `_frame_detail_ceremonial` and
+`PlaneWatchEngine` (just redesigned earlier this session) and
+`draw_scope_aircraft`/`SCOPE_CATEGORY_COLOR` (round-2 icon work, also
+this session). NOTE: `_frame_hangar`'s icon call was later swapped from
+`_draw_plane_icon` to `draw_hero_silhouette` -- see "Hero silhouette
+shape redesign" below -- so this section's Hangar icon description is
+superseded; the brightness/scale hierarchy logic here is unaffected.
 
 Verified: both audits clean, real service restart + `/api/frame` pulled
 clean post-restart, reviewed via a synthetic 8x-zoom PNG (Hangar
 first-sighting vs. repeat, DETAIL notable vs. routine) sent for visual
 confirmation before merge.
+
+## Hero silhouette shape redesign (2026-08-09)
+
+`draw_hero_silhouette()` (round 1, previous section) was a single filled
+dart per kind -- nose to swept wingtips to tail, varying only in overall
+proportions. The owner's real-world test ("a plane-obsessed person
+should be able to tell the category from the silhouette alone") failed
+against it: all three fixed-wing kinds read as the same diamond at
+different sizes, and the helicopter's bare stroked rotor ring read as
+noise, not a rotor. Three iterative rounds (each reviewed via synthetic
+PNG before the next):
+
+- **Fixed-wing kinds are now TWO separate filled shapes**, not one: a
+  real fuselage hexagon (nose -> shoulders -> tail) plus a distinct pair
+  of swept wing triangles attached at the shoulders. `_HERO_FIXED_WING`
+  holds 7 params per kind (nose/tail length, fuselage half-width, wing
+  mount y-offset, wing span, wing sweep, wing chord) -- three independent
+  axes of real variation, not one overall-size knob.
+- **Airliner vs. bizjet were pushed apart on TWO axes in the SAME
+  direction** (round 3, after round 2 still read too close): airliner
+  got the LEAST sweep (wings closer to perpendicular, a wide/composed
+  read) and the longest body; bizjet got the MOST sweep by a wide margin
+  (a real needle angle) and a much shorter/slimmer body. Length and sweep
+  moving together instead of partially cancelling is what actually
+  separated them -- confirmed against real logged Hangar entries (a real
+  757, a real Citation-family jet) side by side, not just synthetic
+  shapes.
+- **GA got a thicker fuselage and the heaviest wing chord of the three**
+  (round 3) so it reads as compact-and-solid rather than "the thin one",
+  with wings mounted forward and almost no sweep for the
+  stubby-utilitarian silhouette a high-wing GA aircraft actually has.
+- **Helicopter got its own language entirely**: compact filled body +
+  thin tapered tail boom (asymmetric front/back mass no fixed-wing dart
+  has) + NO wings at all, under a real filled rotor disc (dim fill +
+  full-color rim + two blade lines) replacing the old bare stroked ring.
+  Confirmed by the owner as "the clear winner ... no ambiguity."
+- Airliner's total nose+tail length (25.5 units) is ~1.46x bizjet's
+  (17.5 units) at the shape-definition level -- a ratio, not an absolute
+  pixel count -- so the owner's "airliner should keep more mass than
+  bizjet at final card size" requirement holds automatically at whatever
+  scale factor a given card uses, without per-card tuning.
+- Since all three call sites (Hangar, ceremonial DETAIL, PlaneWatch
+  takeover) already called the shared `draw_hero_silhouette()` function
+  (Hangar was switched to it in the "Brightness hierarchy" work above,
+  same day), this redesign required NO call-site changes -- only the
+  shape geometry inside the one shared function.
+
+Verified: both audits clean every round, real service restart +
+`/api/frame` pulled clean post-restart on the final round, real logged
+Hangar entries (one of each kind: airliner, bizjet, GA, helicopter)
+rendered and sent as a synthetic PNG for visual confirmation before each
+iteration, final approval given by the owner before commit.
 
 ## Hero silhouette elevation (2026-08-08)
 

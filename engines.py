@@ -1748,55 +1748,131 @@ def _fill_poly(buf, pts, color):
                 put_px(buf, x, y, color)
 
 
+# Hero-silhouette proportions, round 2 (2026-08-09) -- round 1 was a
+# single nose/wingtip/tail dart, which read as one generic diamond
+# regardless of kind (the owner's own test: "a plane-obsessed person
+# should be able to tell the category from the silhouette alone" failed).
+# Fixed-wing kinds are now TWO separate shapes -- a real fuselage body
+# plus a distinct pair of swept wings attached mid-body -- so the eye
+# reads "body with wings" instead of "kite outline", and the four kinds
+# differ on THREE independent axes (fuselage length/width, wing
+# span/sweep, wing chord/thickness) instead of one (overall size).
+# (nose_fy, tail_fy, fuse_hw, wing_y, wing_span, wing_sweep, wing_chord)
+_HERO_FIXED_WING = {
+    # ROUND 3 (2026-08-09): owner feedback was that airliner/bizjet were
+    # still too close and all three kinds needed more filled mass. Pushed
+    # the two axes that actually read at a glance HARDER apart instead of
+    # nudging every number a little: airliner now has the LEAST sweep
+    # (wings closer to perpendicular -- the big, composed, "wide cross"
+    # read) and the longest body; bizjet now has the MOST sweep by a wide
+    # margin (a real needle/dart angle) and a much shorter, slimmer body
+    # -- length AND sweep both move in the SAME distinguishing direction
+    # instead of partially cancelling each other out.
+    SCOPE_ICON_AIRLINER: (16.0, 9.5, 1.7, 1.5, 13.0, 4.5, 3.2),
+    SCOPE_ICON_BIZJET:   (11.0, 6.5, 1.0, 0.0, 6.5, 8.5, 1.5),
+    # Short, stubby fuselage, now noticeably THICKER (fuse_hw 1.6->2.1)
+    # and with the heaviest wing chord of the three (4.0) so it holds its
+    # own as compact-and-solid rather than reading as "smaller and
+    # thinner" next to the other two -- wings mounted forward (high-wing
+    # GA read) with almost no sweep, the stubby-utilitarian shape.
+    SCOPE_ICON_GA:        (9.0, 6.5, 2.1, -1.0, 8.5, 0.3, 4.0),
+}
+
+
 def draw_hero_silhouette(buf, cx, cy, kind, color, scale=1.0):
-    """Large FILLED silhouette for the plane-in-window takeover screen and
-    the ceremonial Hangar detail card -- hero-scale, always facing "up"
-    (this is a portrait/showcase treatment, not a heading-oriented radar
-    icon; heading isn't the point here). Dispatches on the SAME
-    `FlightEngine._ac_kind()`/`_hangar_kind()` buckets used everywhere
-    else, so the shape choice is consistent with the scope/DETAIL/Hangar
-    icons -- just filled and much bigger."""
+    """Large FILLED silhouette for the plane-in-window takeover screen,
+    the ceremonial Hangar detail card, and (2026-08-09) the Hangar list
+    -- hero-scale, always facing "up" (portrait/showcase treatment, not
+    a heading-oriented radar icon; heading isn't the point here).
+    Dispatches on the SAME `FlightEngine._ac_kind()`/`_hangar_kind()`
+    buckets used everywhere else, so the shape choice is consistent with
+    the scope/DETAIL/Hangar icons -- just filled, bigger, and (round 2)
+    genuinely different in silhouette per kind, not just scale."""
     s = scale
     if kind == SCOPE_ICON_HELI:
-        # Fuselage blob (a small filled oval) + a thin tail boom + a
-        # rotor disk outline overhead -- the one hero shape that stays
-        # unmistakable at any scale, same reasoning as the small scope
-        # icon's own helicopter treatment.
-        rx, ry = 7 * s, 5 * s
-        pts = []
-        for i in range(16):
-            a = i / 16 * 2 * math.pi
-            pts.append((cx + rx * math.cos(a), cy + 4 * s + ry * math.sin(a)))
+        # A helicopter gets its OWN language, not a smaller fixed-wing
+        # shape: a compact filled body + thin tail boom (no wings at
+        # all) UNDER a real filled rotor disc (round 2 -- was a bare
+        # stroked ring before, which read as noise/a dotted arc). The
+        # disc is filled dim (rim(color, 0.5)) so it reads as a spinning
+        # blur distinct from the solid-color body, with a crisp full-
+        # color rim on top for a clean edge, and two thin blade lines
+        # across it in full color so it unmistakably reads as ROTOR
+        # BLADES, not a generic dot/halo.
+        body_cy = cy + 8 * s
+        rx, ry = 4.2 * s, 5.5 * s
+        pts = [(cx + rx * math.cos(i / 18 * 2 * math.pi),
+                body_cy + ry * math.sin(i / 18 * 2 * math.pi)) for i in range(18)]
         _fill_poly(buf, pts, color)
-        for dy in range(int(-16 * s), int(-4 * s)):
-            put_px(buf, int(round(cx)), int(round(cy + dy)), color)
-        for i in range(20):
-            a = i / 20 * 2 * math.pi
-            put_px(buf, int(round(cx + 15 * s * math.cos(a))),
-                   int(round(cy - 16 * s + 4 * s * math.sin(a))), rim(color, 0.5))
-        for dx in range(int(-3 * s), int(3 * s) + 1):
-            put_px(buf, int(round(cx + dx)), int(round(cy + 9 * s)), color)
+        # Tail boom: a thin filled taper from the body down to a small
+        # fin -- gives the silhouette a clear "front" (bulk) vs "tail"
+        # (thin) asymmetry a fixed-wing dart never has.
+        boom_w0, boom_w1 = 1.4 * s, 0.5 * s
+        boom_y0, boom_y1 = body_cy + ry * 0.7, body_cy + ry * 0.7 + 8.5 * s
+        _fill_poly(buf, [(cx - boom_w0, boom_y0), (cx + boom_w0, boom_y0),
+                         (cx + boom_w1, boom_y1), (cx - boom_w1, boom_y1)], color)
+        _fill_poly(buf, [(cx, boom_y1 - 1.5 * s), (cx + 2.4 * s, boom_y1 + 1.5 * s),
+                         (cx - 2.4 * s, boom_y1 + 1.5 * s)], color)
+        # Mast: thin line from body up to the rotor hub.
+        mast_top = cy - 13 * s
+        for dy in range(int(mast_top - body_cy), int(-ry * 0.5)):
+            put_px(buf, int(round(cx)), int(round(body_cy + dy)), color)
+        # Rotor disc: filled dim circle, full-color rim, two blade lines.
+        rr = 10.5 * s
+        rcy = mast_top
+        dim = rim(color, 0.5)
+        for dy in range(int(-rr), int(rr) + 1):
+            half = (rr * rr - dy * dy) ** 0.5 if rr * rr > dy * dy else 0
+            x0, x1 = int(round(cx - half)), int(round(cx + half))
+            for x in range(x0, x1 + 1):
+                put_px(buf, x, int(round(rcy + dy)), dim)
+        for i in range(24):
+            a = i / 24 * 2 * math.pi
+            put_px(buf, int(round(cx + rr * math.cos(a))),
+                   int(round(rcy + rr * math.sin(a))), color)
+        for d in range(int(-rr), int(rr) + 1):
+            put_px(buf, int(round(cx + d)), int(round(rcy)), color)
+            put_px(buf, int(round(cx)), int(round(rcy + d)), color)
         return
 
-    # Fixed-wing kinds: one filled dart (nose to swept wingtips to tail),
-    # width/length varying per kind -- the same real, deliberate
-    # proportion difference the small scope icon uses, just filled solid
-    # instead of stroked.
-    nose_fy, wing_fy, tail_fx = {
-        SCOPE_ICON_AIRLINER: (16.0, 11.0, 9.0),
-        SCOPE_ICON_BIZJET:   (15.0, 7.0, 8.0),
-        SCOPE_ICON_GA:       (13.0, 4.5, 7.0),
-    }.get(kind, (16.0, 11.0, 9.0))
-    nose_fy, wing_fy, tail_fx = nose_fy * s, wing_fy * s, tail_fx * s
+    # Fixed-wing kinds: a real fuselage hexagon (nose -> shoulders -> tail)
+    # PLUS a separate pair of swept wing triangles attached at the
+    # fuselage's shoulders -- two shapes reading as "body with wings",
+    # not one diamond outline.
+    nose_fy, tail_fy, fuse_hw, wing_y, wing_span, wing_sweep, wing_chord = (
+        _HERO_FIXED_WING.get(kind, _HERO_FIXED_WING[SCOPE_ICON_AIRLINER]))
+    nose_fy, tail_fy, fuse_hw = nose_fy * s, tail_fy * s, fuse_hw * s
+    wing_y, wing_span, wing_sweep, wing_chord = (
+        wing_y * s, wing_span * s, wing_sweep * s, wing_chord * s)
+
     nose = (cx, cy - nose_fy)
-    wing_l = (cx - wing_fy, cy + nose_fy * 0.15)
-    wing_r = (cx + wing_fy, cy + nose_fy * 0.15)
-    tail = (cx, cy + tail_fx)
-    _fill_poly(buf, [nose, wing_r, tail, wing_l], color)
-    # Small tailplane, its own thin filled triangle -- reads as a tail
-    # fin without needing a whole second silhouette family.
-    tail_l = (cx - wing_fy * 0.35, cy + tail_fx * 0.7)
-    tail_r = (cx + wing_fy * 0.35, cy + tail_fx * 0.7)
+    tail = (cx, cy + tail_fy)
+    shoulder_y = cy - nose_fy * 0.35
+    tail_shoulder_y = cy + tail_fy * 0.55
+    fuse_pts = [nose,
+                (cx + fuse_hw, shoulder_y),
+                (cx + fuse_hw * 0.65, tail_shoulder_y),
+                tail,
+                (cx - fuse_hw * 0.65, tail_shoulder_y),
+                (cx - fuse_hw, shoulder_y)]
+    _fill_poly(buf, fuse_pts, color)
+
+    # Wings: swept triangles, root at the fuselage shoulder, tip out and
+    # aft by `wing_sweep` -- span/sweep/chord all vary per kind (see
+    # _HERO_FIXED_WING), so an airliner's wide moderate-sweep wing, a
+    # bizjet's narrow needle-sweep wing, and a GA's short near-straight
+    # THICK wing are visibly different shapes, not just different sizes.
+    wy = cy + wing_y
+    for side in (1, -1):
+        root_top = (cx + side * fuse_hw * 0.9, wy - wing_chord * 0.4)
+        root_bot = (cx + side * fuse_hw * 0.9, wy + wing_chord * 0.6)
+        tip = (cx + side * (fuse_hw * 0.9 + wing_span), wy + wing_sweep)
+        _fill_poly(buf, [root_top, tip, root_bot], color)
+
+    # Small tailplane -- its own thin filled triangle at the tail
+    # shoulders, kept from round 1 (already reads fine, untouched).
+    tail_l = (cx - fuse_hw * 1.3, tail_shoulder_y)
+    tail_r = (cx + fuse_hw * 1.3, tail_shoulder_y)
     _fill_poly(buf, [tail, tail_r, tail_l], color)
 
 
@@ -7575,25 +7651,32 @@ class FlightEngine(Browsable, BigMomentSource):
         times = e.get("times_seen") or 1
         first_sighting = times <= 1
         icon_col = self.HANGAR if first_sighting else rim(self.HANGAR, 0.55)
-        icon_scale = 1.2 if first_sighting else 1.0
+        icon_scale = 0.95 if first_sighting else 0.85
 
-        # Static, non-rotating sprite -- owner decision #3: the Hangar is
-        # browsed one entry at a time (same interaction pattern as the
-        # flight DETAIL card, never more than one sprite drawn per
-        # frame), so it's safe to reuse THAT card's 3-stroke budget
-        # (`_draw_plane_icon`, one fuselage line + one wing line + one
-        # tailplane line + a nose pip) rather than the radar scope's
-        # tighter 2-stroke budget -- the same "only one draws per frame"
-        # reasoning that already makes the DETAIL card safely thicker
-        # than the scope. `heading_deg=None` reuses that method's
-        # existing fixed "up" orientation + dim uncertainty ring, since a
-        # persisted Hangar entry has no live heading to draw -- no new
-        # static-bitmap code path needed. Kind comes from `_hangar_kind()`
-        # (owner decision #2's real-seeded lookup table), falling back to
-        # GA for anything unmatched (owner decision #1) rather than a
-        # distinct "unknown" mark.
-        self._draw_plane_icon(buf, WIDTH // 2, 19, None, icon_col,
-                              kind=self._hangar_kind(e.get("type")), scale=icon_scale)
+        # HERO TREATMENT (2026-08-08, round 2): this used to call
+        # `_draw_plane_icon`, the thin STROKED sprite (single fuselage
+        # line + wing line + tail line, a dotted ring for the
+        # heading-unknown case) built for the busy radar scope's tight
+        # pixel budget. On a card where exactly one aircraft draws per
+        # frame, that read as a weak glyph next to a wall of text -- the
+        # owner's own complaint. Switched to `draw_hero_silhouette`, the
+        # SAME filled, per-kind-proportioned shape the plane-in-window
+        # takeover and the ceremonial detail card already use (heli gets
+        # a real filled fuselage + rotor disc, not a dotted arc; fixed-
+        # wing kinds get a solid dart with real wing mass, not a cross).
+        # `cy=19`/scale 0.85-0.95 sized so every kind's real span (nose to
+        # tail, or rotor-top to fuselage-bottom for the heli) lands at
+        # ~19-24px -- the owner's requested 18-24px band -- while
+        # clearing the header rule above and the text rows below with
+        # real margin. No heading data persists
+        # in a Hangar entry, so -- same as the silhouette's own
+        # design -- it's always shown facing "up", a portrait/showcase
+        # treatment rather than a heading-oriented radar icon.
+        cy = 19
+        if first_sighting:
+            draw_first_sighting_ring(buf, WIDTH // 2, cy, self.HANGAR, phase=self.ticks * 0.08)
+        draw_hero_silhouette(buf, WIDTH // 2, cy, self._hangar_kind(e.get("type")),
+                             icon_col, scale=icon_scale)
 
         # SPACING (2026-08-08): a Y-CURSOR replaces the old fixed rows
         # (19/31/38/45/52) -- when airline was absent, 31->45 was a real
@@ -7601,10 +7684,10 @@ class FlightEngine(Browsable, BigMomentSource):
         # trap CLAUDE.md's own docstring on _frame_detail_ceremonial
         # warns about. Each row now starts immediately after whatever
         # actually drew before it, not a guessed advance amount. The
-        # bigger first-sighting icon (scale 1.2) reaches a little further
-        # than the old fixed budget assumed, so the cursor starts a touch
-        # lower to clear it rather than risking a collision.
-        y = 30 if not first_sighting else 32
+        # bigger hero silhouette (up to ~24px tall, cy=19) reaches
+        # further than the old thin icon did, so the cursor starts lower
+        # to clear it rather than risking a collision.
+        y = 30
 
         # Real, readable type name (flights.ICAO_TYPE_NAMES -- same
         # static reference table the DETAIL card already uses), falling
