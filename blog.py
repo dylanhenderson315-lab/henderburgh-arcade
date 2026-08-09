@@ -81,7 +81,18 @@ def load_config():
 
 
 def save_config(api_url):
-    CONFIG_PATH.write_text(json.dumps({"api_url": api_url}, indent=2))
+    """Read-modify-write, not a fresh dict -- same preemptive fix as
+    market.py/news.py/notify.py's save_config (2026-08-09): a fresh-dict
+    save is the exact bug shape that has already wiped a sibling key in
+    location_config.json/sports_config.json twice this project's life."""
+    data = {}
+    if CONFIG_PATH.exists():
+        try:
+            data = json.loads(CONFIG_PATH.read_text()) or {}
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+            data = {}
+    data["api_url"] = api_url
+    CONFIG_PATH.write_text(json.dumps(data, indent=2))
 
 
 def _fetch_posts(api_url):

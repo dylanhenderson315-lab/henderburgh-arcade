@@ -80,8 +80,21 @@ def load_config():
 
 
 def save_config(crypto, stocks):
-    CONFIG_PATH.write_text(json.dumps(
-        {"crypto": list(crypto), "stocks": list(stocks)}, indent=2))
+    """Read-modify-write, not a fresh dict -- this file has one owner and
+    one key-set today, but a fresh-dict save is the exact shape of bug
+    that has already silently wiped a sibling key in location_config.json
+    and sports_config.json twice this project's life. Preemptive, not
+    reactive: cheap now, expensive to discover after this file grows a
+    second key."""
+    data = {}
+    if CONFIG_PATH.exists():
+        try:
+            data = json.loads(CONFIG_PATH.read_text()) or {}
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+            data = {}
+    data["crypto"] = list(crypto)
+    data["stocks"] = list(stocks)
+    CONFIG_PATH.write_text(json.dumps(data, indent=2))
 
 
 def _fetch_crypto(symbols):

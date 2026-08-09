@@ -83,8 +83,19 @@ def load_config():
 
 
 def save_config(feed_url, label):
-    CONFIG_PATH.write_text(json.dumps(
-        {"feed_url": feed_url, "label": label}, indent=2))
+    """Read-modify-write, not a fresh dict -- same preemptive fix as
+    market.py/blog.py/notify.py's save_config (2026-08-09): a fresh-dict
+    save is the exact bug shape that has already wiped a sibling key in
+    location_config.json/sports_config.json twice this project's life."""
+    data = {}
+    if CONFIG_PATH.exists():
+        try:
+            data = json.loads(CONFIG_PATH.read_text()) or {}
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+            data = {}
+    data["feed_url"] = feed_url
+    data["label"] = label
+    CONFIG_PATH.write_text(json.dumps(data, indent=2))
 
 
 def _fetch_headlines(feed_url):

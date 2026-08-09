@@ -177,6 +177,69 @@ def main():
     else:
         print("  %-28s skipped (no tennis today)" % "sports tennis match")
 
+    # ---- weather (2026-08-09) -- added after a gap audit found weather.py
+    # had NO coverage here at all despite folding city/state/textDescription/
+    # event/headline/areaDesc inline in its own fetch functions. The severe
+    # alert path (event/headline/areaDesc) is exactly the kind of field a
+    # real NWS alert can put a curly quote or em dash into. Real live
+    # payloads, canary-injected, same as every parser above -- with
+    # `_get_json` monkeypatched (not the network call) so the injected
+    # payload reaches the real boundary code, not a synthetic dict shaped
+    # by guesswork.
+    import weather
+    _real_get_json = weather._get_json
+
+    def _mock_get_json(seq):
+        it = iter(seq)
+        return lambda url: next(it)
+
+    obs_raw = _real_get_json("https://api.weather.gov/stations/KMYR/observations/latest")
+    weather._get_json = _mock_get_json([inject(obs_raw)])
+    try:
+        bad += check("weather observation",
+                     lambda: weather._read_observation("KMYR"),
+                     ignore_paths=("station",))
+    finally:
+        weather._get_json = _real_get_json
+
+    alerts_raw = _real_get_json(weather.ALERTS_URL.format(lat=34.0, lon=-81.0))
+    weather._get_json = _mock_get_json([inject(alerts_raw)])
+    try:
+        if (alerts_raw.get("features") or []):
+            bad += check("weather alerts",
+                         lambda: {"a": weather._fetch_alerts(34.0, -81.0)},
+                         ignore_paths=("severity", "urgency"))
+        else:
+            print("  %-28s skipped (no active alerts)" % "weather alerts")
+    finally:
+        weather._get_json = _real_get_json
+
+    points_raw = _real_get_json(weather.POINTS_URL.format(lat=34.0, lon=-81.0))
+    stations_url = ((points_raw.get("properties") or {}).get("observationStations"))
+    stations_raw = _real_get_json(stations_url) if stations_url else {"features": []}
+    weather._get_json = _mock_get_json([inject(points_raw), inject(stations_raw)])
+    try:
+        bad += check("weather point (city/state)",
+                     lambda: weather._fetch_point(34.0, -81.0),
+                     ignore_paths=("stations", "station", "forecast_url"))
+    finally:
+        weather._get_json = _real_get_json
+
+    # ---- /api/notify pass-through (2026-08-09) -- the fold lives inline
+    # in arcade_server.py ("Fold at the boundary" comment on the /api/notify
+    # handler), which this file never imports (constructing Arcade() while
+    # the real service may be running is the exact hazard CLAUDE.md calls
+    # out). The boundary code is literally `paneltext.panel_text(title)` /
+    # `paneltext.panel_text(message)` with no other transform, so exercising
+    # the fold function directly on the same shape of input tests the real
+    # boundary behavior, same reasoning the skypass/atc_transcribe cases
+    # below already use for a fold that lives inline rather than in its own
+    # named function.
+    dirty_notify = "Garage Door" + "".join(CANARIES) + " Opened"
+    bad += check("notify title/message fold",
+                 lambda: {"title": paneltext.panel_text(dirty_notify),
+                          "message": paneltext.panel_text(dirty_notify)})
+
     # ---- the pure text cleaners each feed exposes ------------------------
     import news
     import blog

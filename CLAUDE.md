@@ -2688,6 +2688,67 @@ force-injected synthetic render (airliner + helicopter, both cards) sent
 as an 8x-zoom PNG for visual confirmation before commit -- confirmed no
 text collisions at the new scale on either card.
 
+## Full-project gap audit (2026-08-09)
+
+After the flights-mode deep dive above, ran a dedicated research-only
+audit of the REST of the project for the SAME real bug classes this
+project has already been bitten by, rather than vague polish notes.
+Found and fixed two real gaps; three more were found and deliberately
+left as documented, lower-priority follow-ups (not silently dropped):
+
+**Fixed:**
+- **`fold_audit.py` had zero coverage for `weather.py` and the
+  `/api/notify` boundary.** Both fold real external text through
+  `paneltext.panel_text()` (severe-alert `headline`/`areaDesc`, HA
+  notification `title`/`message`) but neither had a replay case --
+  exactly the "live data happened to be clean, so nothing caught it"
+  trap this file's own docstring warns about, with a real precedent
+  (Rasmus Hojgaard's name, four feeds still on bare `.upper()`, the
+  sports per-league parser) already on record. Added three weather cases
+  (observation, alerts, point/city-state -- via monkeypatching
+  `weather._get_json`, not the network call, so real live payloads still
+  drive the injection) and one notify case (`/api/notify`'s fold lives
+  inline in `arcade_server.py`, which this file can never import per the
+  panel-lockup rule, so the fold FUNCTION is exercised directly on the
+  same input shape, same reasoning the skypass/atc_transcribe cases
+  already use for an inline fold).
+- **`market.py`/`news.py`/`blog.py`/`notify.py`'s `save_config()` all
+  constructed a fresh dict instead of read-modify-write.** The exact bug
+  shape that has already silently wiped a sibling key in
+  `location_config.json` (`airport`) and `sports_config.json`
+  (`golf_player`) TWICE this project's life -- harmless today because
+  each of these four files currently has one owner and one key-set, but
+  the first time any of them grows a second key, a save of the other key
+  silently wipes it. Fixed preemptively, same read-modify-write pattern
+  `sports.save_config`/`flights.save_airport`/`satellite.save_window`
+  already use. Verified the round-trip is actually safe (`save_config`
+  called twice back-to-back on the real `market_config.json`, file
+  identical before/after) before committing.
+
+**Found, deliberately not fixed this pass (documented, not dropped):**
+- `PlaneWatchEngine` and `NotifyEngine` get zero coverage from the normal
+  `render_audit.py` sweep (both force-triggered-only, same gap
+  `GameDayEngine` originally had) -- every change to either has to be
+  remembered and manually verified by hand each time, no regression net.
+  Worth a small "force-inject a synthetic payload" hook in
+  `render_audit.py` itself at some point, not a one-line fix.
+- `sports.py`'s `_detector_due()` throttle fix (task #21) has no
+  permanent regression test -- verified once via an ad hoc script this
+  session, not checked into either audit. If the throttle gate is
+  accidentally removed later, nothing would catch the regression back to
+  20 req/s against ESPN's summary endpoint.
+- `hangar.py`'s `HANGAR_MAX_ENTRIES = 500` LRU eviction has no test that
+  actually exercises the boundary at 501 entries -- asserted in prose,
+  never demonstrated. Low urgency (a real collection won't hit 500 for a
+  long time) but the one bounded-resource in the project without a
+  demonstrated eviction path.
+
+Verified: `fold_audit.py` 0 feeds NOT folding (weather alerts case
+correctly reports "skipped (no active alerts)" when there genuinely
+are none, matching the existing skip convention rather than faking a
+payload), `render_audit.py` 0 mode(s) failed, real service restart +
+`/api/frame` pulled clean post-restart.
+
 ## Known issues / in-progress work
 
 ### Panel lockup hazard — RESOLVED 2026-07-30, but the rule stands
