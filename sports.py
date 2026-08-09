@@ -189,6 +189,87 @@ def save_config(leagues, favorite):
     CONFIG_PATH.write_text(json.dumps(data, indent=2))
 
 
+# ---- favorite-teams ticker filter (2026-08-08) --------------------------
+# The existing `favorite` field (load_config()/save_config() above) is ONE
+# team, and it already has a dedicated full-screen PINNED view -- it isn't
+# what this is. This is a SEPARATE, multi-team list that filters the
+# UNIVERSAL ticker (every league's rotation) down to only games involving
+# a team on the list, across sports -- "is anything I actually care about
+# on right now", not "show me my one favorite team's own game full
+# screen". Deliberately stored under its own key (`favorite_teams`), not
+# folded into `favorite`, so pinning one team for the full PINNED view and
+# building a cross-sport watchlist stay two independent choices -- setting
+# one was never supposed to require or imply the other.
+
+
+def load_favorite_teams():
+    """Returns (teams, filter_enabled). `teams` is a list of
+    {"league", "team_abbr"} dicts (empty list if none set). `filter_enabled`
+    is a bool -- having a list saved does not by itself turn the filter on,
+    so toggling it off and back on doesn't require re-entering every team."""
+    if not CONFIG_PATH.exists():
+        return [], False
+    try:
+        data = json.loads(CONFIG_PATH.read_text())
+    except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+        return [], False
+    raw = data.get("favorite_teams")
+    teams = []
+    if isinstance(raw, list):
+        for t in raw:
+            if (isinstance(t, dict) and t.get("league") in LEAGUE_PATHS
+                    and t.get("team_abbr")):
+                teams.append({"league": str(t["league"]).upper(),
+                              "team_abbr": str(t["team_abbr"]).upper()})
+    enabled = bool(data.get("favorite_teams_filter"))
+    return teams, enabled
+
+
+def save_favorite_teams(teams, filter_enabled):
+    """Persist the favorite-teams list + filter toggle. PRESERVES every
+    key this function does not own (leagues/favorite/golf_player/
+    tennis_player) -- the identical lesson every other save_* in this
+    file already learned about this same config file."""
+    data = {}
+    if CONFIG_PATH.exists():
+        try:
+            data = json.loads(CONFIG_PATH.read_text()) or {}
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+            data = {}
+    cleaned = []
+    for t in (teams or []):
+        if (isinstance(t, dict) and t.get("league") in LEAGUE_PATHS
+                and t.get("team_abbr")):
+            cleaned.append({"league": str(t["league"]).upper(),
+                            "team_abbr": str(t["team_abbr"]).upper()})
+    data["favorite_teams"] = cleaned
+    data["favorite_teams_filter"] = bool(filter_enabled)
+    data.setdefault("leagues", list(DEFAULT_LEAGUES))
+    data.setdefault("favorite", None)
+    CONFIG_PATH.write_text(json.dumps(data, indent=2))
+    return cleaned, bool(filter_enabled)
+
+
+def event_matches_favorite_teams(ev, teams):
+    """True if any REAL competitor on this universal-feed event matches a
+    (league, team_abbr) pair in `teams`. Compares against the SAME `abbr`
+    field the ticker already displays (`_header_competitor`'s `abbr`), not
+    a second name representation -- one source of truth for "what is this
+    team called" instead of two that could quietly drift apart. Only
+    checks TEAM competitors (`is_team`), never an individual athlete
+    (golf/tennis/MMA have no "team" to match here -- they already have
+    their own dedicated pinned-player mechanism, this filter is for team
+    sports)."""
+    if not teams:
+        return False
+    league = ev.get("league")
+    wanted = {t["team_abbr"] for t in teams if t["league"] == league}
+    if not wanted:
+        return False
+    return any(c.get("is_team") and c.get("abbr") in wanted
+              for c in (ev.get("competitors") or []))
+
+
 def _hex_to_rgb(hex_str, min_brightness=90):
     """ESPN gives team colors as a bare 6-hex-digit string, no '#', and
     real teams really do ship near-black or near-white as a primary color
@@ -1132,6 +1213,13 @@ class SportsFeed:
         self._tennis_interval = 0.0
         self._tennis_fails = 0
         self._tennis_player = load_tennis_player()
+        # Favorite-teams ticker filter (2026-08-08) -- see
+        # event_matches_favorite_teams()'s own docstring for why this is a
+        # SEPARATE mechanism from `favorite` (one full-screen pinned team)
+        # rather than reusing it. Cached in the FEED like every other
+        # config value here, re-read on the same _maybe_reload_config()
+        # timer as leagues/favorite/golf_player/tennis_player.
+        self._favorite_teams, self._favorite_teams_filter = load_favorite_teams()
         self._thread = None
         self._err = None
 
@@ -1350,7 +1438,22 @@ class SportsFeed:
                          if self._golf_move and (now - self._golf_move_at) < GOLF_MOVE_TTL
                          else None)
             tennis_player = self._tennis_player
+            favorite_teams = list(self._favorite_teams)
+            favorite_teams_filter = self._favorite_teams_filter
         self._ensure_thread()
+        # FAVORITE-TEAMS FILTER (2026-08-08): applied here, once, before
+        # every downstream consumer (league grouping, the ticker index,
+        # has_content()) ever sees the list -- same "filter at the source,
+        # not at each call site" reasoning WINDOW FILTER's in_window flag
+        # already follows. Never applied to golf/tennis: those already
+        # have their own dedicated pinned-player mechanism and are
+        # individual-athlete sports with no "team" for this filter to
+        # match against in the first place (event_matches_favorite_teams()
+        # only ever checks `is_team` competitors).
+        if favorite_teams_filter and favorite_teams:
+            events = [e for e in events
+                     if e.get("sport") in ("golf", "tennis")
+                     or event_matches_favorite_teams(e, favorite_teams)]
         # Live first, then upcoming, then finished -- within that, keep
         # ESPN's own ordering, which already groups by sport sensibly.
         rank = {"in": 0, "pre": 1, "post": 2}
@@ -1377,6 +1480,7 @@ class SportsFeed:
         leagues, favorite = load_config()
         gp = load_golf_player()
         tp = load_tennis_player()
+        ft, ftf = load_favorite_teams()
         with self._lock:
             if leagues != self.leagues or favorite != self.favorite:
                 self.leagues, self.favorite = leagues, favorite
@@ -1387,6 +1491,7 @@ class SportsFeed:
                 self._golf_player, self._golf_prev, self._golf_move = gp, None, None
             if tp != self._tennis_player:
                 self._tennis_player = tp
+            self._favorite_teams, self._favorite_teams_filter = ft, ftf
 
     def _pinned_from_field(self, events, pinned):
         """Pinned golfer from the whole field, or None.
@@ -1447,6 +1552,16 @@ class SportsFeed:
     def get_golf_player(self):
         with self._lock:
             return self._golf_player
+
+    def set_favorite_teams(self, teams, filter_enabled):
+        cleaned, enabled = save_favorite_teams(teams, filter_enabled)
+        with self._lock:
+            self._favorite_teams, self._favorite_teams_filter = cleaned, enabled
+        return cleaned, enabled
+
+    def get_favorite_teams(self):
+        with self._lock:
+            return list(self._favorite_teams), self._favorite_teams_filter
 
     @staticmethod
     def _interval_for(games):

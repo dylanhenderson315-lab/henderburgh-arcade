@@ -1103,6 +1103,7 @@ class Handler(BaseHTTPRequestHandler):
             leagues, favorite = sports.FEED.get_config()
             u = sports.FEED.get_universal()
             pinned = u.get("golf_pinned")
+            favorite_teams, favorite_teams_filter = sports.FEED.get_favorite_teams()
             self._json({"leagues": leagues, "favorite": favorite,
                         "known_leagues": sorted(sports.LEAGUE_PATHS),
                         "golf_player": sports.FEED.get_golf_player(),
@@ -1127,7 +1128,9 @@ class Handler(BaseHTTPRequestHandler):
                                                 if c.get("id") != u["tennis_pinned"].get("id")), None),
                                            "state": (u.get("tennis_event") or {}).get("state"),
                                            "event": (u.get("tennis_event") or {}).get("name")}
-                                          if u.get("tennis_pinned") else None)})
+                                          if u.get("tennis_pinned") else None),
+                        "favorite_teams": favorite_teams,
+                        "favorite_teams_filter": favorite_teams_filter})
         elif path == "/api/gameday/config":
             cfg = gameday.load_config()
             cfg["targets"] = list(gameday.TARGETS)
@@ -1378,6 +1381,27 @@ class Handler(BaseHTTPRequestHandler):
                         self._json({"ok": False, "error": "unknown league"}, 400)
                     else:
                         self._json({"ok": True, "favorite": favorite})
+            except (ValueError, KeyError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/sports/favorite_teams":
+            # Multi-team ticker filter -- a SEPARATE mechanism from
+            # /api/sports/favorite (ONE pinned team, its own full-screen
+            # view). This is a cross-sport watchlist that filters the
+            # ROTATING ticker; see event_matches_favorite_teams()'s own
+            # docstring in sports.py for why the two don't share a field.
+            try:
+                j = json.loads(body or b"{}")
+                teams = j.get("teams")
+                if not isinstance(teams, list):
+                    raise ValueError("teams must be a list of {league, team_abbr}")
+                for t in teams:
+                    if (not isinstance(t, dict) or t.get("league") not in sports.LEAGUE_PATHS
+                            or not t.get("team_abbr")):
+                        raise ValueError(f"invalid team entry: {t!r}")
+                cleaned, enabled = sports.FEED.set_favorite_teams(
+                    teams, bool(j.get("filter_enabled", True)))
+                self._json({"ok": True, "favorite_teams": cleaned,
+                            "favorite_teams_filter": enabled})
             except (ValueError, KeyError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/gameday/config":
