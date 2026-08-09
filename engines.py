@@ -8240,6 +8240,188 @@ class FlightEngine(Browsable, BigMomentSource):
         return bytes(buf)
 
 
+class FollowFlightEngine:
+    """FOLLOW A SPECIFIC FLIGHT (2026-08-09) -- track one real flight by
+    callsign/flight number anywhere it's currently airborne, not just
+    within the local RADIUS_NM scope FlightEngine's own scope draws.
+
+    DESIGN CHOICE, stated because the task spec offered two shapes and
+    asked for a justification: this is a NEW, SMALL, STANDALONE engine
+    (`FollowFlightEngine`, zero-arg constructible, registered in
+    `ENGINES["followflight"]`) rather than a fifth view bolted onto
+    `FlightEngine`. Read `FlightEngine._frame_detail()` and
+    `_frame_detail_ceremonial()` before deciding: both are built around
+    home-relative framing baked all the way through -- `sel_key`
+    resolution against `flights.FEED`'s LOCAL list, the DEPARTING/
+    ARRIVING/TRANSIT status compared against the configured home airport,
+    the compass bearing FROM home, the flown-path trail and route-ray in
+    LOCAL-plane (x_nm/y_nm relative to home) coordinates. None of that
+    applies to a flight that can be anywhere on Earth -- there is no
+    "home" to depart from or arrive at, no local bearing, no local plane
+    to trail across. Threading a "this aircraft has no distance-from-home
+    concept" branch through FlightEngine's `sel_key`/view-cycling/browse
+    machinery would touch far more surface than it's worth, and
+    CLAUDE.md's own explicit rule for this codebase is to NOT touch the
+    existing local radar scope/window/Hangar code for a genuinely
+    separate feature. A standalone engine sharing only the read-only
+    helpers that generalize cleanly (`draw_header`, `draw_hero_
+    silhouette`, `FlightEngine._ac_kind`/`_alt_color`/`_compass`,
+    `flights.ICAO_TYPE_NAMES`) is the smaller, more consistent change.
+
+    Real data only, honest gaps everywhere else: callsign, registration
+    (if broadcast), type + readable name + route/airline (adsbdb
+    enrichment `flights.py` already resolves and caches -- reused
+    verbatim, zero new I/O beyond `flights.FOLLOW_FEED`'s own poll),
+    altitude, ground speed, heading -- each individually degrades to "-"
+    or is omitted rather than guessed. NO bearing/distance-from-home
+    framing anywhere on this card, on purpose -- the flight may not be
+    anywhere near home.
+
+    Three real states, matching flights.FOLLOW_FEED.get()'s own
+    `airborne` tri-state exactly (None/False/True):
+      - not configured  -> "NO FLIGHT SET" with instructions
+      - configured, not currently airborne -> honest "NOT CURRENTLY
+        AIRBORNE" state (adsb.lol's real, non-error "ac": [] result --
+        see flights.py's own FOLLOW_URL docstring) -- never a stale or
+        guessed position.
+      - configured, airborne -> the real card: hero silhouette (same
+        `draw_hero_silhouette()`/`FlightEngine._ac_kind()` every other
+        hero moment in this project uses), altitude-band color (same
+        `FlightEngine._alt_color()`), registration/type/route/altitude/
+        speed/heading.
+    """
+
+    name = "followflight"
+    tick_rate = 0.2   # a single lookup refreshed every FOLLOW_REFRESH
+                       # (15s) on the feed side does not need the 0.05s
+                       # tick rate a multi-aircraft scope's sweep
+                       # animation needs -- this card has no sweep.
+
+    BG = (0, 0, 0)
+    INK = (150, 160, 185)
+    INK_DIM = (70, 76, 92)
+    ACCENT = (120, 200, 255)
+    ROUTE = (255, 226, 60)
+    NOT_AIRBORNE = (255, 140, 60)
+
+    def __init__(self):
+        self.score = 0
+        self.data = {"configured": False, "callsign": None, "aircraft": None,
+                     "route": None, "age": None, "airborne": None, "err": None}
+        self.pulse = Pulse()
+
+    def reset(self):
+        pass
+
+    def has_content(self):
+        # Force-reachable like any ordinary data mode (menu-selectable,
+        # a real button in arcade.html) -- unlike PlaneWatchEngine/
+        # NotifyEngine this is NOT force-triggered-only, so it follows
+        # the normal has_content() contract every glance mode uses.
+        # "Content" here means "a callsign is configured" -- even the
+        # honest NOT-AIRBORNE state is real, meaningful content to show
+        # (that's the whole point of the tri-state), not an empty mode.
+        return bool(self.data.get("configured"))
+
+    def input(self, cmd):
+        # Nothing to browse -- one flight, one card. Left/right/up/down/
+        # rotate/drop are all no-ops, same as WeatherEngine's own
+        # single-view no-input contract.
+        pass
+
+    def auto(self):
+        pass
+
+    def tick(self):
+        self.data = flights.FOLLOW_FEED.get()
+        ac = self.data.get("aircraft")
+        self.pulse.note(ac.get("hex") if ac else None)
+
+    def _icon_kind(self, ac):
+        return FlightEngine._ac_kind(ac)
+
+    def frame(self):
+        buf = blank()
+        fill(buf, self.BG)
+
+        configured = self.data.get("configured")
+        callsign = self.data.get("callsign")
+        ac = self.data.get("aircraft")
+        airborne = self.data.get("airborne")
+
+        if not configured:
+            draw_header(buf, "FOLLOW FLIGHT", self.ACCENT)
+            draw_text_centered(buf, 26, "NO FLIGHT SET", self.INK)
+            draw_text_centered(buf, 36, "USE THE", self.INK_DIM)
+            draw_text_centered(buf, 44, "CONTROL PANEL", self.INK_DIM)
+            draw_text_centered(buf, 52, "TO PICK ONE", self.INK_DIM)
+            return bytes(buf)
+
+        title = fit_text(callsign or "FLIGHT", WIDTH - 20)
+
+        if not airborne:
+            # Real, honest "not currently airborne" state -- adsb.lol's
+            # genuine "ac": [] result for this callsign, never a stale or
+            # invented position (see flights.FOLLOW_URL's own docstring
+            # for why this is a real non-error outcome, not a bug).
+            draw_header(buf, title, self.NOT_AIRBORNE,
+                        stale=bool(self.data.get("err")))
+            draw_text_centered(buf, 24, "NOT CURRENTLY", self.NOT_AIRBORNE)
+            draw_text_centered(buf, 33, "AIRBORNE", self.NOT_AIRBORNE)
+            draw_text_centered(buf, 46, fit_text("STILL WATCHING", WIDTH - 4), self.INK_DIM)
+            draw_text_centered(buf, 54, fit_text("FOR THIS FLIGHT", WIDTH - 4), self.INK_DIM)
+            return bytes(buf)
+
+        # Airborne: the real card. Vertical budget, checked to not
+        # collide (hero silhouette at cy=24/scale=0.75 reaches roughly
+        # y=12..31 -- see draw_hero_silhouette()'s own fixed-wing
+        # geometry, _HERO_FIXED_WING's tallest kind is the airliner at
+        # nose_fy=16/tail_fy=9.5 units, times scale):
+        #   header 2-9 | icon 12-31 | reg 36-40 | route 44-48 |
+        #   alt/speed/hdg 53-57 | type 59-63 (HEIGHT=64, last legal row)
+        alt = ac.get("alt_ft")
+        col = FlightEngine._alt_color(alt)
+        kind = self._icon_kind(ac)
+
+        draw_header(buf, title, self.pulse.mix(col), stale=bool(
+            self.data.get("age") and self.data["age"] > 60))
+
+        icon_col = rim(col, 0.94 + 0.06 * math.sin(time.time() * 2))
+        draw_hero_silhouette(buf, WIDTH // 2, 24, kind, icon_col, scale=0.75)
+
+        reg = ac.get("reg") or ac.get("ident") or "-"
+        draw_text_centered(buf, 36, fit_text(reg, WIDTH - 4), self.INK)
+
+        route = self.data.get("route") or (ac.get("route") if ac else None)
+        if route and route.get("origin") and route.get("dest"):
+            o_city, d_city = route.get("origin_city"), route.get("dest_city")
+            codes = f"{route['origin']}>{route['dest']}".upper()
+            if o_city and d_city:
+                route_line = f"{o_city} > {d_city}"
+            elif d_city:
+                route_line = f"> {d_city}"
+            else:
+                route_line = codes
+            draw_text_centered(buf, 44, fit_text(route_line, WIDTH - 4), self.ROUTE)
+
+        gs = ac.get("gs_kt")
+        compass = FlightEngine._compass(ac.get("track_deg"))
+        alt_txt = f"{alt:.0f}FT" if isinstance(alt, (int, float)) else "-"
+        gs_txt = f"{kt_to_mph(gs):.0f}MPH" if isinstance(gs, (int, float)) else "-"
+        hdg_txt = compass or "-"
+        left = alt_txt
+        right = f"{gs_txt} {hdg_txt}".strip()
+        draw_text3x5(buf, 2, 53, left, self.INK_DIM)
+        draw_text3x5(buf, WIDTH - 2 - text_w(right), 53, right, self.INK_DIM)
+
+        typ = (flights._type_name(ac.get("type")) or "").upper()
+        airline = (route or {}).get("airline") if route else None
+        foot = " - ".join(t for t in (typ, airline) if t)
+        if foot:
+            draw_text_centered(buf, 59, fit_text(foot, WIDTH - 4), (86, 94, 116))
+        return bytes(buf)
+
+
 class NotifyEngine:
     """URGENT-priority Home Assistant notification takeover (task #8,
     2026-08-08). Built with the EXACT same shape as PlaneWatchEngine
@@ -12295,6 +12477,7 @@ class MenuEngine:
         ("ticker",   "TICKER",   (60, 230, 110)),
         ("satellite", "ISS",     (255, 226, 60)),
         ("flights",  "FLIGHTS",  (120, 200, 255)),
+        ("followflight", "FOLLOW", (255, 200, 90)),
         ("sports",   "SPORTS",   (255, 140, 40)),
         ("news",     "NEWS",     (255, 226, 60)),
         ("weather",  "WEATHER",  (90, 190, 255)),
@@ -12536,6 +12719,23 @@ class MenuEngine:
             put_px(buf, x0 + 4, y0 + 6, c)
             put_px(buf, x0 + 3, y0 + 7, c)
             put_px(buf, x0 + 4, y0 + 3, w)
+        elif gid == "followflight":
+            # Same swept-wing silhouette as "flights", plus a small
+            # target-lock pip beside the nose -- "one specific flight",
+            # distinct at a glance from the plain flights glyph.
+            put_px(buf, x0 + 7, y0 + 1, c)
+            put_px(buf, x0 + 6, y0 + 2, c)
+            put_px(buf, x0 + 5, y0 + 3, c)
+            block(1, 3, 4, 1, c)
+            put_px(buf, x0 + 4, y0 + 4, c)
+            block(3, 5, 3, 1, c)
+            put_px(buf, x0 + 4, y0 + 6, c)
+            put_px(buf, x0 + 3, y0 + 7, c)
+            put_px(buf, x0 + 1, y0 + 1, w)
+            put_px(buf, x0 + 0, y0 + 1, c)
+            put_px(buf, x0 + 2, y0 + 1, c)
+            put_px(buf, x0 + 1, y0 + 0, c)
+            put_px(buf, x0 + 1, y0 + 2, c)
         elif gid == "sports":
             # A scoreboard: a frame with a divider and two blocky "score"
             # marks -- reads as "live score" distinct from the ticker's
@@ -15037,6 +15237,10 @@ ENGINES = {
     "ticker": TickerEngine,
     "satellite": SatelliteEngine,
     "flights": FlightEngine,
+    # FOLLOW A SPECIFIC FLIGHT (2026-08-09) -- ordinary selectable data
+    # mode, same shape as "flights"/"satellite", NOT force-triggered
+    # (unlike "planewatch"/"notify" right below).
+    "followflight": FollowFlightEngine,
     "sports": SportsEngine,
     "news": NewsEngine,
     "weather": WeatherEngine,

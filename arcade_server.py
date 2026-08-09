@@ -1117,6 +1117,13 @@ class Handler(BaseHTTPRequestHandler):
             w = satellite.load_window()
             self._json({"center_deg": w["center_deg"], "fov_deg": w["fov_deg"],
                         "max_nm": w["max_nm"]})
+        elif path == "/api/flights/follow":
+            # FOLLOW A SPECIFIC FLIGHT (2026-08-09) -- status GET, same
+            # shape as /api/satellite/location just above.
+            s = flights.FOLLOW_FEED.get()
+            self._json({"configured": s["configured"], "callsign": s["callsign"],
+                        "airborne": s["airborne"], "age": s["age"],
+                        "aircraft": s["aircraft"], "err": s["err"]})
         elif path == "/api/sports/config":
             leagues, favorite = sports.FEED.get_config()
             u = sports.FEED.get_universal()
@@ -1327,6 +1334,23 @@ class Handler(BaseHTTPRequestHandler):
                 w = satellite.save_window(center, fov, max_nm)
                 self._json({"ok": True, **w})
             except (ValueError, KeyError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/flights/follow":
+            # FOLLOW A SPECIFIC FLIGHT (2026-08-09) -- {"callsign": "UAL123"}
+            # sets which real flight to follow anywhere it's airborne, an
+            # empty/omitted callsign clears it. Same JSON-body-parsing/
+            # error-handling shape as every other config POST endpoint
+            # here (e.g. /api/satellite/location, /api/sports/tennis_player
+            # just below). Accepts the plain input as typed -- see
+            # flights.FollowFlightFeed's own docstring for why no IATA<->
+            # ICAO airline-code translation is attempted here; a callsign
+            # that doesn't resolve just honestly shows NOT CURRENTLY
+            # AIRBORNE rather than being rejected or reformatted.
+            try:
+                j = json.loads(body or b"{}")
+                cs = flights.FOLLOW_FEED.set_followed(j.get("callsign"))
+                self._json({"ok": True, "callsign": cs})
+            except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/notify":
             # HOME ASSISTANT NOTIFICATION PASS-THROUGH (task #8). Payload
