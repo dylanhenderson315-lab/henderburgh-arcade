@@ -1776,6 +1776,320 @@ def draw_scope_home(buf, color=(235, 242, 255), cx=SCOPE_CX, cy=SCOPE_CY):
         put_px(buf, cx + dx, cy + dy, color)
 
 
+# ---- GLOBAL FLIGHT-PATH MAP (2026-08-09) --------------------------------
+# A THIRD projection in this project, deliberately named as such next to
+# the two `scope_xy()` already documents (flights' ground radar, satellite's
+# sky dome). Same reasoning those two are NOT shared: this answers a
+# different question -- "where on Earth does this flight go", not "what is
+# around me right now" -- and a home-centred polar projection cannot show
+# an MDW->MHT route at all, since both ends are far outside the 40nm rim.
+WORLD_COAST = (26, 44, 66)      # dim blue-grey -- context, never the subject
+WORLD_GRID = (16, 20, 28)       # equator + prime meridian, dimmer still
+WORLD_PATH = (255, 226, 60)     # the great circle -- FlightEngine.ROUTE's yellow
+WORLD_ORIGIN = (80, 235, 130)   # green, "came from" -- an OPEN box (see below)
+WORLD_DEST = (255, 110, 80)     # coral, "going to" -- a FILLED box
+WORLD_AC = (255, 255, 255)      # white -- the same "this is the selected thing"
+                                 # white the scope already uses for selection
+GC_STEPS = 24                   # great-circle sample count -- see draw_world_map
+
+
+WORLD_BOUNDS = (-90.0, 90.0, -180.0, 180.0)   # the whole Earth, the default window
+MIN_LON_SPAN = 40.0       # narrowest window allowed -- see _fit_bounds()
+
+
+def world_xy(lat, lon, x0, y0, w, h, bounds=WORLD_BOUNDS):
+    """(lat, lon) -> pixel, EQUIRECTANGULAR (plate carree). Over the whole
+    Earth that is literally `x = (lon + 180) / 360 * w`,
+    `y = (90 - lat) / 180 * h`; `bounds` generalises it to any
+    (lat_min, lat_max, lon_min, lon_max) window at the same uniform
+    degrees-per-pixel in both axes (see _fit_bounds()).
+
+    Chosen over every alternative deliberately, and the reasoning belongs
+    on the record the same way `scope_xy()`'s does. At 64px wide the whole
+    Earth gets 5.6 degrees of longitude per pixel -- any projection's
+    distortion is well under one pixel of visible difference for most of
+    the map, so the tiebreaker is not accuracy but LEGIBILITY and
+    HONESTY about what the picture claims:
+      - it is the projection a person has actually seen before (the
+        classic flat world map), so no explanation is needed;
+      - its 2:1 aspect maps exactly onto a 64x32 box, using the full
+        panel width with no letterboxing or cropped poles;
+      - lat/lon -> pixel is a pure linear scale, so a real coordinate
+        lands where it lands with no fitted parameters to get wrong.
+    What it is NOT: an equal-area or great-circle-preserving projection.
+    A real great-circle route is a CURVE here, not a straight line --
+    which is exactly why draw_world_map() interpolates the real path
+    instead of drawing a straight segment between the two endpoints."""
+    la0, la1, lo0, lo1 = bounds
+    x = (lon - lo0) / (lo1 - lo0) * w
+    y = (la1 - lat) / (la1 - la0) * h
+    return (x0 + x, y0 + y)
+
+
+def _fit_bounds(pts, w, h):
+    """Pick the map window (lat_min, lat_max, lon_min, lon_max) that shows
+    every real point in `pts` with room to breathe, or the whole Earth
+    when there is nothing to fit to.
+
+    Why this exists: a real domestic leg (the confirmed MDW->MHT route)
+    spans ~16 degrees of longitude, which at whole-Earth zoom on a 64px
+    panel is THREE PIXELS -- origin, destination and the aircraft all
+    land in one indistinguishable blob. The projection was correct and
+    the picture was useless. Windowing keeps the projection and the real
+    coordinates exactly as they are; it only changes how much of the
+    Earth the 64x32 box covers, the same thing any real map's zoom does.
+
+    The window is always kept at the SAME degrees-per-pixel in both axes
+    (`lon_span = 2 * lat_span` for a 2:1 box), so nothing is stretched
+    relative to the whole-Earth view -- it is the identical projection at
+    a different scale, not a second, differently-distorted one.
+    MIN_LON_SPAN floors the zoom so a very short leg (or a single point)
+    doesn't blow up into a meaningless close-up of two coastline
+    segments; the window is then shifted, never squashed, to stay inside
+    the real world's own +/-180/+/-90 limits."""
+    if not pts:
+        return WORLD_BOUNDS
+    lats = [p[0] for p in pts]
+    lons = [p[1] for p in pts]
+    # An antimeridian-spanning pair would need a shifted longitude frame
+    # this simple window can't express -- fall back to the whole Earth,
+    # which shows both ends correctly, rather than inventing a window.
+    if max(lons) - min(lons) > 180.0:
+        return WORLD_BOUNDS
+    c_lat = (max(lats) + min(lats)) / 2.0
+    c_lon = (max(lons) + min(lons)) / 2.0
+    # 1.6x padding so the endpoints never sit against the frame edge.
+    span = max((max(lons) - min(lons)) * 1.6,
+               (max(lats) - min(lats)) * 1.6 * (float(w) / h),
+               MIN_LON_SPAN)
+    if span >= 360.0:
+        return WORLD_BOUNDS
+    lat_span = span * h / float(w)
+    if lat_span >= 180.0:
+        return WORLD_BOUNDS
+    lo0 = min(max(c_lon - span / 2.0, -180.0), 180.0 - span)
+    la0 = min(max(c_lat - lat_span / 2.0, -90.0), 90.0 - lat_span)
+    return (la0, la0 + lat_span, lo0, lo0 + span)
+
+
+def great_circle_points(lat1, lon1, lat2, lon2, n=GC_STEPS):
+    """Real intermediate points along the great circle (shortest real path
+    over the Earth) between two real coordinates, via the standard
+    spherical-interpolation formula. Returns n+1 (lat, lon) pairs
+    including both endpoints.
+
+    NOT decoration: a straight line drawn in equirectangular space is a
+    rhumb line, not the route an aircraft actually flies -- for a real
+    MDW->MHT leg the difference is small, but for anything transoceanic
+    the straight version is visibly, confidently wrong (it misses the
+    real northern arc entirely). Drawing the wrong path would be the
+    display lying, the same class of thing this project refuses
+    everywhere else."""
+    p1, l1 = math.radians(lat1), math.radians(lon1)
+    p2, l2 = math.radians(lat2), math.radians(lon2)
+    # Central angle between the two points (haversine form -- numerically
+    # stable for the small angles a short domestic leg produces, where the
+    # plain acos(dot) form loses precision).
+    d = 2.0 * math.asin(math.sqrt(
+        math.sin((p2 - p1) / 2.0) ** 2
+        + math.cos(p1) * math.cos(p2) * math.sin((l2 - l1) / 2.0) ** 2))
+    if d < 1e-9:
+        return [(lat1, lon1), (lat2, lon2)]   # same point -- no arc to build
+    out = []
+    sd = math.sin(d)
+    for i in range(n + 1):
+        f = i / float(n)
+        a = math.sin((1.0 - f) * d) / sd
+        b = math.sin(f * d) / sd
+        x = a * math.cos(p1) * math.cos(l1) + b * math.cos(p2) * math.cos(l2)
+        y = a * math.cos(p1) * math.sin(l1) + b * math.cos(p2) * math.sin(l2)
+        z = a * math.sin(p1) + b * math.sin(p2)
+        out.append((math.degrees(math.atan2(z, math.hypot(x, y))),
+                    math.degrees(math.atan2(y, x))))
+    return out
+
+
+def _draw_geo_polyline(buf, pts, color, x0, y0, w, h, bounds=WORLD_BOUNDS,
+                       clip=True):
+    """Connect (lat, lon) points with line segments in world_xy space,
+    BREAKING the line wherever consecutive points jump more than 180deg of
+    longitude. That jump means the path crossed the antimeridian, and a
+    naive segment would draw a full-width streak straight across the map
+    -- a line that doesn't exist. Breaking is the honest degrade: the two
+    real halves each draw, the impossible connector doesn't.
+
+    `clip` bounds every written pixel to the map box. Required, not
+    optional, once the window can be zoomed in (see _fit_bounds()): a
+    coastline segment just outside the window projects to a coordinate
+    off the box, and `put_px` only guards the PANEL edge -- it would
+    happily paint a stray line through the header or the caption rows."""
+    box = (x0, y0, x0 + w - 1, y0 + h - 1)
+    prev = None
+    for lat, lon in pts:
+        if prev is not None and abs(lon - prev[1]) <= 180.0:
+            ax, ay = world_xy(prev[0], prev[1], x0, y0, w, h, bounds)
+            bx, by = world_xy(lat, lon, x0, y0, w, h, bounds)
+            _line_in_box(buf, ax, ay, bx, by, color, box if clip else None)
+        prev = (lat, lon)
+
+
+def _line_in_box(buf, ax, ay, bx, by, color, box):
+    """draw_line, restricted to a rectangle. Same integer Bresenham
+    `draw_line()` already uses -- deliberately re-walked here rather than
+    pre-clipping the endpoints analytically, because a two-point clip
+    (Cohen-Sutherland and friends) is a second geometry implementation to
+    get subtly wrong for a line that is at most 64 pixels long. Skipping
+    the writes that fall outside is exact and costs one comparison per
+    pixel.
+
+    Two guards keep that cheap at deep zoom, where a far-away coastline
+    point can project thousands of pixels off-panel:
+      - a TRIVIAL REJECT for segments with both endpoints on the same
+        outside side of the box (they cannot cross it) -- exact, never
+        drops a segment that really does pass through;
+      - a step cap, so a segment that survives the reject but runs a very
+        long way still costs a bounded walk. The cap is generous enough
+        (4x the panel's longest side) that it can only ever trim the
+        far-off-panel tail of a line whose in-box part has already been
+        drawn."""
+    if box is not None:
+        if ((ax < box[0] and bx < box[0]) or (ax > box[2] and bx > box[2])
+                or (ay < box[1] and by < box[1]) or (ay > box[3] and by > box[3])):
+            return
+    steps = 0
+    cap = max(WIDTH, HEIGHT) * 4
+    x0, y0, x1, y1 = int(round(ax)), int(round(ay)), int(round(bx)), int(round(by))
+    dx, dy = abs(x1 - x0), -abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx + dy
+    while True:
+        if box is None or (box[0] <= x0 <= box[2] and box[1] <= y0 <= box[3]):
+            put_px(buf, x0, y0, color)
+        if x0 == x1 and y0 == y1:
+            break
+        steps += 1
+        if steps > cap:
+            break
+        e2 = 2 * err
+        if e2 >= dy:
+            err += dy
+            x0 += sx
+        if e2 <= dx:
+            err += dx
+            y0 += sy
+
+
+def _draw_map_box(buf, x, y, color, filled, box=None):
+    """Origin/destination marker. Two markers that must never be confused
+    at 3px, so they differ in SHAPE as well as color: origin is an OPEN
+    3x3 ring (a place left behind -- hollow), destination is a FILLED
+    3x3 block (a place arrived at -- solid). Color alone would not be
+    enough here, since both sit on the same yellow path."""
+    xi, yi = int(round(x)), int(round(y))
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            px, py = xi + dx, yi + dy
+            if not (filled or dx or dy):
+                continue
+            if box is not None and not (box[0] <= px <= box[2]
+                                        and box[1] <= py <= box[3]):
+                continue        # clipped to the map box, same as the lines
+            put_px(buf, px, py, color)
+
+
+def draw_world_map(buf, route, ac_lat=None, ac_lon=None,
+                   x0=0, y0=10, w=WIDTH, h=32):
+    """The global flight-path view's map body. Draws, back to front:
+    the embedded real world coastline (dim), a faint equator/prime-
+    meridian graticule, the REAL great-circle route, the real origin and
+    destination markers, and the aircraft's real current position.
+
+    EVERY element is drawn only from real data and skipped when that data
+    genuinely isn't there -- a route adsbdb never resolved draws no path
+    and no markers, an aircraft with no broadcast lat/lon draws no
+    aircraft mark. Nothing here is interpolated into existence to fill
+    the picture out. Returns a dict of what actually drew, so the caller
+    can caption the honest gaps rather than leaving a blank map
+    unexplained.
+
+    See world_xy() for why the projection is equirectangular, and
+    _fit_bounds() for why the window is fitted to the real route rather
+    than always showing the whole Earth. Everything is clipped to the map
+    box -- `put_px` only guards the panel edge, so a windowed view would
+    otherwise paint stray coastline through the header and captions."""
+    drew = {"path": False, "origin": False, "dest": False, "aircraft": False,
+            "bounds": WORLD_BOUNDS}
+    box = (x0, y0, x0 + w - 1, y0 + h - 1)
+
+    r = route or {}
+    olat, olon = r.get("origin_lat"), r.get("origin_lon")
+    dlat, dlon = r.get("dest_lat"), r.get("dest_lon")
+    o_ok = isinstance(olat, (int, float)) and isinstance(olon, (int, float))
+    d_ok = isinstance(dlat, (int, float)) and isinstance(dlon, (int, float))
+    a_ok = isinstance(ac_lat, (int, float)) and isinstance(ac_lon, (int, float))
+
+    # The window is fitted to the REAL points about to be drawn, before
+    # anything is drawn -- see _fit_bounds() for why a whole-Earth window
+    # makes a real domestic leg three pixels wide.
+    fit = []
+    if o_ok:
+        fit.append((olat, olon))
+    if d_ok:
+        fit.append((dlat, dlon))
+    if a_ok:
+        fit.append((ac_lat, ac_lon))
+    bounds = _fit_bounds(fit, w, h)
+    drew["bounds"] = bounds
+
+    # Graticule first, under everything -- equator and prime meridian
+    # only, and only when they genuinely fall inside the window. Two
+    # lines, not a grid: they are the two references a person can
+    # actually name, and drawing a graticule line that isn't really there
+    # would be the same category of lie as any other invented pixel.
+    la0, la1, lo0, lo1 = bounds
+    if la0 <= 0.0 <= la1:
+        eq_y = int(round(world_xy(0.0, 0.0, x0, y0, w, h, bounds)[1]))
+        for x in range(x0, x0 + w, 2):
+            put_px(buf, x, eq_y, WORLD_GRID)
+    if lo0 <= 0.0 <= lo1:
+        pm_x = int(round(world_xy(0.0, 0.0, x0, y0, w, h, bounds)[0]))
+        for y in range(y0, y0 + h, 2):
+            put_px(buf, pm_x, y, WORLD_GRID)
+
+    for seg in flights.WORLD_COASTLINE:
+        _draw_geo_polyline(buf, seg, WORLD_COAST, x0, y0, w, h, bounds)
+
+    if o_ok and d_ok:
+        _draw_geo_polyline(buf, great_circle_points(olat, olon, dlat, dlon),
+                           WORLD_PATH, x0, y0, w, h, bounds)
+        drew["path"] = True
+    # Markers draw even when only ONE end resolved -- half a real fact is
+    # still a real fact, and it's better than a blank map. Only the PATH
+    # needs both ends, since a line to nowhere would be invented.
+    if o_ok:
+        _draw_map_box(buf, *world_xy(olat, olon, x0, y0, w, h, bounds),
+                      color=WORLD_ORIGIN, filled=False, box=box)
+        drew["origin"] = True
+    if d_ok:
+        _draw_map_box(buf, *world_xy(dlat, dlon, x0, y0, w, h, bounds),
+                      color=WORLD_DEST, filled=True, box=box)
+        drew["dest"] = True
+
+    # The aircraft LAST, on top of the path -- it's the live element and
+    # must never be painted over by static context. A plus, not a box:
+    # distinct in shape from both endpoint markers at this size.
+    if a_ok:
+        ax, ay = world_xy(ac_lat, ac_lon, x0, y0, w, h, bounds)
+        xi, yi = int(round(ax)), int(round(ay))
+        for dx, dy in ((0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)):
+            px, py = xi + dx, yi + dy
+            if box[0] <= px <= box[2] and box[1] <= py <= box[3]:
+                put_px(buf, px, py, WORLD_AC)
+        drew["aircraft"] = True
+    return drew
+
+
 # ---- HERO-SCALE FILLED SILHOUETTES (2026-08-08, PLANE-IN-WINDOW takeover) --
 # A NEW rendering treatment of the SAME four kinds `_ac_kind()`/
 # `_hangar_kind()` already classify aircraft into everywhere else in this
@@ -6681,6 +6995,19 @@ class FlightEngine(Browsable, BigMomentSource):
     # no new input plumbing, no lengthening of the already-3-stop rotate
     # chain with a view that doesn't belong in it.
     VIEW_HANGAR = 3
+    # SELECTION MENU (2026-08-09) -- `rotate` on the scope used to jump
+    # blindly into DETAIL and then walk a 3-stop chain nothing on screen
+    # ever named. Nobody can discover a chain; they can only memorise one.
+    # VIEW_MENU replaces that first jump with a real, labelled list of
+    # what is actually available for THIS selection, and every deeper
+    # view's own `rotate` returns here rather than dead-ending into the
+    # next unlabelled stop -- the menu becomes the hub, so there is
+    # exactly one thing to learn instead of a cycle to memorise.
+    VIEW_MENU = 4
+    # FLIGHT PATH -- the selected aircraft's real route on a real world
+    # map. See draw_world_map()/world_xy() for the projection and for
+    # why the great circle is interpolated rather than drawn straight.
+    VIEW_FLIGHT_PATH = 5
     SCOPE_TICKS = 260         # ~13s on the scope before walking the cards
     SWEEP_DEG_PER_TICK = 3.0  # ~6s per full rotation at tick_rate 0.05
     ATC = (255, 170, 60)      # warm amber, distinct from PLANE blue / ROUTE yellow -- reads as "radio"
@@ -6732,6 +7059,14 @@ class FlightEngine(Browsable, BigMomentSource):
         # uses, branched on view exactly like ATC_LOG's paging already is.
         self.hangar_entries = []
         self.hangar_idx = 0
+        # SELECTION MENU cursor. Rebuilt from _menu_entries() every frame
+        # rather than cached, because what's genuinely available changes
+        # with the live data (a route resolving, the airport being
+        # selected) -- a cached list would be exactly the "one system
+        # doesn't know about a state another just entered" bug class this
+        # project's CLAUDE.md names repeatedly. The cursor is clamped
+        # against the CURRENT list at every read for the same reason.
+        self.menu_idx = 0
         self.favorite_aircraft = set()
         self.hold = 0
         self.cycling = True
@@ -6900,6 +7235,68 @@ class FlightEngine(Browsable, BigMomentSource):
                 return i
         return None
 
+    def _sel_aircraft(self):
+        """The real aircraft dict the selection currently points at, or
+        None (nothing selected yet, the airport sentinel, or an aircraft
+        that just left range). Resolves by IDENTITY every call via
+        `_find_by_key()` -- never a cached index, same rule `sel_key`
+        itself exists to enforce. Falls back to the top of the list when
+        nothing is explicitly selected, matching what `frame()`'s DETAIL
+        block already does, so the menu describes the aircraft a person
+        is actually looking at."""
+        if self.sel_key == self.AIRPORT_KEY:
+            return None
+        ac_list = self.data.get("aircraft") or []
+        if not ac_list:
+            return None
+        idx = self._find_by_key(ac_list, self.sel_key)
+        return ac_list[idx if idx is not None else 0]
+
+    def _menu_entries(self):
+        """The real options available for the CURRENT selection, as
+        (label, view) pairs. Deliberately not a fixed list: an entry that
+        can't actually do anything for this selection is omitted, not
+        greyed out -- a menu that offers a dead option is worse than a
+        shorter menu, and this project's whole posture is that an honest
+        gap beats a plausible-looking lie.
+
+        THE HANGAR appears here as an ADDITIONAL route to a view that
+        keeps its existing up/down toggle untouched -- discoverability
+        added, no binding taken away.
+
+        Ordering is deliberate: DETAIL first, because it was the previous
+        destination of a bare `rotate` and is the most-used drill-down --
+        anyone with the old muscle memory presses rotate twice and lands
+        exactly where they always did. Then FLIGHT PATH (the new view),
+        ATC LOG, THE HANGAR (whole-device, least selection-specific), and
+        BACK last, where a person expects an escape to be."""
+        if self.sel_key == self.AIRPORT_KEY:
+            # The airport genuinely has no DETAIL card (no altitude,
+            # heading or route to show -- see _step()'s own note) and no
+            # route to plot, so its menu is honestly shorter rather than
+            # padded out to match an aircraft's.
+            return [("ATC LOG", self.VIEW_ATC_LOG),
+                    ("THE HANGAR", self.VIEW_HANGAR),
+                    ("BACK", self.VIEW_SCOPE)]
+        out = [("DETAIL", self.VIEW_DETAIL)]
+        ac = self._sel_aircraft() or {}
+        route = ac.get("route") or {}
+        has_pos = (isinstance(ac.get("lat"), (int, float))
+                   and isinstance(ac.get("lon"), (int, float)))
+        has_route = any(isinstance(route.get(k), (int, float)) for k in
+                        ("origin_lat", "origin_lon", "dest_lat", "dest_lon"))
+        # Offered when there is genuinely SOMETHING real to plot on the
+        # globe -- a resolved route end, or the aircraft's own real
+        # broadcast position. With neither (no callsign, so adsbdb was
+        # never asked, and no position in the payload) the map would be
+        # an empty world with nothing on it, so it isn't offered.
+        if has_pos or has_route:
+            out.append(("FLIGHT PATH", self.VIEW_FLIGHT_PATH))
+        out.append(("ATC LOG", self.VIEW_ATC_LOG))
+        out.append(("THE HANGAR", self.VIEW_HANGAR))
+        out.append(("BACK", self.VIEW_SCOPE))
+        return out
+
     def _step(self, direction):
         # Context-sensitive: left/right browses AIRCRAFT on the scope/
         # detail views (unchanged), but PAGES through the transcript
@@ -6920,6 +7317,15 @@ class FlightEngine(Browsable, BigMomentSource):
         if self.view == self.VIEW_HANGAR:
             if self.hangar_entries:
                 self.hangar_idx = (self.hangar_idx + direction) % len(self.hangar_entries)
+            return
+        # SELECTION MENU -- left/right moves the cursor, same tap-to-step/
+        # hold-to-accelerate Browsable machinery the ATC log's paging and
+        # THE HANGAR's own browsing already reuse. Stepping AIRCRAFT has
+        # no meaning here: the menu is about the one already selected.
+        if self.view == self.VIEW_MENU:
+            n = len(self._menu_entries())
+            if n:
+                self.menu_idx = (self.menu_idx + direction) % n
             return
         aircraft = self.data.get("aircraft") or []
         # PART 2: the airport is a real stop in the SAME step cycle, not
@@ -6953,7 +7359,12 @@ class FlightEngine(Browsable, BigMomentSource):
         # show) -- landing on it while a per-aircraft detail view is
         # open falls back to the scope rather than trying to render an
         # aircraft-shaped card for a runway.
-        if self.sel_key == self.AIRPORT_KEY and self.view == self.VIEW_DETAIL:
+        # VIEW_FLIGHT_PATH joins DETAIL here for the same reason: the
+        # airport has no route to plot either, so stepping onto it from
+        # the map falls back to the scope instead of drawing an empty
+        # world with nothing real on it.
+        if (self.sel_key == self.AIRPORT_KEY
+                and self.view in (self.VIEW_DETAIL, self.VIEW_FLIGHT_PATH)):
             self.view = self.VIEW_SCOPE
         self.hold = 0
 
@@ -6971,26 +7382,39 @@ class FlightEngine(Browsable, BigMomentSource):
         # view, and still toggles auto-advance when already on the scope
         # -- identical split to sports, not a new idiom invented here.
         if cmd == "rotate":
-            if self.sel_key == self.AIRPORT_KEY:
-                # The airport has no DETAIL card -- its whole "drill
-                # down" is the general frequency log, so rotate is a
-                # simple two-state toggle here, not the three-stop cycle
-                # an aircraft gets.
-                self.view = (self.VIEW_ATC_LOG if self.view != self.VIEW_ATC_LOG
-                             else self.VIEW_SCOPE)
+            if self.view == self.VIEW_MENU:
+                # ACTIVATE the highlighted entry. Re-read the list here
+                # rather than trusting whatever it was when the menu
+                # opened -- live data can add or remove an entry (a route
+                # resolving mid-browse) between those two moments, and
+                # acting on a stale list would activate the wrong row.
+                entries = self._menu_entries()
+                if entries:
+                    self.menu_idx = min(self.menu_idx, len(entries) - 1)
+                    self.view = entries[self.menu_idx][1]
+                else:
+                    self.view = self.VIEW_SCOPE
+            elif self.view == self.VIEW_SCOPE:
+                # Open the menu on whatever is selected. With nothing
+                # explicitly selected yet, adopt the top of the real list
+                # first -- the menu names a specific aircraft, so it must
+                # act on the same one `frame()`'s own default already
+                # shows rather than an implicit "whatever".
+                if self.sel_key is None:
+                    ac_list = self.data.get("aircraft") or []
+                    if ac_list:
+                        self.sel_key = self._sel_key(ac_list[0])
+                self.menu_idx = 0
+                self.view = self.VIEW_MENU
             else:
-                self.view = {
-                    self.VIEW_SCOPE: self.VIEW_DETAIL,
-                    self.VIEW_DETAIL: self.VIEW_ATC_LOG,
-                    self.VIEW_ATC_LOG: self.VIEW_SCOPE,
-                    # VIEW_HANGAR isn't part of the SCOPE->DETAIL->ATC_LOG
-                    # drill-down (it's a separate up/down toggle) -- but it
-                    # was missing here entirely, so pressing rotate while on
-                    # it raised KeyError and left self.view stuck on HANGAR,
-                    # silently hiding the live scope. Same "any deeper view
-                    # goes back to SCOPE" rule drop already uses.
-                    self.VIEW_HANGAR: self.VIEW_SCOPE,
-                }[self.view]
+                # From ANY deeper view, rotate returns to the menu rather
+                # than advancing an unlabelled chain -- one hub, learned
+                # once. VIEW_HANGAR is whole-device rather than
+                # selection-specific, so it goes back to the scope, the
+                # same rule it already followed before the menu existed
+                # (and the same KeyError-avoiding explicit entry).
+                self.view = (self.VIEW_SCOPE if self.view == self.VIEW_HANGAR
+                             else self.VIEW_MENU)
             self._auto_detail = False    # manual either way -- see reset()
             self.hold = 0
         elif cmd == "drop":
@@ -7908,6 +8332,109 @@ class FlightEngine(Browsable, BigMomentSource):
             draw_text3x5(buf, max(2, (WIDTH - text_w(ln)) // 2), y + i * 6, ln, self.INK)
         return bytes(buf)
 
+    MENU_ROW0 = 12            # first entry's text row
+    MENU_ROW_STEP = 9         # 5px glyph + 4px gap -- rows can never collide
+    MENU_HI = (32, 54, 78)    # highlight plate: a dim wash of PLANE blue,
+                              # bright enough to read as "this one" from
+                              # across a room, dark enough that white label
+                              # text on top stays the brightest thing there
+
+    def _frame_menu(self):
+        """The selection menu. Deliberately the plainest screen in this
+        mode: a labelled list, one highlighted row, nothing to decode.
+        The design bar here is 'obvious in under a second', which rules
+        out the icon/abbreviation treatments the rest of this mode uses
+        -- a menu that needs its own legend has already failed."""
+        buf = blank()
+        fill(buf, self.BG)
+        port = self.sel_key == self.AIRPORT_KEY
+        ac = self._sel_aircraft()
+        # The header names WHAT the menu acts on -- a menu that doesn't
+        # say what it's about is exactly the ambiguity this view exists
+        # to remove. Real ident (already folded upstream at
+        # flights._ident()), or the real airport code for the sentinel.
+        if port:
+            title = (self.airport or {}).get("code") or "AIRPORT"
+        else:
+            title = (ac or {}).get("ident") or "AIRCRAFT"
+        draw_header(buf, fit_text(title, WIDTH - 26), self.PLANE, right_tag="MENU")
+
+        entries = self._menu_entries()
+        if not entries:
+            draw_text_centered(buf, 28, "NO OPTIONS", self.INK_DIM)
+            return bytes(buf)
+        self.menu_idx = min(self.menu_idx, len(entries) - 1)
+        for i, (label, _view) in enumerate(entries):
+            y = self.MENU_ROW0 + i * self.MENU_ROW_STEP
+            if i == self.menu_idx:
+                for yy in range(y - 2, y + 7):
+                    for xx in range(1, WIDTH - 1):
+                        put_px(buf, xx, yy, self.MENU_HI)
+                draw_text3x5(buf, 3, y, ">", (255, 255, 255))
+                draw_text3x5(buf, 8, y, fit_text(label, WIDTH - 11),
+                             (255, 255, 255))
+            else:
+                draw_text3x5(buf, 8, y, fit_text(label, WIDTH - 11), self.INK)
+        return bytes(buf)
+
+    def _frame_flight_path(self):
+        """The global flight-path map for the selected aircraft.
+
+        Layout budget, top to bottom: header 0-7, map body 10-41 (a 64x32
+        box, exactly the 2:1 aspect an equirectangular world projection
+        wants -- see world_xy()), then up to three 5px text rows at
+        y=44/51/58, the last starting at HEIGHT-6 and so ending inside
+        the real HEIGHT-5=59 bound for a 5px glyph.
+
+        NO on-screen legend for the three marker shapes, deliberately and
+        consistently with this mode's own precedent: the N/S/E/W labels
+        and the '<>=HOME +=MYR' footer were both built for the radar
+        scope, reviewed, and reverted for reading as clunky
+        instrument-panel text, and the window ring has stayed unlabelled
+        for the same reason. Shape+colour carries it (hollow green =
+        origin, solid coral = destination, white cross = the aircraft
+        right now)."""
+        buf = blank()
+        fill(buf, self.BG)
+        ac = self._sel_aircraft() or {}
+        route = ac.get("route") or {}
+        draw_header(buf, fit_text(ac.get("ident") or "AIRCRAFT", WIDTH - 26),
+                    self.ROUTE, right_tag="PATH",
+                    stale=(self.data.get("age") or 0) > 60)
+
+        drew = draw_world_map(buf, route, ac.get("lat"), ac.get("lon"))
+
+        rows = []
+        origin, dest = route.get("origin"), route.get("dest")
+        if drew["path"] and origin and dest:
+            rows.append("%s > %s" % (origin, dest))
+        elif drew["origin"] or drew["dest"]:
+            # Only one end resolved -- say which, rather than implying a
+            # whole route from half of one.
+            rows.append(("FROM %s" % origin) if drew["origin"] and origin
+                        else ("TO %s" % dest) if dest else "PARTIAL ROUTE")
+        else:
+            rows.append("NO ROUTE DATA")
+        # The destination city, spelled out -- same destination-first
+        # preference the DETAIL card's own route line already follows
+        # (a 3-letter code isn't legible to someone who doesn't already
+        # know codes). Origin city only as a fallback.
+        city = route.get("dest_city") or route.get("origin_city")
+        if city:
+            rows.append(city)
+        if not drew["aircraft"]:
+            # An honest statement of a real gap, not a blank space: the
+            # map is showing the route but NOT where the aircraft is,
+            # because ADS-B didn't broadcast a usable position.
+            rows.append("NO LIVE POSITION")
+        elif route.get("airline"):
+            rows.append(route["airline"])
+
+        for i, txt in enumerate(rows[:3]):
+            draw_text_centered(buf, 44 + i * 7, fit_text(txt, WIDTH - 4),
+                               self.INK if i == 0 else self.INK_DIM)
+        return bytes(buf)
+
     def frame(self):
         if not self.data.get("configured"):
             buf = blank()
@@ -7934,6 +8461,10 @@ class FlightEngine(Browsable, BigMomentSource):
             return self._frame_scope(aircraft)
         if self.view == self.VIEW_ATC_LOG:
             return self._frame_atc_log()
+        if self.view == self.VIEW_MENU:
+            return self._frame_menu()
+        if self.view == self.VIEW_FLIGHT_PATH:
+            return self._frame_flight_path()
 
         buf = blank()
         fill(buf, self.BG)
