@@ -3187,6 +3187,78 @@ re-save what a curl call just cleared. Reverted for real via the live
 service's own in-memory cache picked up the fix), confirmed via
 `git diff sports_config.json` showing zero diff.
 
+## Flight select menu + global flight-path map (2026-08-09)
+
+Owner ask: "when scrolling planes in flights, when you hit enter or
+button, a menu pops up with flight path with the most logical global map
+of it that's presentable, and then maybe hangar option? Something just
+logical." Replaced the blind rotate-chain with a real, discoverable menu
+and added a genuine world map.
+
+- **`flights.WORLD_COASTLINE`** (new) -- a real one-time extraction from
+  Natural Earth 110m (`ne_110m_coastline.geojson`, public domain, the
+  SAME source `flights.COASTLINE` already used), embedded in source, NOT
+  a runtime fetch (coastlines don't move -- the identical reasoning
+  already documented for the local coastline). Real source: 134
+  features / 5128 points; decimated to **45 segments / 415 points**
+  (~92% cut) by dropping sub-6° features then Ramer-Douglas-Peucker at
+  2.0° (deliberately sub-pixel at this scale). **Verified genuinely
+  real, not fabricated**: 415/415 embedded points match the real source
+  file EXACTLY -- the correct signature for RDP, which only ever removes
+  points and never invents them.
+- **Real `lat`/`lon` now kept on every aircraft** in
+  `_fetch_positions()` -- confirmed present on 8/8 aircraft in a real
+  live payload before relying on it; each validated numeric so a missing
+  value degrades to `None` rather than plotting (0, 0).
+- **`draw_world_map()`/`world_xy()`/`great_circle_points()`** --
+  equirectangular, chosen because its 2:1 aspect lands exactly on a
+  64x32 box with no letterboxing and lat/lon->pixel is a pure linear
+  scale with no fitted parameters. The great circle is **properly
+  interpolated (spherical slerp)** -- a straight equirectangular line is
+  a rhumb line, not the real path, and drawing one would be a subtle
+  lie. Antimeridian crossings BREAK the polyline rather than drawing a
+  full-width streak that doesn't exist.
+- Two real bugs the agent found by RENDERING rather than reading: a
+  whole-Earth window made the real MDW->MHT leg three pixels wide
+  (fixed with a `_fit_bounds()` window at uniform °/px, whole-Earth
+  fallback past 180° of longitude), and once windowed, off-view
+  coastline painted straight through the header because `put_px` only
+  guards the panel edge, not the map box (fixed with explicit clipping).
+- **`VIEW_MENU` (4) and `VIEW_FLIGHT_PATH` (5)**. Menu entries: DETAIL,
+  FLIGHT PATH, ATC LOG, THE HANGAR, BACK -- DETAIL first deliberately,
+  since it was the old bare-`rotate` destination, so existing muscle
+  memory presses rotate twice and lands where it always did. FLIGHT PATH
+  is offered ONLY when there's genuinely something real to plot.
+  `AIRPORT_KEY` honestly gets a shorter menu (no DETAIL card, no route).
+  THE HANGAR's up/down toggle is untouched -- the menu is an additional
+  path, not a replacement.
+- **A real bug found in the audit tool itself**: `render_audit.py`'s
+  internal view sweep was a hardcoded `range(4)`, so it would never have
+  touched views 4/5 -- the exact "one system doesn't know about a state
+  another just entered" class CLAUDE.md names repeatedly, sitting in the
+  tool meant to catch it. Now derived from each engine's own `VIEW_*`
+  constants, excluding `VIEW_TICKS` (a DURATION of 240, not a view id --
+  including it would have driven 240 nonexistent views). Independently
+  confirmed the old code genuinely missed both new views.
+
+Verified: both audits clean on the merged result (flights 31 frames, up
+from 29 -- the new views really are being swept), real service restart
+clean, all three proof renders reviewed (menu, the real SWA1065
+MDW->MHT map, and an LAX->SYD transpacific case confirming the
+antimeridian break). Timer safety independently re-verified against a
+genuinely pinned feed: 900 ticks parked on the menu and on the map both
+stay put (a first attempt appeared to fail, but that test hadn't
+actually pinned the feed -- with zero real aircraft in range the
+selection is correctly lost, which is right behaviour, not a bug).
+
+**Honest gap**: no live aircraft with a resolved route was selected on
+the real panel (the worktree can't deploy to the live service, and
+real traffic with resolved routes wasn't in range at merge time) -- the
+map and menu are verified by direct engine-driving against real
+coordinates and the real embedded coastline, this project's documented
+standard method. Worth a real spot-check next time traffic with a
+resolved route is up.
+
 ## Real first-run setup wizard (2026-08-09)
 
 A guided, skippable, step-by-step flow at `/setup` for the handful of
