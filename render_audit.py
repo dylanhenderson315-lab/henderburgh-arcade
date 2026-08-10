@@ -502,7 +502,21 @@ def drive(mode, audit, ticks=60, settle=0.25):
                           % (i, type(e).__name__, e))
 
     # Internal view cycles (satellite/weather/sports pinned, etc).
-    for v in range(4):
+    #
+    # The count is DERIVED from the engine's own VIEW_* constants, not a
+    # hardcoded 4. It was 4 for a long time, which silently stopped
+    # covering any engine that grew a fifth view -- exactly the "one
+    # system doesn't know about a state another just entered" bug class
+    # CLAUDE.md names repeatedly, here in the audit tool itself. Falls
+    # back to 4 for an engine with no VIEW_* constants at all, so nothing
+    # that passed before loses coverage.
+    # `VIEW_TICKS` is a DURATION, not a view id (240 on FlightEngine) --
+    # excluded by name, or this would drive 240 nonexistent views.
+    view_ids = [getattr(type(eng), a) for a in dir(type(eng))
+                if a.startswith("VIEW_") and not a.endswith("_TICKS")
+                and isinstance(getattr(type(eng), a), int)]
+    n_views = (max(view_ids) + 1) if view_ids else 4
+    for v in range(max(4, n_views)):
         if hasattr(eng, "view"):
             eng.view = v
             snap("view %d" % v)
