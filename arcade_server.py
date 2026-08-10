@@ -53,6 +53,7 @@ import blog
 import brightness
 import dnd
 import notify
+import nowplaying
 import paneltext
 import transitions
 
@@ -1235,6 +1236,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"favorite_aircraft": flights.load_favorite_aircraft()})
         elif path == "/api/dnd":
             self._json(dnd.load_config())
+        elif path == "/api/nowplaying":
+            # Status + config in one GET, same shape as /api/flights/follow
+            # above -- config (whether an account is set) and real live
+            # status (what's actually playing) are read together so the
+            # control panel never has to reconcile two separate calls.
+            s = nowplaying.FEED.get()
+            cfg = nowplaying.FEED.get_config()
+            self._json({"configured": s["configured"], "user": cfg["user"],
+                        "has_key": bool(cfg["api_key"]), "playing": s["playing"],
+                        "track": s["track"], "age": s["age"], "err": s["err"]})
         elif path == "/api/events":
             # Read-only peek at events_log.py's recent-events log for the
             # control panel's status overview -- confirmed genuinely
@@ -1591,6 +1602,19 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 j = json.loads(body or b"{}")
                 self._json({"ok": True, **dnd.save_config(bool(j.get("enabled")))})
+            except (ValueError, AttributeError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/nowplaying":
+            # {"api_key": "...", "user": "..."} -- a real Last.fm API key
+            # is a real credential (same category as notify_config.json's
+            # token), so it is NEVER echoed back in this response, only
+            # whether one is now set (has_key) -- matches this project's
+            # existing token-handling care.
+            try:
+                j = json.loads(body or b"{}")
+                cfg = nowplaying.FEED.set_config(
+                    j.get("api_key"), j.get("user"), clear_key=bool(j.get("clear_key")))
+                self._json({"ok": True, "user": cfg["user"], "has_key": bool(cfg["api_key"])})
             except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/gameday/config":

@@ -178,6 +178,7 @@
       <button data-mode="weather">🌤 Weather</button>
       <button data-mode="blog">💬 Guestbook</button>
       <button data-mode="events">🕒 Recent Events</button>
+      <button data-mode="nowplaying">🎵 Now Playing</button>
       <button data-mode="ambient">🔄 Ambient</button>
       </div>
     </div>
@@ -272,6 +273,22 @@
       radar scope and in THE HANGAR — it outranks even a heavy or a
       helicopter on its own. Registration only (a tail number), the same
       form THE HANGAR lists entries by.</div>
+  </div>
+
+  <div id="npcard" class="card hide">
+    <h2>Now Playing — Last.fm</h2>
+    <div class="row"><label>Username</label><input type="text" id="np-user" placeholder="your Last.fm username"></div>
+    <div class="row"><label>API key</label><input type="password" id="np-key" placeholder="paste a free Last.fm API key"></div>
+    <div class="row"><button id="np-save">Save</button>
+      <button id="np-clear">Remove key</button>
+      <span id="np-msg" class="badge"></span></div>
+    <div id="np-status" class="hint"></div>
+    <div class="hint">Free key, no OAuth: last.fm/api/account/create.
+      Works with anything that scrobbles to Last.fm — Spotify, Apple
+      Music, iTunes, YouTube Music. The saved key is never shown back
+      here once set (same as the Home Assistant token) — leaving the API
+      key field blank and saving only changes the username, it won't
+      clear an existing key.</div>
   </div>
 
   <div id="sportscard" class="card hide">
@@ -766,6 +783,30 @@ $('ff-clear').addEventListener('click', async () => {
   $('ff-callsign').value = ''; say('ff-msg', 'stopped'); loadFollow();
 });
 
+async function loadNowPlaying(){
+  try{ const j = await (await fetch('/api/nowplaying')).json();
+       if (j.user && !$('np-user').matches(':focus')) $('np-user').value = j.user;
+       $('np-key').placeholder = j.has_key ? '••••••••  (already set — leave blank to keep it)'
+                                            : 'paste a free Last.fm API key';
+       $('np-status').textContent = !j.configured ? ''
+         : (j.playing
+             ? ('Now playing: ' + (j.track ? (j.track.track + ' — ' + j.track.artist) : '?'))
+             : (j.err ? ('Error: ' + j.err) : 'Nothing playing right now')); }catch(_){}
+}
+$('np-save').addEventListener('click', async () => {
+  const j = await (await post('/api/nowplaying',
+    {api_key: $('np-key').value, user: $('np-user').value})).json();
+  $('np-key').value = '';
+  say('np-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
+  loadNowPlaying();
+});
+$('np-clear').addEventListener('click', async () => {
+  await post('/api/nowplaying', {user: $('np-user').value, clear_key: true});
+  $('np-key').value = '';
+  say('np-msg', 'key removed');
+  loadNowPlaying();
+});
+
 /* Favorite aircraft — same growable-list interaction as favorite_teams
    (see below): a text input to add, a real list of what's currently
    saved with a per-item remove button, calling the real
@@ -1031,7 +1072,7 @@ $('br-save').addEventListener('click', async () => {
   cfgTouched = 0; loadBrightness();
 });
 
-loadTicker(); loadLoc(); loadFollow(); loadFavAircraft(); loadSports(); loadNews(); loadBlog(); loadBrightness();
+loadTicker(); loadLoc(); loadFollow(); loadFavAircraft(); loadNowPlaying(); loadSports(); loadNews(); loadBlog(); loadBrightness();
 setInterval(loadBrightness, 30000);
 
 /* ---------- power + modes ---------- */
@@ -1071,6 +1112,8 @@ function syncUI(){
   // followflight (which has no home-relative concept at all — see
   // FollowFlightEngine's own docstring).
   $('favaccard').classList.toggle('hide', base !== 'flights');
+  $('npcard').classList.toggle('hide', base !== 'nowplaying');
+  if (base === 'nowplaying' && Date.now() - cfgTouched > 3000) loadNowPlaying();
   $('sportscard').classList.toggle('hide', base !== 'sports');
   $('newscard').classList.toggle('hide', base !== 'news');
   $('blogcard').classList.toggle('hide', base !== 'blog');

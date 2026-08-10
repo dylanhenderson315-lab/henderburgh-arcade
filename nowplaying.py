@@ -97,20 +97,36 @@ def load_config():
     return cfg
 
 
-def save_config(api_key, user):
+def save_config(api_key, user, clear_key=False):
     """Read-modify-write, preserving any key this function doesn't own --
     built in from the start per the 2026-08-09 lesson about save_*()
-    functions that construct a fresh dict instead."""
+    functions that construct a fresh dict instead.
+
+    `api_key=None` PRESERVES the existing saved key rather than clearing
+    it -- deliberate, and load-bearing for the control panel: the real
+    key is a real credential (see the module docstring) and is
+    intentionally never echoed back to the browser by the GET endpoint,
+    so a save that only changes `user` will naturally omit `api_key`.
+    Without this, that save would silently wipe a working key -- the
+    exact destructive-overwrite bug class this project has hit twice
+    before with `location_config.json`, caught here before it could
+    happen a third time. Pass `clear_key=True` for the one real case
+    that DOES mean "remove it" (an explicit unpin)."""
     data = {}
     if CONFIG_PATH.exists():
         try:
             data = json.loads(CONFIG_PATH.read_text()) or {}
         except (json.JSONDecodeError, OSError, AttributeError, TypeError):
             data = {}
-    data["api_key"] = (str(api_key).strip() or None) if api_key else None
+    if clear_key:
+        data["api_key"] = None
+    elif api_key:
+        data["api_key"] = str(api_key).strip() or None
+    # else: api_key omitted/falsy and not an explicit clear -- keep
+    # whatever was already saved, don't touch the "api_key" key at all.
     data["user"] = (str(user).strip() or None) if user else None
     CONFIG_PATH.write_text(json.dumps(data, indent=2))
-    return {"api_key": data["api_key"], "user": data["user"]}
+    return {"api_key": data.get("api_key"), "user": data["user"]}
 
 
 def _parse_now_playing(data):
@@ -172,8 +188,8 @@ class NowPlayingFeed:
         with self._lock:
             return {"api_key": self._api_key, "user": self._user}
 
-    def set_config(self, api_key, user):
-        cfg = save_config(api_key, user)
+    def set_config(self, api_key, user, clear_key=False):
+        cfg = save_config(api_key, user, clear_key=clear_key)
         with self._lock:
             self._api_key, self._user = cfg["api_key"], cfg["user"]
             # A new account's track is a different real fact -- never show

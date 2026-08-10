@@ -75,7 +75,8 @@ import notify
 # the same marquee. `notify` joins this set for the same reason -- its
 # own message row falls back to draw_marquee() when the wrapped text
 # doesn't fit three lines (see NotifyEngine.frame()).
-MARQUEE_OK = {"news", "ticker", "sports", "gameday", "ambient", "flights", "notify"}
+MARQUEE_OK = {"news", "ticker", "sports", "gameday", "ambient", "flights", "notify",
+              "nowplaying"}
 
 # followflight's route line is fit_text()-truncated, never marqueed --
 # it has no continuous scroll of its own, so it does NOT join this set.
@@ -85,8 +86,8 @@ MARQUEE_OK = {"news", "ticker", "sports", "gameday", "ambient", "flights", "noti
 # no API strings to damage. `planewatch`/`notify` (2026-08-09) are
 # force-triggered-only takeovers -- see drive_planewatch()/drive_notify()
 # below for why they need dedicated drivers instead of the generic one.
-TEXT_MODES = ["ticker", "satellite", "flights", "followflight", "departures", "sports",
-              "news", "weather", "clock", "blog", "events", "ambient", "gameday",
+TEXT_MODES = ["ticker", "satellite", "flights", "followflight", "departures", "nowplaying",
+              "sports", "news", "weather", "clock", "blog", "events", "ambient", "gameday",
               "planewatch", "notify"]
 
 # Modes with a dedicated driver instead of the generic zero-arg
@@ -411,11 +412,43 @@ def drive_departures(audit):
     return frames[0], collisions
 
 
+def drive_nowplaying(audit):
+    """NowPlayingEngine (2026-08-09) reads nowplaying.FEED, which is
+    honestly unconfigured in this environment (no real Last.fm key) --
+    the generic drive() loop would only ever cover the NO LAST.FM
+    ACCOUNT SET state. Sets `.data` directly, same technique every other
+    custom driver here uses. Four variants: not configured, configured
+    but honestly nothing playing (with a real-shaped API error message,
+    to exercise that text row too), a short track/artist/album, and a
+    deliberately long track name to force the marquee-vs-centered branch
+    (text_w(name) > WIDTH-4)."""
+    frames = [0]
+    collisions = []
+    variants = [
+        {"configured": False, "playing": None, "track": None, "age": None, "err": None},
+        {"configured": True, "playing": False, "track": None, "age": 5.0,
+         "err": "INVALID API KEY - YOU MUST BE GRANTED A VALID KEY"},
+        {"configured": True, "playing": True, "age": 2.0, "err": None,
+         "track": {"track": "HOPPIPOLLA", "artist": "SIGUR ROS", "album": "TAKK..."}},
+        {"configured": True, "playing": True, "age": 2.0, "err": None,
+         "track": {"track": "A REALLY VERY EXTREMELY LONG SONG TITLE THAT WONT FIT",
+                   "artist": "SOME ARTIST WITH A LONG NAME TOO", "album": None}},
+    ]
+    for i, data in enumerate(variants):
+        eng = engines.NowPlayingEngine.__new__(engines.NowPlayingEngine)
+        eng.data = data
+        eng.pulse = engines.Pulse()
+        eng.scroll = 0.0
+        _snap(audit, eng, "nowplaying variant %d" % i, frames, collisions)
+    return frames[0], collisions
+
+
 CUSTOM_DRIVERS["planewatch"] = drive_planewatch
 CUSTOM_DRIVERS["notify"] = drive_notify
 CUSTOM_DRIVERS["events"] = drive_events
 CUSTOM_DRIVERS["followflight"] = drive_followflight
 CUSTOM_DRIVERS["departures"] = drive_departures
+CUSTOM_DRIVERS["nowplaying"] = drive_nowplaying
 
 
 def drive(mode, audit, ticks=60, settle=0.25):

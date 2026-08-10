@@ -21,8 +21,10 @@ import time
 from collections import deque
 from pathlib import Path
 
+import audio_sync
 import dnd
 import events_log
+import nowplaying
 import market
 import satellite
 import skypass
@@ -9117,6 +9119,132 @@ class DepartureBoardEngine(Browsable):
         return bytes(buf)
 
 
+class NowPlayingEngine:
+    """NOW PLAYING (2026-08-09) -- the real currently-playing track via
+    Last.fm (nowplaying.py), plus a real live visualizer bar driven by
+    the panel's own mic (audio_sync.py's real 16-band FFT, the SAME data
+    the WLED-side AudioReactive visualizer uses -- see nowplaying.py's
+    own module docstring for why the mic ALONE can't identify a song:
+    it's volume + FFT, no song identity, so this combines TWO
+    independently real sources rather than fabricating either one).
+
+    Three real states, matching nowplaying.FEED.get()'s own `playing`
+    tri-state exactly (None/False/True) -- same shape `FollowFlightEngine`/
+    `DepartureBoardEngine` already established for "not configured" vs.
+    "configured but honestly nothing right now" vs. "real content":
+      - not configured  -> "NO LAST.FM ACCOUNT SET" with instructions
+      - configured, nothing playing -> honest "NOTHING PLAYING RIGHT NOW"
+      - configured, playing -> track/artist/album + the real FFT bars
+
+    The FFT bars are drawn even with no track resolved (a real player
+    that scrobbles slowly, or genuinely doesn't scrobble, still has real
+    audio flowing) -- gated on `audio_sync.FEED`'s own `stale` flag, not
+    on whether Last.fm resolved anything, since these are two
+    independent real signals and one being honestly absent must never
+    hide the other.
+    """
+
+    name = "nowplaying"
+    tick_rate = 0.1
+
+    BG = (0, 0, 0)
+    INK = (150, 160, 185)
+    INK_DIM = (70, 76, 92)
+    ACCENT = (255, 90, 200)          # magenta -- distinct from every other mode's accent
+    BAR_COLOR = (90, 220, 255)       # cool cyan, reads as "signal" not "text"
+
+    def __init__(self):
+        self.score = 0
+        self.data = {"configured": False, "playing": None, "track": None,
+                     "age": None, "err": None}
+        self.pulse = Pulse()
+        self.scroll = 0.0
+
+    def reset(self):
+        pass
+
+    def has_content(self):
+        # Ordinary glance mode, not force-triggered -- "content" means a
+        # Last.fm account is configured, same as FollowFlightEngine's own
+        # has_content() reasoning: even the honest NOTHING-PLAYING state
+        # is real, meaningful content to show.
+        return bool(self.data.get("configured"))
+
+    def input(self, cmd):
+        pass       # nothing to browse -- one track, one card
+
+    def auto(self):
+        pass
+
+    def tick(self):
+        self.data = nowplaying.FEED.get()
+        t = self.data.get("track")
+        self.pulse.note((t.get("track"), t.get("artist")) if t else None)
+        self.scroll += 0.6
+
+    def frame(self):
+        buf = blank()
+        fill(buf, self.BG)
+
+        configured = self.data.get("configured")
+        playing = self.data.get("playing")
+        track = self.data.get("track")
+
+        if not configured:
+            draw_header(buf, "NOW PLAYING", self.ACCENT)
+            draw_text_centered(buf, 24, "NO LAST.FM", self.INK)
+            draw_text_centered(buf, 32, "ACCOUNT SET", self.INK)
+            draw_text_centered(buf, 44, "SET ONE FROM", self.INK_DIM)
+            draw_text_centered(buf, 52, "CONTROL PANEL", self.INK_DIM)
+            return bytes(buf)
+
+        if not playing:
+            draw_header(buf, "NOW PLAYING", rim(self.ACCENT, 0.7),
+                        stale=bool(self.data.get("err")))
+            draw_text_centered(buf, 26, "NOTHING PLAYING", self.INK_DIM)
+            draw_text_centered(buf, 34, "RIGHT NOW", self.INK_DIM)
+            if self.data.get("err"):
+                draw_text_centered(buf, 48, fit_text(str(self.data["err"]), WIDTH - 4), self.INK_DIM)
+            return bytes(buf)
+
+        col = self.pulse.mix(self.ACCENT)
+        draw_header(buf, "NOW PLAYING", col,
+                    stale=bool(self.data.get("age") and self.data["age"] > 60))
+
+        name = track.get("track") or "UNKNOWN TRACK"
+        if text_w(name) > WIDTH - 4:
+            draw_marquee(buf, 12, name, (255, 255, 255), self.scroll)
+        else:
+            draw_text_centered(buf, 12, name, (255, 255, 255))
+        artist = track.get("artist")
+        if artist:
+            draw_text_centered(buf, 21, fit_text(artist, WIDTH - 4), self.INK)
+        album = track.get("album")
+        if album:
+            draw_text_centered(buf, 29, fit_text(album, WIDTH - 4), self.INK_DIM)
+
+        # REAL live visualizer -- the panel's own mic, via WLED-MM's own
+        # on-device 16-band FFT (audio_sync.py), not synthesized. Only
+        # drawn while real packets are actually arriving (not `stale`) --
+        # an idle/silent bar row would be worse than no row, the same
+        # "never invent a visual" rule backgrounds.py's own WLED-effect
+        # capture already follows.
+        a = audio_sync.FEED.get()
+        if not a.get("stale"):
+            bar_y0, bar_y1 = 38, 58
+            bar_h = bar_y1 - bar_y0
+            n = len(a["fft"])
+            bw = WIDTH / n
+            for i, level in enumerate(a["fft"]):
+                h = max(1, int((level / 255.0) * bar_h))
+                x0 = int(i * bw)
+                x1 = int((i + 1) * bw) - 1
+                for x in range(x0, max(x0, x1) + 1):
+                    for y in range(bar_y1 - h, bar_y1):
+                        put_px(buf, x, y, self.BAR_COLOR)
+        return bytes(buf)
+
+
 class NotifyEngine:
     """URGENT-priority Home Assistant notification takeover (task #8,
     2026-08-08). Built with the EXACT same shape as PlaneWatchEngine
@@ -13190,6 +13318,7 @@ class MenuEngine:
         ("flights",  "FLIGHTS",  (120, 200, 255)),
         ("followflight", "FOLLOW", (255, 200, 90)),
         ("departures", "BOARD", (120, 200, 255)),
+        ("nowplaying", "MUSIC", (255, 90, 200)),
         ("sports",   "SPORTS",   (255, 140, 40)),
         ("news",     "NEWS",     (255, 226, 60)),
         ("weather",  "WEATHER",  (90, 190, 255)),
@@ -13459,6 +13588,16 @@ class MenuEngine:
                 put_px(buf, x0 + 7, y0 + yy, c)
             block(1, 2, 5, 1, w)
             block(1, 5, 5, 1, w)
+        elif gid == "nowplaying":
+            # A musical note -- a filled head plus a stem, the one
+            # universally-readable "music" glyph, distinct from every
+            # other icon's abstract-shape language on purpose (nothing
+            # else here needs to be THIS literal to read instantly).
+            block(1, 5, 2, 2, c)
+            for yy in range(1, 7):
+                put_px(buf, x0 + 2, y0 + yy, c)
+            put_px(buf, x0 + 3, y0 + 1, c)
+            put_px(buf, x0 + 3, y0 + 2, c)
         elif gid == "sports":
             # A scoreboard: a frame with a divider and two blocky "score"
             # marks -- reads as "live score" distinct from the ticker's
@@ -15968,6 +16107,10 @@ ENGINES = {
     # local ADS-B traffic classified against the configured home
     # airport, zero new I/O (see DepartureBoardEngine's own docstring).
     "departures": DepartureBoardEngine,
+    # NOW PLAYING (2026-08-09) -- real track via Last.fm + a real live
+    # visualizer off the panel's own mic (see NowPlayingEngine's own
+    # docstring for why the mic alone can't do this).
+    "nowplaying": NowPlayingEngine,
     "sports": SportsEngine,
     "news": NewsEngine,
     "weather": WeatherEngine,
