@@ -240,6 +240,27 @@ def main():
                  lambda: {"title": paneltext.panel_text(dirty_notify),
                           "message": paneltext.panel_text(dirty_notify)})
 
+    # ---- now playing (2026-08-09) -- real artist/track/album names are
+    # exactly the kind of text that carries accents and curly quotes
+    # ("Sigur Ros", "Beyonce", "Deja Vu"), i.e. the single highest-risk
+    # category for this project's #1 bug class after MMA fighter names.
+    # Replayed through nowplaying._parse_now_playing() -- the real
+    # boundary function -- with canaries injected into a real-shaped
+    # Last.fm user.getRecentTracks payload. NOT a live fetch: Last.fm
+    # requires an API key and none is configured (see nowplaying.py's own
+    # honest note about that), so this replays the documented payload
+    # shape rather than a captured one -- which is exactly what this
+    # audit is for, since it tests THE FOLD, not the schema.
+    import nowplaying
+    dirty_np = {"recenttracks": {"track": [{
+        "name": "Song" + "".join(CANARIES),
+        "artist": {"#text": "Artist" + "".join(CANARIES)},
+        "album": {"#text": "Album" + "".join(CANARIES)},
+        "@attr": {"nowplaying": "true"},
+    }]}}
+    bad += check("nowplaying track/artist/album",
+                 lambda: nowplaying._parse_now_playing(dirty_np))
+
     # ---- the pure text cleaners each feed exposes ------------------------
     import news
     import blog
