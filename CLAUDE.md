@@ -3187,6 +3187,70 @@ re-save what a curl call just cleared. Reverted for real via the live
 service's own in-memory cache picked up the fix), confirmed via
 `git diff sports_config.json` showing zero diff.
 
+## Now Playing -- Last.fm + a real mic visualizer (2026-08-09)
+
+Wired up the Last.fm feed built earlier this session:
+`NowPlayingEngine` (`ENGINES["nowplaying"]`) + a real control-panel card.
+
+**Two independently real signals, neither fabricated.** Track/artist/
+album come from `nowplaying.FEED` (Last.fm). The visualizer bar is a
+SEPARATE real source -- `audio_sync.py`'s existing real 16-band FFT off
+the panel's own mic, the identical data WLED-MM's own on-device
+AudioReactive visualizer uses. `nowplaying.py`'s own docstring already
+explains why the mic alone could never do Now Playing (volume + FFT
+only, no song identity) -- this combines the two rather than either
+faking a track from the FFT or faking bars from nothing. The bars are
+gated on `audio_sync.FEED`'s own real `stale` flag, independent of
+whether Last.fm resolved a track -- an idle/silent bar row would be
+worse than no row (the same "never invent a visual" rule
+`backgrounds.py`'s WLED-effect capture already follows), and one signal
+being honestly absent must never hide the other.
+
+Three real states (not configured / configured-but-honestly-nothing-
+playing / playing), the same tri-state shape `FollowFlightEngine`/
+`DepartureBoardEngine` already established.
+
+**A real bug caught by the generic `render_audit.py` driver on the very
+first run**, before any custom driver existed: the "SET ONE FROM THE"
+empty-state line overflowed the panel by 4px. Fixed
+(`"SET ONE FROM" / "CONTROL PANEL"`), THEN a `drive_nowplaying` custom
+driver was added (4 variants covering all three states plus a forced
+marquee case) and `nowplaying` joined `MARQUEE_OK`.
+
+**A real destructive-overwrite risk caught and fixed BEFORE it could
+ever happen live** -- the same bug class `location_config.json` has
+hit twice already. The `GET /api/nowplaying` endpoint deliberately never
+echoes the real API key back (matching the HA notify token's own
+credential-handling care), which means an ordinary "just update my
+username" save would naturally omit `api_key` -- and the first draft of
+`nowplaying.save_config()` treated a missing key as "clear it". Fixed
+with the exact "omitted preserves the existing value, an explicit
+`clear_key=True` is the one real path that removes it" pattern
+`satellite.save_window()`'s own `max_nm` parameter already established.
+Verified against the REAL LIVE running service, not just a unit test:
+set both fields, saved user-only with the key omitted, confirmed via a
+second real GET that `has_key` stayed `true` -- the bug would have
+silently wiped a real working key on the very first ordinary edit.
+
+`nowplaying_config.json` added to `.gitignore` -- it will hold a real
+Last.fm API key once configured, same credential category as
+`notify_config.json`.
+
+Verified: both audits clean, real service restart, real mode-switch and
+`/api/frame` pull (honest not-configured state), the full real
+save/preserve/clear round-trip against the live service, config reverted
+to clean defaults afterward.
+
+**Honest gap, stated plainly**: no real Last.fm API key is configured
+on this device yet (the owner hasn't provided one), so the response
+PARSING in `nowplaying._parse_now_playing()` is correct-but-unverified
+against a genuinely live payload -- only the error path is verified
+against real live behaviour (Last.fm's real invalid-key response, tested
+earlier this session). Re-check the real field names the first time a
+real key is added, per this project's own "ship correct, flag honestly"
+precedent (NHL goal detector, MMA finish detector, the flight-path map's
+own real-traffic gap just above).
+
 ## Flight select menu + global flight-path map (2026-08-09)
 
 Owner ask: "when scrolling planes in flights, when you hit enter or
