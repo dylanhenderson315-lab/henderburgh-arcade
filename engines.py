@@ -16052,9 +16052,23 @@ class ClockEngine:
             put_px(buf, int(round(cx + (r - 1) * math.sin(a))),
                   int(round(cy - (r - 1) * math.cos(a))), rim(self.TIME, 0.3))
 
+        # Cardinals only (12/3/6/9) get a real printed numeral; the other
+        # eight hours get a tick mark instead -- direct owner ask,
+        # trading the full numeral ring for a cleaner, less crowded face
+        # (also widens the real margin the 2026-08-14 numeral-collision
+        # fix above was fighting for, since 8 fewer two/one-digit glyphs
+        # means far less to keep clear of each other).
         num_r = r - 5
         for h in range(12):
-            self._draw_hour_numeral(buf, cx, cy, num_r, h, self.TIME)
+            if h % 3 == 0:
+                self._draw_hour_numeral(buf, cx, cy, num_r, h, self.TIME)
+                continue
+            a = math.radians(h * 30.0)
+            inner = r - 3
+            draw_line(buf,
+                      cx + inner * math.sin(a), cy - inner * math.cos(a),
+                      cx + r * math.sin(a), cy - r * math.cos(a),
+                      rim(self.TIME, 0.7))
 
         # Hands from REAL wall-clock fractions, not tick counts -- a
         # tick-derived second hand would drift against every other clock
