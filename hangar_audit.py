@@ -22,6 +22,7 @@ the real HANGAR_PATH) before any write happens.
 """
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import hangar
@@ -92,12 +93,24 @@ def main():
             # branch), never on an update to times_seen/last_seen for an
             # aircraft already in the collection. -----------------------
             before = set(log._entries)
-            log.record_sighting("N0001TEST", "C172", None)   # repeat visitor
+            # last_seen was stamped to the insertion index (a 1970-era
+            # unix time) so LRU eviction is deterministic. A same-visit
+            # poll needs a FRESH last_seen or the visit-gap logic would
+            # treat 50 years of silence as a return trip.
+            log._entries["N0001TEST"]["last_seen"] = time.time()
+            log.record_sighting("N0001TEST", "C172", None)   # same visit
             bad += check("repeat sighting does not change collection size",
                          len(log._entries) == hangar.HANGAR_MAX_ENTRIES)
             bad += check("repeat sighting evicts nothing (same key set)",
                          set(log._entries) == before)
-            bad += check("repeat sighting increments times_seen",
+            bad += check("same-visit poll does not increment times_seen",
+                         log._entries["N0001TEST"]["times_seen"] == 1,
+                         "got %r" % log._entries["N0001TEST"]["times_seen"])
+            # A real return after VISIT_GAP_S is a new visit.
+            log._entries["N0001TEST"]["last_seen"] = (
+                time.time() - hangar.VISIT_GAP_S - 1)
+            log.record_sighting("N0001TEST", "C172", None)
+            bad += check("return after visit gap increments times_seen",
                          log._entries["N0001TEST"]["times_seen"] == 2,
                          "got %r" % log._entries["N0001TEST"]["times_seen"])
 

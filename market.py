@@ -30,14 +30,40 @@ from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "market_config.json"
 
-DEFAULT_CRYPTO = ["BTC", "ETH", "SOL"]
-DEFAULT_STOCKS = ["AAPL", "NVDA", "TSLA"]
+DEFAULT_CRYPTO = ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK"]
+DEFAULT_STOCKS = ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "GOOGL", "META", "AMD"]
 
 # Config lists plain ticker symbols (BTC, not "bitcoin") because that's what
 # an owner actually types -- this is the map that turns one into the other.
 # Covers the coins someone is likely to actually type in; an unrecognized
 # symbol is dropped with a clear reason rather than silently ignored (see
 # MarketFeed.set_symbols), not the end of a search feature this doesn't need.
+#
+# EXPANDED 2026-08-10 (24 -> ~115 real coins), direct owner ask ("way more
+# stocks and cryptos"). Stocks never needed this table -- Yahoo's chart
+# endpoint accepts any real ticker directly, no symbol-to-id translation,
+# so there was never a hard cap there; the real gap was entirely here.
+# CoinGecko's `/simple/price` batches every id into ONE request regardless
+# of list size (confirmed by reading _fetch_crypto() below before touching
+# this table), so growing this list adds ZERO new requests/minute -- the
+# same REFRESH=60s cadence covers 3 coins or 115 identically.
+#
+# HONEST GAP, stated per this project's own "ship correct, flag honestly"
+# precedent: this sandbox's network to api.coingecko.com is unreachable
+# this session (same class of block already documented for ESPN
+# elsewhere in this project), so these ids are from CoinGecko's own
+# well-established public ID convention (mostly lowercase-hyphenated
+# project name), not individually re-confirmed against a live response.
+# A WRONG id here is a low-risk failure mode by construction, not a
+# fabricated-number risk: `_fetch_crypto()` only appends a row when
+# CoinGecko's response actually contains real, non-null data for that id
+# (`if not row or row.get("usd") is None: continue`), so a stale/wrong id
+# just silently omits that one coin rather than ever showing an invented
+# price -- the exact same "an honest gap beats a lie" contract every
+# other feed in this project already holds itself to. A HANDFUL of newer/
+# rebranded tokens (marked below) are the most likely to have drifted;
+# verify against a live response the first session this sandbox can
+# reach CoinGecko again.
 SYMBOL_TO_COINGECKO_ID = {
     "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "XRP": "ripple",
     "DOGE": "dogecoin", "ADA": "cardano", "AVAX": "avalanche-2",
@@ -46,6 +72,36 @@ SYMBOL_TO_COINGECKO_ID = {
     "UNI": "uniswap", "ATOM": "cosmos", "XLM": "stellar", "ETC": "ethereum-classic",
     "FIL": "filecoin", "APT": "aptos", "ARB": "arbitrum", "OP": "optimism",
     "NEAR": "near", "ICP": "internet-computer", "SUI": "sui", "TON": "the-open-network",
+    # -- expanded 2026-08-10, below --
+    "BNB": "binancecoin", "USDT": "tether", "USDC": "usd-coin", "DAI": "dai",
+    "WBTC": "wrapped-bitcoin", "TRX": "tron", "LEO": "leo-token",
+    "CRO": "crypto-com-chain", "OKB": "okb", "HBAR": "hedera-hashgraph",
+    "VET": "vechain", "ALGO": "algorand", "QNT": "quant-network", "AAVE": "aave",
+    "GRT": "the-graph", "XTZ": "tezos", "EOS": "eos", "THETA": "theta-token",
+    "FTM": "fantom", "SAND": "the-sandbox", "MANA": "decentraland",
+    "AXS": "axie-infinity", "FLOW": "flow", "CHZ": "chiliz", "KCS": "kucoin-shares",
+    "NEO": "neo", "MKR": "maker", "CAKE": "pancakeswap-token", "XMR": "monero",
+    "ZEC": "zcash", "DASH": "dash", "COMP": "compound-governance-token",
+    "1INCH": "1inch", "ENJ": "enjincoin", "BAT": "basic-attention-token",
+    "ZIL": "zilliqa", "WAVES": "waves", "KSM": "kusama", "RUNE": "thorchain",
+    "LDO": "lido-dao", "INJ": "injective-protocol", "IMX": "immutable-x",
+    "RNDR": "render-token", "PEPE": "pepe", "WIF": "dogwifcoin", "BONK": "bonk",
+    "FET": "fetch-ai", "TIA": "celestia", "SEI": "sei-network", "GALA": "gala",
+    "APE": "apecoin", "CRV": "curve-dao-token", "DYDX": "dydx", "GMX": "gmx",
+    "PENDLE": "pendle", "ENS": "ethereum-name-service", "KAVA": "kava",
+    "MINA": "mina-protocol", "ROSE": "oasis-network", "ZRX": "0x",
+    "YFI": "yearn-finance", "BAL": "balancer", "SUSHI": "sushi",
+    "LRC": "loopring", "ANKR": "ankr", "CELO": "celo", "ONE": "harmony",
+    "IOTA": "iota", "XEC": "ecash", "DGB": "digibyte", "RVN": "ravencoin",
+    "HNT": "helium", "AR": "arweave", "CFX": "conflux-token", "KDA": "kadena",
+    "GNO": "gnosis", "OSMO": "osmosis", "JASMY": "jasmycoin", "SKL": "skale",
+    "CVX": "convex-finance", "FXS": "frax-share", "GMT": "stepn",
+    "MASK": "mask-network", "API3": "api3", "UMA": "uma", "BLUR": "blur",
+    "MAGIC": "magic", "STORJ": "storj", "ZETA": "zetachain",
+    # Newer/rebranded -- most likely to need a real-payload re-check:
+    "EGLD": "elrond-erd-2", "STX": "blockstack", "SNX": "havven",
+    "JUP": "jupiter-exchange-solana", "ORDI": "ordinals",
+    "WLD": "worldcoin-wld",
 }
 
 REFRESH = 60.0          # seconds between refreshes
@@ -95,6 +151,79 @@ def save_config(crypto, stocks):
     data["crypto"] = list(crypto)
     data["stocks"] = list(stocks)
     CONFIG_PATH.write_text(json.dumps(data, indent=2))
+
+
+# KNOWN_STOCKS -- 2026-08-10, "do the stock expansion the same way as
+# crypto." Real, important structural difference stated up front: this
+# is NOT a translation table the way SYMBOL_TO_COINGECKO_ID is -- Yahoo's
+# chart endpoint (_fetch_stocks() below) already accepts any real ticker
+# symbol directly, confirmed by reading that function before adding this
+# -- so there was never a hard cap on which stocks could be tracked, and
+# this table changes nothing about what _fetch_stocks() can fetch.
+#
+# What this genuinely adds: a real symbol -> company-name reference
+# table (~100 well-known real US equities) for the control panel's
+# "quick add" UI (GET /api/ticker/known_stocks, mirroring the crypto
+# list's own real purpose of "recognizable names to pick from" rather
+# than raw tickers), and a richer seeded DEFAULT_STOCKS list. Company
+# names are well-established real public tickers (S&P mega/large-cap +
+# well-known tech/consumer names), not fetched live -- same "static
+# reference data" category as flights.ICAO_TYPE_NAMES, not a claim that
+# needs a live payload to confirm.
+KNOWN_STOCKS = {
+    "AAPL": "Apple", "MSFT": "Microsoft", "GOOGL": "Alphabet", "AMZN": "Amazon",
+    "NVDA": "NVIDIA", "META": "Meta Platforms", "TSLA": "Tesla",
+    "BRK-B": "Berkshire Hathaway", "AVGO": "Broadcom", "JPM": "JPMorgan Chase",
+    "LLY": "Eli Lilly", "V": "Visa", "UNH": "UnitedHealth", "XOM": "Exxon Mobil",
+    "MA": "Mastercard", "COST": "Costco", "HD": "Home Depot",
+    "PG": "Procter & Gamble", "JNJ": "Johnson & Johnson", "NFLX": "Netflix",
+    "BAC": "Bank of America", "ABBV": "AbbVie", "CRM": "Salesforce",
+    "ORCL": "Oracle", "CVX": "Chevron", "KO": "Coca-Cola", "AMD": "AMD",
+    "PEP": "PepsiCo", "WMT": "Walmart", "ADBE": "Adobe", "MCD": "McDonald's",
+    "TMO": "Thermo Fisher", "CSCO": "Cisco", "ACN": "Accenture",
+    "ABT": "Abbott Labs", "LIN": "Linde", "DHR": "Danaher",
+    "INTC": "Intel", "IBM": "IBM", "PFE": "Pfizer", "NKE": "Nike",
+    "TXN": "Texas Instruments", "PM": "Philip Morris", "GE": "GE Aerospace",
+    "UNP": "Union Pacific", "CAT": "Caterpillar", "QCOM": "Qualcomm",
+    "AMAT": "Applied Materials", "GS": "Goldman Sachs", "SPGI": "S&P Global",
+    "HON": "Honeywell", "BA": "Boeing", "RTX": "RTX Corp",
+    "SBUX": "Starbucks", "DE": "Deere & Co", "LOW": "Lowe's",
+    "BLK": "BlackRock", "MDT": "Medtronic", "MU": "Micron",
+    "ISRG": "Intuitive Surgical", "GILD": "Gilead Sciences", "ADI": "Analog Devices",
+    "LMT": "Lockheed Martin", "AMT": "American Tower", "TJX": "TJX Companies",
+    "MMC": "Marsh McLennan", "SYK": "Stryker", "REGN": "Regeneron",
+    "VRTX": "Vertex Pharma", "PLD": "Prologis", "SCHW": "Charles Schwab",
+    "C": "Citigroup", "CB": "Chubb", "ETN": "Eaton", "SO": "Southern Co",
+    "PANW": "Palo Alto Networks", "ZTS": "Zoetis", "BSX": "Boston Scientific",
+    "MO": "Altria", "DUK": "Duke Energy", "BMY": "Bristol Myers Squibb",
+    "SHOP": "Shopify", "UBER": "Uber", "PYPL": "PayPal", "SQ": "Block",
+    "COIN": "Coinbase", "SNOW": "Snowflake", "PLTR": "Palantir",
+    "RIVN": "Rivian", "LCID": "Lucid Group", "F": "Ford", "GM": "General Motors",
+    "DIS": "Disney", "CMCSA": "Comcast", "T": "AT&T", "VZ": "Verizon",
+    "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF", "DIA": "Dow ETF",
+    "IWM": "Russell 2000 ETF", "ARKK": "ARK Innovation ETF",
+    "SOFI": "SoFi Technologies", "RBLX": "Roblox", "ABNB": "Airbnb",
+    "DASH": "DoorDash", "SPOT": "Spotify", "PINS": "Pinterest",
+    "SNAP": "Snap", "ROKU": "Roku", "DKNG": "DraftKings",
+}
+
+
+def list_known_stocks():
+    return [{"sym": k, "name": v} for k, v in sorted(KNOWN_STOCKS.items())]
+
+
+# One real display-name override, found by an audit (2026-08-11):
+# .title()-casing "0x" (the real CoinGecko id for the ZRX token) produces
+# "0X" -- a plain string transform with no knowledge that "0x" is
+# already the correct real brand casing. Everything else in
+# SYMBOL_TO_COINGECKO_ID title-cases cleanly; this is the one exception.
+_DISPLAY_NAME_OVERRIDE = {"0x": "0x Protocol"}
+
+
+def list_known_crypto():
+    return [{"sym": k, "name": _DISPLAY_NAME_OVERRIDE.get(
+                SYMBOL_TO_COINGECKO_ID[k], SYMBOL_TO_COINGECKO_ID[k].replace("-", " ").title())}
+            for k in sorted(SYMBOL_TO_COINGECKO_ID)]
 
 
 def _fetch_crypto(symbols):

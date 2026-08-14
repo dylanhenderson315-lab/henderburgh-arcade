@@ -5,10 +5,17 @@ Same shape as market.py and satellite.py, deliberately: all I/O lives here
 so the mode that draws it stays pure, background thread with a last-good
 cache, never blocks the render loop, never invents a number.
 
-Two keyless sources:
-  * api.adsb.lol         -- live aircraft positions within a radius of a
-    point. A free, keyless, community ADS-B aggregator (no registration,
-    no rate-limit friction at this call volume).
+Two keyless sources, plus a position-aggregator fallback chain:
+  * api.adsb.lol / api.airplanes.live / opendata.adsb.fi
+    -- live aircraft positions within a radius of a point. All three are
+    free, keyless, readsb/tar1090-family aggregators with the same per-
+    aircraft field names. adsb.lol is tried first (historical primary);
+    if it errors OR returns an empty 200 while another replica still
+    has traffic, the next source is used. Confirmed 2026-08-11: adsb.lol
+    `/v2/point` around the configured home returned total=0 out to 250nm
+    (HTTP 200, "No error") while airplanes.live returned 17 and adsb.fi
+    19 at the same coordinates -- an empty replica, not a quiet sky.
+    Treating that 200/[] as gospel blacked out the radar.
   * api.adsbdb.com       -- route/aircraft/airline enrichment by callsign.
     Free, keyless, explicitly recommended in PRODUCTION.md over FlightAware
     AeroAPI (which has a real $100/month minimum past its free tier and
@@ -41,20 +48,41 @@ import events_log
 import hangar
 import satellite
 
-POSITION_URL = "https://api.adsb.lol/v2/point/{lat}/{lon}/{radius_nm}"
+# Each entry is (name, url_template, list_key). url_template is formatted
+# with lat/lon/radius_nm (position) or callsign (follow). list_key is
+# where that replica puts the aircraft array -- adsb.lol and
+# airplanes.live use "ac"; adsb.fi's opendata path uses "aircraft".
+# Order is preference: first non-empty success wins.
+POSITION_SOURCES = (
+    ("adsb.lol",
+     "https://api.adsb.lol/v2/point/{lat}/{lon}/{radius_nm}", "ac"),
+    ("airplanes.live",
+     "https://api.airplanes.live/v2/point/{lat}/{lon}/{radius_nm}", "ac"),
+    ("adsb.fi",
+     "https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{radius_nm}",
+     "aircraft"),
+)
+# Kept as the first source's URL so any leftover formatter / comment that
+# still says POSITION_URL keeps pointing at a real endpoint, not a lie.
+POSITION_URL = POSITION_SOURCES[0][1]
 ROUTE_URL = "https://api.adsbdb.com/v0/callsign/{callsign}"
 # GLOBAL per-callsign lookup (2026-08-09) -- "follow a specific flight"
-# mode. Confirmed live: GET https://api.adsb.lol/v2/callsign/{callsign}
-# returns the SAME {"ac": [...], "total": N, ...} shape as POSITION_URL
-# above, using the SAME per-aircraft field names _fetch_positions() below
-# already parses -- this is the correct endpoint for "anywhere on Earth
-# right now", where POSITION_URL is deliberately bounded to RADIUS_NM of
-# home. Confirmed live that a callsign that isn't currently airborne (or
-# simply wrong) returns "ac": [] -- an honest, non-error "not currently
-# airborne" result (curl https://api.adsb.lol/v2/callsign/UAL123 ->
-# {"ac": [], "total": 0, ...}), not a bug -- rendered as such, never as a
-# guessed/stale position.
-FOLLOW_URL = "https://api.adsb.lol/v2/callsign/{callsign}"
+# mode. Same replica family and the same fallback discipline as
+# POSITION_SOURCES: a 200/{ac:[]} from one aggregator is not treated as
+# terminal "not airborne" until the others agree (or every replica that
+# answered said empty and none failed). Confirmed live that a callsign
+# that isn't currently airborne (or simply wrong) returns "ac": [] -- an
+# honest, non-error "not currently airborne" result, rendered as such,
+# never as a guessed/stale position.
+FOLLOW_SOURCES = (
+    ("adsb.lol",
+     "https://api.adsb.lol/v2/callsign/{callsign}", "ac"),
+    ("airplanes.live",
+     "https://api.airplanes.live/v2/callsign/{callsign}", "ac"),
+    ("adsb.fi",
+     "https://opendata.adsb.fi/api/v2/callsign/{callsign}", "aircraft"),
+)
+FOLLOW_URL = FOLLOW_SOURCES[0][1]
 
 RADIUS_NM = 40                  # "in the local sky" -- roughly a 15 min drive's worth of horizon
 MAX_TRACKED = 8                 # nearest N, so the mode has a bounded, meaningful list
@@ -71,6 +99,61 @@ def _get_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         return json.load(r)
+
+
+def _aircraft_list(data, list_key):
+    """Pull the aircraft array off a replica payload.
+
+    Replicas in this family disagree on the key (`ac` vs `aircraft`) but
+    agree on the per-aircraft field names. Falls back across both keys
+    so a replica that flips its envelope still parses rather than
+    looking like a quiet sky."""
+    if not isinstance(data, dict):
+        return None
+    ac = data.get(list_key)
+    if not isinstance(ac, list):
+        ac = data.get("ac")
+    if not isinstance(ac, list):
+        ac = data.get("aircraft")
+    return ac if isinstance(ac, list) else None
+
+
+def _fetch_ac_list(sources, url_kwargs):
+    """Try ADS-B replicas in order. Returns a real aircraft list.
+
+    A successful empty list is NOT terminal -- the next source is tried.
+    Confirmed 2026-08-11: adsb.lol `/v2/point` around home returned
+    HTTP 200 / total=0 out to 250nm while airplanes.live (17) and
+    adsb.fi (19) had real traffic at the same coordinates. Trusting
+    that empty 200 blacked out the radar.
+
+    Rules:
+      * first non-empty success wins
+      * every source succeeded with empty -> [] (honest quiet sky)
+      * any source failed AND none returned traffic -> raise, so the
+        feed keeps last-good and marks err rather than wiping a real
+        sky because one replica hole + one 429 looked like "clear"
+    """
+    last_err = None
+    saw_empty = False
+    for _name, url_tmpl, list_key in sources:
+        try:
+            data = _get_json(url_tmpl.format(**url_kwargs))
+        except Exception as e:                         # noqa: BLE001
+            last_err = e
+            continue
+        ac = _aircraft_list(data, list_key)
+        if ac is None:
+            last_err = last_err or ValueError("unrecognized ADS-B envelope")
+            continue
+        if ac:
+            return ac
+        saw_empty = True
+    if last_err is not None:
+        raise last_err
+    if saw_empty:
+        return []
+    return []
 
 
 def load_airport():
@@ -105,6 +188,35 @@ def load_airport():
         return None
     return {"code": paneltext.panel_text(ap.get("code"))[:4] or "ARPT",
             "lat": lat, "lon": lon}
+
+
+# North-American ICAO prefixes. US = K+IATA (MYR/KMYR), Canada = C,
+# Mexico/central = M. This is the published ICAO-in-North-America
+# pattern, not a worldwide converter -- EGLL will not invent LHR, and
+# we do not guess that mapping.
+_NA_ICAO_PREFIXES = ("K", "C", "M")
+
+
+def airport_codes(code):
+    """Set of equivalent airport identity strings for matching.
+
+    A 3-letter code matches itself and K/C/M+code. A 4-letter
+    K/C/M+XXX also matches XXX. Used so a home configured as MYR
+    still classifies a route that only resolved as KMYR (and the
+    reverse). Empty/None -> empty set, never a guessed airport.
+    """
+    if not code:
+        return set()
+    c = str(code).strip().upper()
+    if not c:
+        return set()
+    out = {c}
+    if len(c) == 3 and c.isalpha():
+        for p in _NA_ICAO_PREFIXES:
+            out.add(p + c)
+    elif len(c) == 4 and c[0] in _NA_ICAO_PREFIXES and c[1:].isalpha():
+        out.add(c[1:])
+    return out
 
 
 def save_airport(code, lat, lon):
@@ -251,6 +363,32 @@ def bearing_distance(lat1, lon1, lat2, lon2):
         math.sin(dl) * math.cos(p2),
         math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl))) % 360.0
     return brg, d_km * 0.539957
+
+
+def destination_point(lat, lon, bearing_deg, dist_nm):
+    """The inverse of bearing_distance(): given a start point and a real
+    bearing+distance, the real lat/lon that sits there. Standard
+    spherical "destination point" formula (same great-circle model
+    bearing_distance() itself uses, just run the other direction).
+
+    Built 2026-08-11 for the flight-path map's live flown-trail (real
+    owner ask: a diversion needs to be visually SEEN, not just
+    theoretically knowable). FlightEngine's own scope trail
+    (`self._trail`) already accumulates each selected aircraft's real
+    recent positions, but in a local nm-plane (x_nm/y_nm relative to
+    home) built for the ground radar's projection -- this converts one
+    of those real local points back to a real lat/lon so the SAME real
+    trail can also be drawn on the world map, in the coordinate system
+    that view actually uses. Not a new data source, not a new sample --
+    the same real polled positions, read through a different lens."""
+    R_nm = 6371.0088 * 0.539957
+    lat1, brg = math.radians(lat), math.radians(bearing_deg)
+    ang = dist_nm / R_nm
+    lat2 = math.asin(math.sin(lat1) * math.cos(ang) + math.cos(lat1) * math.sin(ang) * math.cos(brg))
+    lon2 = math.radians(lon) + math.atan2(
+        math.sin(brg) * math.sin(ang) * math.cos(lat1),
+        math.cos(ang) - math.sin(lat1) * math.sin(lat2))
+    return math.degrees(lat2), math.degrees(lon2)
 
 
 # ---- coastline, for the ground radar scope ------------------------------
@@ -834,14 +972,14 @@ def _notable(ac, phase=None):
 
 
 def _fetch_positions(lat, lon):
-    url = POSITION_URL.format(lat=lat, lon=lon, radius_nm=RADIUS_NM)
-    data = _get_json(url)
+    raw = _fetch_ac_list(POSITION_SOURCES,
+                         {"lat": lat, "lon": lon, "radius_nm": RADIUS_NM})
     window = load_window()   # cheap local config read, same cost class as
                               # every other per-refresh config check here
                               # (e.g. satellite's own CONFIG_CHECK reload)
     favorites = set(load_favorite_aircraft())   # same cheap-per-refresh-read cost class
     out = []
-    for ac in data.get("ac") or []:
+    for ac in raw:
         # .get(key, default) only supplies the default when the key is
         # MISSING -- a real payload with "gs": null still hands back None,
         # and None < 30 raises. Coerce explicitly instead.
@@ -852,6 +990,20 @@ def _fetch_positions(lat, lon):
         alt = ac.get("alt_baro") if isinstance(ac.get("alt_baro"), (int, float)) else None
         phase, rate = _phase(ac, alt=alt)
         dir_deg = ac.get("dir")
+        dist_nm = ac.get("dst")
+        ac_lat = ac.get("lat") if isinstance(ac.get("lat"), (int, float)) else None
+        ac_lon = ac.get("lon") if isinstance(ac.get("lon"), (int, float)) else None
+        # Some replicas omit dst/dir even when lat/lon are real. Derive
+        # them from the same great-circle math the scope already uses --
+        # not a guessed position, just the home-relative polar form of
+        # the coordinates the payload already stated.
+        if (not isinstance(dist_nm, (int, float)) or dir_deg is None) and \
+                ac_lat is not None and ac_lon is not None:
+            brg, nm = bearing_distance(lat, lon, ac_lat, ac_lon)
+            if dir_deg is None:
+                dir_deg = brg
+            if not isinstance(dist_nm, (int, float)):
+                dist_nm = nm
         reg = paneltext.panel_text((ac.get("r") or "").strip()) or None
         out.append({
             "ident": _ident(ac),
@@ -887,8 +1039,8 @@ def _fetch_positions(lat, lon):
             "alt_ft": alt,
             "gs_kt": ac.get("gs"),
             "track_deg": ac.get("track"),
-            "dist_nm": ac.get("dst"),
-            # REAL absolute position (2026-08-09) -- adsb.lol already
+            "dist_nm": dist_nm,
+            # REAL absolute position (2026-08-09) -- the replica already
             # returns these per aircraft and they were simply being
             # discarded, the same shape of gap `origin_city`/`dest_city`
             # and the route lat/lons closed in _fetch_route() below. ZERO
@@ -906,8 +1058,8 @@ def _fetch_positions(lat, lon):
             # as an actual number so a malformed/missing value degrades
             # to None rather than a guessed 0.0 (which would plot the
             # aircraft in the Gulf of Guinea -- a silent lie).
-            "lat": ac.get("lat") if isinstance(ac.get("lat"), (int, float)) else None,
-            "lon": ac.get("lon") if isinstance(ac.get("lon"), (int, float)) else None,
+            "lat": ac_lat,
+            "lon": ac_lon,
             "dir_deg": dir_deg,
             "phase": phase,
             "vrate_fpm": rate,
@@ -926,8 +1078,8 @@ def _fetch_positions(lat, lon):
             # visual treatment with zero I/O of its own -- see
             # draw_scope_aircraft's window-ring call site.
             "in_window": (in_window(dir_deg, window["center_deg"], window["fov_deg"])
-                          and ac.get("dst") is not None
-                          and ac["dst"] <= window["max_nm"]),
+                          and isinstance(dist_nm, (int, float))
+                          and dist_nm <= window["max_nm"]),
         })
     # Most notable first, then nearest -- ADDITIVELY adjusted by the
     # window boost (WINDOW_BOOST above) and now the favorite boost
@@ -952,6 +1104,54 @@ def _fetch_positions(lat, lon):
     return out[:MAX_TRACKED]
 
 
+def _route_plausible(home_lat, home_lon, origin_lat, origin_lon, dest_lat, dest_lon,
+                     tolerance_nm=150.0):
+    """Real, physics-based sanity check on a route adsbdb hands back
+    (2026-08-11, direct owner report: a real locally-tracked aircraft
+    showed an adsbdb-enriched route of Osaka->Hawaii -- a real transpacific
+    pair nowhere near this project's configured home, which cannot be
+    correct for an aircraft ADS-B genuinely places within RADIUS_NM of
+    home right now).
+
+    ROOT CAUSE, not guessed: `_fetch_route()` looks up a route by
+    CALLSIGN alone (adsbdb's own `/v0/callsign/{callsign}` endpoint) --
+    a real, confirmed limitation of that API, not a bug in how this
+    project calls it. Flight numbers are reused across genuinely
+    different real routes (different day, different leg, a codeshare, a
+    repositioning flight), and adsbdb's callsign lookup can return
+    whichever real route it has on file for that callsign string, which
+    is not guaranteed to be the SPECIFIC real flight this specific
+    aircraft, right now, is actually flying. This project already
+    documents route matching as unverified-shape in several places; this
+    is the same class of gap one level deeper -- the shape is right, the
+    CONTENT can be wrong.
+
+    THE CHECK: a real aircraft on a real route passes reasonably close to
+    every point along the great-circle path between its real origin and
+    destination -- home, if the aircraft is genuinely flying that route
+    and happens to currently be near home, must sit close to that path
+    too. Computed via the standard "is the detour through home much
+    longer than the direct route" test: home_to_origin + home_to_dest
+    should be close to origin_to_dest for a real waypoint on the path;
+    home would need to be almost perfectly instantaneously between the
+    two real endpoints for that math to hold if the true answer wasn't
+    "an aircraft over South Carolina cannot possibly be flying Osaka to
+    Honolulu." `tolerance_nm` (150nm) is a generous real allowance for
+    normal course deviation, not a strict geometric requirement.
+
+    Returns True when origin/dest coordinates are missing (nothing to
+    check -- an honest "can't verify" is not the same as "known wrong",
+    so this never blocks a route ONLY because adsbdb didn't return
+    coordinates for it)."""
+    if None in (origin_lat, origin_lon, dest_lat, dest_lon):
+        return True
+    _, direct_nm = bearing_distance(origin_lat, origin_lon, dest_lat, dest_lon)
+    _, home_to_origin_nm = bearing_distance(home_lat, home_lon, origin_lat, origin_lon)
+    _, home_to_dest_nm = bearing_distance(home_lat, home_lon, dest_lat, dest_lon)
+    detour_nm = (home_to_origin_nm + home_to_dest_nm) - direct_nm
+    return detour_nm <= tolerance_nm
+
+
 def _fetch_route(callsign):
     url = ROUTE_URL.format(callsign=callsign)
     data = _get_json(url)
@@ -967,6 +1167,13 @@ def _fetch_route(callsign):
     return {
         "origin": origin.get("iata_code") or origin.get("icao_code"),
         "dest": dest.get("iata_code") or dest.get("icao_code"),
+        # Keep the other code form too so home matching can compare
+        # MYR against KMYR without inventing a conversion. Display
+        # still prefers IATA (the `origin`/`dest` keys above).
+        "origin_icao": origin.get("icao_code") or None,
+        "dest_icao": dest.get("icao_code") or None,
+        "origin_iata": origin.get("iata_code") or None,
+        "dest_iata": dest.get("iata_code") or None,
         # `municipality` is the real city name adsbdb already returns
         # alongside the airport code -- confirmed live (RDU ->
         # "Raleigh/Durham", LGA -> "New York") -- it was simply being
@@ -1206,6 +1413,23 @@ class FlightFeed:
                 route = _fetch_route(cs)
             except Exception:                          # noqa: BLE001
                 route = None
+            # PLAUSIBILITY CHECK (2026-08-11) -- see _route_plausible()'s
+            # own docstring for the real incident that prompted this (a
+            # real local aircraft showed an adsbdb-enriched route of
+            # Osaka->Hawaii, a physical impossibility for an aircraft
+            # ADS-B genuinely places within RADIUS_NM of home). A route
+            # that fails this check is real ESPN^H^Hadsbdb data for SOME
+            # real flight, just not credibly THIS one -- displaying it
+            # confidently would be exactly the kind of "technically real
+            # data, actually wrong for this aircraft" lie this project's
+            # own "never invent" rule exists to prevent one level deeper
+            # than usual. Dropped to None (an honest "route unknown")
+            # rather than shown -- never downgraded to a guessed
+            # alternative.
+            if route and not _route_plausible(lat, lon, route.get("origin_lat"),
+                                              route.get("origin_lon"), route.get("dest_lat"),
+                                              route.get("dest_lon")):
+                route = None
             self._route_cache[cs] = route
             ac["route"] = route
 
@@ -1363,9 +1587,7 @@ def _fetch_follow(callsign):
     keys), not a second parsing scheme for what is the same real payload
     shape. An empty "ac" list is a REAL, honest "not currently airborne"
     result -- not treated as an error."""
-    url = FOLLOW_URL.format(callsign=callsign)
-    data = _get_json(url)
-    ac_list = data.get("ac") or []
+    ac_list = _fetch_ac_list(FOLLOW_SOURCES, {"callsign": callsign})
     if not ac_list:
         return None
     # A callsign can (rarely) match more than one currently-squawking
@@ -1459,10 +1681,19 @@ class FollowFlightFeed:
             updated, err = self._updated, self._err
         self._ensure_thread()
         age = (now - updated) if updated else None
+        # airborne is a real tri-state. A dead replica / exception is
+        # NOT "not airborne" -- that claim is only honest after every
+        # replica that answered returned an empty list (err is None and
+        # a fetch completed). Unknown (None) while configured means
+        # looking, or the feed failed; the engine must not say GROUNDED.
         if callsign is None:
             airborne = None
+        elif aircraft is not None:
+            airborne = True
+        elif err or not updated:
+            airborne = None
         else:
-            airborne = aircraft is not None
+            airborne = False
         return {
             "configured": callsign is not None,
             "callsign": callsign,

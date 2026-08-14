@@ -10,11 +10,11 @@ blocks and never invents.
 WRITER: flights.FlightFeed's own background poll thread calls
 record_sighting() once per real aircraft per refresh cycle -- no new
 network call, no new poll cadence, this is pure composition of data
-flights.py already fetches every POSITION_REFRESH (15s). A write to disk
-only happens when something actually changed (a new distinct aircraft, or
-a real update to a repeat visitor's type/airline/times_seen) -- most
-refresh cycles see zero NEW distinct aircraft, so most cycles cost
-nothing here beyond an in-memory dict lookup.
+flights.py already fetches every POSITION_REFRESH (15s). times_seen
+counts distinct VISITS (a gap of VISIT_GAP_S since last_seen), not
+poll ticks -- the same tail lingering in RADIUS_NM for ten minutes
+is one visit, not 40. A write to disk still happens when last_seen
+moves or a new tail arrives.
 
 IDENTITY -- keyed by REGISTRATION, not the ICAO24 hex. Confirmed live
 against a real 238-aircraft sample near ORD (2026-08-03): the ADS-B "r"
@@ -42,6 +42,13 @@ from pathlib import Path
 
 HANGAR_PATH = Path(__file__).parent / "hangar_log.jsonl"
 HANGAR_MAX_ENTRIES = 500
+# A visit is a distinct appearance, not a poll tick. FlightFeed records
+# every aircraft every POSITION_REFRESH (~15s). Counting those as
+# times_seen turned a 10-minute overflight into "SEEN 40X". Same tail
+# still in the sky (last_seen within this gap) is one visit; a later
+# reappearance after the gap is a new one. 30 minutes is longer than a
+# local overflight and shorter than a real return trip.
+VISIT_GAP_S = 30 * 60
 
 
 class HangarLog:
@@ -102,8 +109,13 @@ class HangarLog:
                     e["type"] = ac_type
                 if airline and not e.get("airline"):
                     e["airline"] = airline
+                # Increment only on a new VISIT. last_seen is refreshed
+                # every poll while the aircraft stays in range, so a
+                # continuous pass keeps the same times_seen. A gap longer
+                # than VISIT_GAP_S is a real departure and return.
+                if now - float(e.get("last_seen") or 0) >= VISIT_GAP_S:
+                    e["times_seen"] = e.get("times_seen", 1) + 1
                 e["last_seen"] = now
-                e["times_seen"] = e.get("times_seen", 1) + 1
             self._save()
 
     def _evict_if_over_cap(self):

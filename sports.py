@@ -36,7 +36,17 @@ Same two rules as every other feed in this project:
 Favorite team is config-driven (sports_config.json), same pattern as
 market_config.json's watchlist and location_config.json's home
 coordinates -- set from the control panel/phone, not hand-edited.
+
+HONEST POSTURE. ESPN's site API is undocumented and unofficial: no
+published rate limit, no terms covering commercial use, no support.
+This house / personal Mac rig may poll it (`espn_use=personal`, the
+default). A sellable device must set `espn_use=off` until a licensed
+source exists -- we do not have a commercial license, and there is no
+working "commercial" mode to invent. Off is the only honest production
+lock. The worker then makes no new ESPN HTTP calls and keeps last-good
+cache; it never invents scores.
 """
+import calendar
 import json
 import re
 import threading
@@ -83,6 +93,9 @@ SOCCER_LEAGUES = {code for code, path in LEAGUE_PATHS.items()
 # switching -- so this is a hostname swap, not a new integration.
 SCOREBOARD_URL = "https://site.web.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
 SUMMARY_URL = "https://site.web.api.espn.com/apis/site/v2/sports/{path}/summary?event={event_id}"
+STANDINGS_URL = "https://site.web.api.espn.com/apis/v2/sports/{path}/standings"
+STANDINGS_REFRESH = 900.0     # 15 min -- standings are not live scores
+STANDINGS_LEAGUES = ("MLB", "NHL", "NBA")
 
 # ESPN's site API is undocumented and unofficial: no published rate
 # limit, no terms covering this use, no support channel. `ambient` mode
@@ -122,6 +135,10 @@ def _get_json(url):
 # this file already followed for scoreboard/summary/the golf field/the
 # universal header.
 TEAMS_URL = "https://site.web.api.espn.com/apis/site/v2/sports/{path}/teams"
+# Same host/path family as TEAMS_URL. team_id comes from the teams list
+# (team.id), never from a guessed mapping or list index.
+SCHEDULE_URL = "https://site.web.api.espn.com/apis/site/v2/sports/{path}/teams/{team_id}/schedule"
+SCHEDULE_REFRESH = 1800.0  # 30 min -- a future first-pitch does not move often
 
 TEAMS_REFRESH = 86400.0   # 24h -- real team rosters/abbreviations change
                           # maybe once a year (relocations/rebrands), not
@@ -143,16 +160,28 @@ def fetch_teams(league):
     path = LEAGUE_PATHS.get(league)
     if not path:
         return []
+    # Production lock: no new ESPN HTTP, even for the teams dropdown.
+    # Last-good cache if this process already fetched; else honest [].
+    if load_espn_use() == ESPN_USE_OFF:
+        return _teams_cache.get(league) or []
     now = time.time()
-    if league in _teams_cache and now - _teams_cache_ts.get(league, 0) < TEAMS_REFRESH:
-        return _teams_cache[league]
+    cached = _teams_cache.get(league)
+    if (cached is not None
+            and now - _teams_cache_ts.get(league, 0) < TEAMS_REFRESH
+            and (not cached or all("id" in t for t in cached))):
+        return cached
     try:
         data = _get_json(TEAMS_URL.format(path=path))
         raw = data["sports"][0]["leagues"][0]["teams"]
         teams = sorted(
             ({"abbr": paneltext.panel_text(t["team"].get("abbreviation")),
               "location": paneltext.panel_text(t["team"].get("location")),
-              "name": paneltext.panel_text(t["team"].get("name"))}
+              "name": paneltext.panel_text(t["team"].get("name")),
+              # ESPN team.id (confirmed live: ARI -> "29"). Needed to
+              # build SCHEDULE_URL; missing id is stored as None rather
+              # than guessed.
+              "id": (str(t["team"]["id"]) if t["team"].get("id") is not None
+                     else None)}
              for t in raw if t.get("team", {}).get("abbreviation")),
             key=lambda t: t["location"] or "")
     except Exception:                                  # noqa: BLE001 - never die
@@ -226,6 +255,64 @@ def save_golf_player(name):
         data["golf_player"] = cleaned
     else:
         data.pop("golf_player", None)
+    data.setdefault("leagues", list(DEFAULT_LEAGUES))
+    data.setdefault("favorite", None)
+    CONFIG_PATH.write_text(json.dumps(data, indent=2))
+    return cleaned
+
+
+# ---- ESPN poll posture (espn_use) ----------------------------------------
+# Isolated key, same discipline as golf_player: own load/save, do NOT
+# widen load_config()'s two-value contract, do NOT wipe leagues /
+# favorite / golf_player / favorite_teams. "personal" (default) is this
+# house Mac. "off" is the only honest production lock. There is no
+# licensed commercial source, so "commercial" is not a mode -- invalid
+# or missing values fall back to personal.
+ESPN_USE_PERSONAL = "personal"
+ESPN_USE_OFF = "off"
+ESPN_OFF_ERR = paneltext.panel_text("ESPN OFF")
+
+
+def load_espn_use():
+    """ESPN poll posture, or "personal". Stored in the same
+    sports_config.json as the favorite team -- one config file for one
+    mode -- but read separately because load_config()'s two-value
+    contract is used in several places and widening it would touch all
+    of them for no benefit.
+
+    "personal" (this house Mac) may poll ESPN's unofficial site API.
+    "off" is the only honest production lock -- we do not have a
+    commercial license. Invalid or missing values default to personal.
+    """
+    if not CONFIG_PATH.exists():
+        return ESPN_USE_PERSONAL
+    try:
+        data = json.loads(CONFIG_PATH.read_text())
+    except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+        return ESPN_USE_PERSONAL
+    v = data.get("espn_use")
+    if isinstance(v, str) and v.strip().lower() == ESPN_USE_OFF:
+        return ESPN_USE_OFF
+    return ESPN_USE_PERSONAL
+
+
+def save_espn_use(value):
+    """Persist the ESPN poll posture. Preserves every other key -- same
+    discipline as save_golf_player(), because this file also carries
+    leagues/favorite/golf_player/favorite_teams and a naive rewrite
+    would wipe them. Only "off" is off; everything else becomes
+    personal. "commercial" is not a mode.
+    """
+    data = {}
+    if CONFIG_PATH.exists():
+        try:
+            data = json.loads(CONFIG_PATH.read_text()) or {}
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+            data = {}
+    cleaned = (ESPN_USE_OFF
+               if isinstance(value, str) and value.strip().lower() == ESPN_USE_OFF
+               else ESPN_USE_PERSONAL)
+    data["espn_use"] = cleaned
     data.setdefault("leagues", list(DEFAULT_LEAGUES))
     data.setdefault("favorite", None)
     CONFIG_PATH.write_text(json.dumps(data, indent=2))
@@ -350,6 +437,60 @@ def _hex_to_rgb(hex_str, min_brightness=90):
     return (r, g, b)
 
 
+MIN_PRIMARY_VIVIDNESS = 40.0   # below this, a team's own "primary" reads as near-black/gray
+MIN_ALT_VIVIDNESS = 60.0       # the alternate must itself be genuinely vivid to be worth it
+
+
+def _color_vividness(hex_str):
+    """How much a real ESPN team-color hex actually reads as A COLOR
+    (vs. near-black/near-white/gray) -- chroma weighted by brightness, so
+    a dark-but-saturated color still scores low (it won't read well on
+    this panel's black background either) while a bright saturated one
+    scores high. Returns -1.0 for a missing/malformed hex so it never
+    wins a comparison against a real one."""
+    if not isinstance(hex_str, str) or len(hex_str) != 6:
+        return -1.0
+    try:
+        r, g, b = (int(hex_str[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return -1.0
+    mx, mn = max(r, g, b), min(r, g, b)
+    return (mx - mn) * (mx / 255.0)
+
+
+def _pick_team_hex(primary_hex, alt_hex):
+    """Choose which of a team's two REAL ESPN colors to actually lead
+    with as its display color.
+
+    Direct owner ask (2026-08-11), with a real example: "pgh teams
+    should be the pgh colors, or gold. not just black... but also easy
+    to read." Real teams frequently ship a near-black/near-white/gray
+    PRIMARY with a far more recognizable and legible secondary --
+    confirmed live: Pirates primary=000000 (black) alt=fdb827 (gold);
+    Guardians primary=002b5c (navy) alt=e31937 (red); Tigers
+    primary=0a2240 (navy) alt=ff4713 (orange); Braves primary=0c2340
+    (navy) alt=ba0c2f (red); Astros primary=002d62 (navy)
+    alt=eb6e1f (orange).
+
+    This NEVER invents a color -- both candidates are real ESPN-supplied
+    hex values for this exact team; it only picks which of the two real
+    values to lead with. Swaps to the alternate only when the primary is
+    genuinely dull (< MIN_PRIMARY_VIVIDNESS) AND the alternate is itself
+    genuinely vivid (>= MIN_ALT_VIVIDNESS) -- confirmed against a real
+    26-team sample this threshold pair correctly swaps the five cases
+    above while correctly leaving already-vivid or no-better-alternative
+    teams alone (Rockies purple, Orioles orange, Reds red, Yankees navy
+    -- whose real alternate, pale silver, isn't any more vivid, so it's
+    not worth swapping to)."""
+    pv = _color_vividness(primary_hex)
+    if not alt_hex:
+        return primary_hex
+    av = _color_vividness(alt_hex)
+    if pv < MIN_PRIMARY_VIVIDNESS and av >= MIN_ALT_VIVIDNESS and av > pv:
+        return alt_hex
+    return primary_hex
+
+
 def _team_row(competitor):
     team = competitor.get("team") or {}
     score = competitor.get("score")
@@ -362,7 +503,7 @@ def _team_row(competitor):
                   else (paneltext.panel_text(score) if isinstance(score, str) else score)),
         "home_away": competitor.get("homeAway"),
         "winner": bool(competitor.get("winner")),
-        "color": _hex_to_rgb(team.get("color")),
+        "color": _hex_to_rgb(_pick_team_hex(team.get("color"), team.get("alternateColor"))),
         # Kept so _disambiguate_colors() has somewhere to go when the two
         # teams in a game would otherwise render the same accent bar.
         "alt_color": _hex_to_rgb(team.get("alternateColor")),
@@ -462,6 +603,34 @@ def _situation(comp, state):
       * NHL power-play state -- NOT built. No field name for it could be
         confirmed against real data, and guessing one would be inventing
         the feature.
+      * MLB pitch count -- added 2026-08-11, direct owner ask ("score
+        bugs even feature that"). Read defensively from two real,
+        publicly-documented ESPN shapes (`situation.pitcher.pitchCount`
+        and a flatter `situation.pitchCount`, since this project has no
+        live-reachable network this session to confirm which one -- or
+        whether either -- this specific summary endpoint actually
+        returns) -- same honest-degrade contract as `downDistanceText`
+        just above: if neither key is present, `pitch_count` is simply
+        None and nothing is shown, never a guessed or carried-over
+        number. Verify the real key name the first session this sandbox
+        can reach ESPN with a live MLB game in progress.
+      * MLB batter/on-deck/pitcher -- added 2026-08-11, same owner ask
+        ("how is on base or deck... tons of stuff we can add"). Read
+        defensively from `situation.batter`/`situation.onDeck`/
+        `situation.pitcher` (real, publicly-documented ESPN athlete
+        sub-objects on this same summary endpoint -- `pitcher` is the
+        same dict `pitchCount` above already reads from), each reduced
+        to a short display name. Same honest
+        gap as pitch_count -- unverified against a live payload this
+        session, absent means absent, never guessed. Deliberately did
+        NOT attempt batting average or other box-score stats here: this
+        summary endpoint has no confirmed field for a batter's season
+        average, on-base%, or similar -- that lives on a real, different
+        ESPN endpoint (a boxscore/statistics resource) this project has
+        never fetched, and guessing a stat number would be exactly the
+        kind of invented data this project's own standing rule forbids.
+        A real boxscore endpoint is a genuine, separate follow-up, not a
+        one-line addition here.
     """
     if state != "in":
         return None
@@ -469,16 +638,95 @@ def _situation(comp, state):
     if not isinstance(sit, dict):
         return None
     bases = [bool(sit.get("onFirst")), bool(sit.get("onSecond")), bool(sit.get("onThird"))]
+    pitcher = sit.get("pitcher") if isinstance(sit.get("pitcher"), dict) else {}
+    pitch_count = pitcher.get("pitchCount")
+    if not isinstance(pitch_count, int):
+        pitch_count = sit.get("pitchCount") if isinstance(sit.get("pitchCount"), int) else None
+
+    def _athlete_name(a):
+        """REAL BUG FIXED 2026-08-11: this used to read `shortName`
+        directly off the pitcher/batter dict, but the real scoreboard
+        payload nests it one level deeper, under `.athlete` -- confirmed
+        live (situation.batter.athlete.shortName == "M. CLARK"). The
+        wrong path meant these silently returned None on every single
+        real live game, so the panel rendered nothing and looked like
+        the feature was never built. Falls back to the flat shape too,
+        since the SUMMARY endpoint's own situation is shaped differently
+        from the SCOREBOARD's (also confirmed live)."""
+        if not isinstance(a, dict):
+            return None
+        ath = a.get("athlete") if isinstance(a.get("athlete"), dict) else a
+        name = ath.get("shortName") or ath.get("displayName")
+        return paneltext.panel_text(name) if name else None
+
+    # Pitcher name -- same real athlete sub-object shape as batter/onDeck,
+    # just nested one level under `situation.pitcher` (the same dict
+    # `pitchCount` above already reads from) rather than a sibling key.
+    pitcher_name = _athlete_name(pitcher)
+
     out = {
         "outs": sit.get("outs") if isinstance(sit.get("outs"), int) else None,
         "balls": sit.get("balls") if isinstance(sit.get("balls"), int) else None,
         "strikes": sit.get("strikes") if isinstance(sit.get("strikes"), int) else None,
         "bases": bases if any(bases) else None,
+        "pitch_count": pitch_count,
+        "pitcher": pitcher_name,
+        "batter": _athlete_name(sit.get("batter")),
+        "on_deck": _athlete_name(sit.get("onDeck")),
         # Display-ready string when ESPN supplies one (NFL). Uppercased at
         # the I/O boundary like every other externally-sourced string.
         "down_distance": (paneltext.panel_text(sit.get("downDistanceText"))
                           if sit.get("downDistanceText") else None),
     }
+    # FOOTBALL / HOCKEY / BASKETBALL extras -- same honest-degrade
+    # contract as pitch_count: read real ESPN keys when they are the
+    # documented type, otherwise omit. Never derived into a fake
+    # redzone/PP/bonus from score+clock. A missing key is a missing
+    # glyph, not a guessed one.
+    yl = sit.get("yardLine")
+    if isinstance(yl, (int, float)) and 0 <= float(yl) <= 100:
+        out["yard_line"] = int(round(float(yl)))
+    if isinstance(sit.get("isRedZone"), bool):
+        out["is_redzone"] = sit["isRedZone"]
+    poss = sit.get("possession")
+    if isinstance(poss, str) and poss.strip():
+        out["possession"] = paneltext.panel_text(poss)
+    elif isinstance(poss, dict):
+        # Some payloads nest the possessing team under id/abbreviation.
+        tag = poss.get("abbreviation") or poss.get("id")
+        if tag:
+            out["possession"] = paneltext.panel_text(str(tag))
+    down, dist = sit.get("down"), sit.get("distance")
+    if isinstance(down, int) and 1 <= down <= 4:
+        out["down"] = down
+    if isinstance(dist, int) and dist >= 0:
+        out["distance"] = dist
+    for src, dest in (("homeTimeouts", "home_timeouts"),
+                      ("awayTimeouts", "away_timeouts")):
+        v = sit.get(src)
+        if isinstance(v, int) and 0 <= v <= 8:
+            out[dest] = v
+    last = sit.get("lastPlay")
+    if isinstance(last, dict) and last.get("text"):
+        out["last_play"] = paneltext.panel_text(last["text"])
+    elif isinstance(last, str) and last.strip():
+        out["last_play"] = paneltext.panel_text(last)
+    if isinstance(sit.get("isPowerPlay"), bool):
+        out["power_play"] = sit["isPowerPlay"]
+    # Basketball bonus -- same honest bool as isRedZone. ESPN's
+    # documented key names vary; only a real bool is kept. Never
+    # inferred from foul count or score.
+    for key in ("isBonus", "bonus", "inBonus"):
+        if isinstance(sit.get(key), bool):
+            out["bonus"] = sit[key]
+            break
+    strength = sit.get("strength")
+    if isinstance(strength, str) and strength.strip():
+        out["strength"] = paneltext.panel_text(strength)
+    elif isinstance(strength, dict):
+        desc = strength.get("description") or strength.get("text")
+        if desc:
+            out["strength"] = paneltext.panel_text(str(desc))
     return out if any(v is not None for v in out.values()) else None
 
 
@@ -537,6 +785,187 @@ def _fetch_scoreboard(league):
     return out
 
 
+def _iso_to_epoch(iso):
+    """ESPN ISO date (e.g. 2026-08-14T23:15Z) -> UTC epoch seconds.
+
+    Returns None if the string is missing or unparseable. Never invents a
+    date. Z is UTC; a numeric offset is applied when ESPN actually sends
+    one. Display conversion to local is the caller's job (time.localtime
+    on this epoch).
+    """
+    if not isinstance(iso, str) or not iso.strip():
+        return None
+    s = iso.strip()
+    off = 0
+    if s.endswith("Z") or s.endswith("z"):
+        s = s[:-1]
+    else:
+        m = re.search(r"([+-])(\d{2}):?(\d{2})$", s)
+        if m:
+            sign = 1 if m.group(1) == "+" else -1
+            off = sign * (int(m.group(2)) * 3600 + int(m.group(3)) * 60)
+            s = s[:m.start()]
+    if "." in s:
+        s = s.split(".", 1)[0]
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            return calendar.timegm(time.strptime(s, fmt)) - off
+        except ValueError:
+            continue
+    return None
+
+
+def _format_next_when(iso):
+    """UTC ISO -> local 'FRI 7:15P', or None if the date cannot be parsed.
+
+    time.localtime on the parsed UTC epoch -- the machine's timezone, not
+    a guessed venue offset.
+    """
+    epoch = _iso_to_epoch(iso)
+    if epoch is None:
+        return None
+    t = time.localtime(epoch)
+    hour = t.tm_hour % 12 or 12
+    ap = "A" if t.tm_hour < 12 else "P"
+    return f"{time.strftime('%a', t).upper()} {hour}:{t.tm_min:02d}{ap}"
+
+
+def _looks_like_abbr(tok):
+    t = paneltext.panel_text(tok)
+    return 2 <= len(t) <= 5 and all(ch.isalnum() or ch == "&" for ch in t)
+
+
+def _split_short_name_abbrs(short_name):
+    """ESPN shortName 'ARI @ ATL' -> (away, home) if both tokens are abbrs.
+
+    Only splits ESPN's own shortName. Does not invent scores or a matchup
+    that the payload did not already spell out.
+    """
+    if not isinstance(short_name, str) or " @ " not in short_name:
+        return None, None
+    left, right = short_name.split(" @ ", 1)
+    left, right = left.strip(), right.strip()
+    if _looks_like_abbr(left) and _looks_like_abbr(right):
+        return left, right
+    return None, None
+
+
+def _stub_team_row(abbr, home_away):
+    return {
+        "abbr": paneltext.panel_text(abbr),
+        "name": paneltext.panel_text(abbr),
+        "score": None,
+        "home_away": home_away,
+        "winner": False,
+        "color": None,
+        "alt_color": None,
+        "record": None,
+        "rank": None,
+    }
+
+
+def _pick_next_schedule_event(events, now=None):
+    """Earliest future `pre` event, or None.
+
+    Compares each event's ISO date to `now` (epoch seconds). Past games
+    and non-pre states are skipped. An unparseable date is skipped, never
+    guessed. Returns the raw event dict.
+    """
+    now = time.time() if now is None else now
+    best, best_ts = None, None
+    for ev in events or []:
+        try:
+            state = ev["competitions"][0]["status"]["type"]["state"]
+        except (KeyError, IndexError, TypeError):
+            continue
+        if state != "pre":
+            continue
+        ts = _iso_to_epoch(ev.get("date"))
+        if ts is None or ts <= now:
+            continue
+        if best_ts is None or ts < best_ts:
+            best, best_ts = ev, ts
+    return best
+
+
+def _parse_schedule_event(event, league):
+    """Schedule event -> game dict, or None.
+
+    Prefers `_parse_event` when the event has the scoreboard competitor
+    shape (confirmed present on the 2026 MLB team schedule). If
+    competitors are missing, falls back to ESPN's own shortName
+    'ARI @ ATL' for display abbreviations only. Adds `date` (raw ISO)
+    and `when` (folded local 'FRI 7:15P') -- never invents either.
+    """
+    parsed = None
+    try:
+        parsed = _parse_event(event, league)
+    except (KeyError, IndexError, TypeError, ValueError):
+        parsed = None
+    if parsed is None:
+        away_abbr, home_abbr = _split_short_name_abbrs(event.get("shortName"))
+        if not away_abbr or not home_abbr:
+            return None
+        try:
+            stype = event["competitions"][0]["status"]["type"]
+        except (KeyError, IndexError, TypeError):
+            stype = {}
+        parsed = {
+            "event_id": event.get("id"),
+            "league": league,
+            "short_name": paneltext.panel_text(event.get("shortName")),
+            "state": stype.get("state"),
+            "completed": bool(stype.get("completed")),
+            "detail": paneltext.panel_text(
+                stype.get("shortDetail") or stype.get("detail")),
+            "period": None,
+            "situation": None,
+            "display_clock": None,
+            "home": _stub_team_row(home_abbr, "home"),
+            "away": _stub_team_row(away_abbr, "away"),
+        }
+    iso = event.get("date") if isinstance(event.get("date"), str) else None
+    parsed["date"] = iso
+    when = _format_next_when(iso)
+    parsed["when"] = paneltext.panel_text(when) if when else None
+    return parsed
+
+
+def _team_id_for(league, team_abbr):
+    """Resolve ESPN team.id from the existing teams list. None if unknown.
+
+    Identity is league + abbreviation, never a list index. Reuses
+    fetch_teams() (24h cache) so this is not a second teams poll.
+    """
+    want = paneltext.panel_text(team_abbr)
+    for t in fetch_teams(league):
+        if t.get("abbr") == want and t.get("id"):
+            return str(t["id"])
+    return None
+
+
+def _fetch_favorite_next(league, team_abbr):
+    """Next future pre game for this favorite, or None if there is none.
+
+    Raises on transport / teams-list failure so the worker can keep
+    last-good. A successful empty schedule is None, not an exception.
+    """
+    path = LEAGUE_PATHS.get(league)
+    if not path:
+        return None
+    teams = fetch_teams(league)
+    team_id = _team_id_for(league, team_abbr)
+    if not team_id:
+        if not teams:
+            raise RuntimeError("teams list unavailable")
+        return None
+    data = _get_json(SCHEDULE_URL.format(path=path, team_id=team_id))
+    ev = _pick_next_schedule_event(data.get("events") or [])
+    if not ev:
+        return None
+    return _parse_schedule_event(ev, league)
+
+
 def _fetch_win_prob(league, event_id):
     """Returns the home team's current win percentage (0..1) or None if
     ESPN doesn't have one for this game/sport. NHL's summary endpoint has
@@ -555,13 +984,711 @@ def _fetch_win_prob(league, event_id):
     return float(pct) if isinstance(pct, (int, float)) else None
 
 
+# ---- standings (MLB / NHL / NBA) ---------------------------------------
+# site.web.api.espn.com/apis/v2/sports/{path}/standings -- confirmed live
+# 2026-08-12: children[] are conferences (AL/NL, East/West). Each child's
+# standings.entries[] is already in table order. Stats are a named list,
+# NEVER a positional array -- zip by name or abbreviation. Team color
+# hexes are often absent on this endpoint; missing means omit, never
+# invent. If a child has its own children (divisions) with entries,
+# those deeper tables win over the conference rollup.
 
-def _fetch_home_run_plays(league, event_id):
+def _zip_standings_stats(stats):
+    """Map lowercased name AND abbreviation -> the stat object.
+
+    ESPN sends a bag of {name, abbreviation, displayValue, value} --
+    column order is not a contract. Later keys overwrite earlier ones
+    only when they share a token; name and abbr for the same object
+    point at the same dict, so that is not a collision."""
+    out = {}
+    for s in stats or []:
+        if not isinstance(s, dict):
+            continue
+        for key in (s.get("name"), s.get("abbreviation")):
+            if isinstance(key, str) and key.strip():
+                out[key.strip().lower()] = s
+    return out
+
+
+def _stat_display_or_int(stat):
+    """displayValue if ESPN sent one, else a whole-number value as a
+    string. None when neither is a real number we can show -- never
+    guessed, never formatted from a sibling stat."""
+    if not isinstance(stat, dict):
+        return None
+    dv = stat.get("displayValue")
+    if isinstance(dv, str) and dv.strip() != "":
+        return paneltext.panel_text(dv)
+    if isinstance(dv, int) and not isinstance(dv, bool):
+        return str(dv)
+    val = stat.get("value")
+    if isinstance(val, bool) or val is None:
+        return None
+    if isinstance(val, int):
+        return str(val)
+    if isinstance(val, float) and val == int(val):
+        return str(int(val))
+    return None
+
+
+def _stat_by_keys(smap, *keys):
+    for k in keys:
+        if k and k.lower() in smap:
+            return smap[k.lower()]
+    return None
+
+
+def _stat_seed(smap):
+    """playoffSeed as an int, or None. ESPN sends value=1.0; only a
+    whole number counts as a seed."""
+    stat = _stat_by_keys(smap, "playoffseed", "seed")
+    if not stat:
+        return None
+    val = stat.get("value")
+    if isinstance(val, bool) or val is None:
+        dv = stat.get("displayValue")
+        if isinstance(dv, int) and not isinstance(dv, bool):
+            return dv
+        if isinstance(dv, str) and dv.strip().lstrip("-").isdigit():
+            return int(dv.strip())
+        return None
+    if isinstance(val, int):
+        return val
+    if isinstance(val, float) and val == int(val):
+        return int(val)
+    return None
+
+
+def _parse_standings_row(entry, league):
+    if not isinstance(entry, dict):
+        return None
+    team = entry.get("team") or {}
+    if not isinstance(team, dict):
+        return None
+    abbr = paneltext.panel_text(team.get("abbreviation"))
+    if not abbr:
+        return None
+    row = {
+        "abbr": abbr,
+        "name": paneltext.panel_text(
+            team.get("shortDisplayName") or team.get("name")),
+    }
+    color = _hex_to_rgb(_pick_team_hex(team.get("color"),
+                                       team.get("alternateColor")))
+    if color:
+        row["color"] = color
+    smap = _zip_standings_stats(entry.get("stats"))
+    wins = _stat_display_or_int(_stat_by_keys(smap, "wins", "w"))
+    if wins is not None:
+        row["wins"] = wins
+    losses = _stat_display_or_int(_stat_by_keys(smap, "losses", "l"))
+    if losses is not None:
+        row["losses"] = losses
+    # OTL is the NHL convention. ESPN also ships OTLosses on MLB
+    # extra-inning games; those are not an NHL-style third column, so
+    # they stay off the row unless this is actually NHL and ESPN sent
+    # the field.
+    if league == "NHL":
+        otl = _stat_display_or_int(
+            _stat_by_keys(smap, "otlosses", "otl", "overtimelosses"))
+        if otl is not None:
+            row["otl"] = otl
+    gb_stat = _stat_by_keys(smap, "gamesbehind", "gb")
+    if gb_stat:
+        gb = gb_stat.get("displayValue")
+        if isinstance(gb, str) and gb.strip() and gb.strip() != "-":
+            folded = paneltext.panel_text(gb)
+            if folded and folded != "-":
+                row["gb"] = folded
+    pct = _stat_display_or_int(_stat_by_keys(smap, "winpercent", "pct"))
+    if pct is not None:
+        row["pct"] = pct
+    # Standings points are abbreviation PTS (NHL). MLB's `points` stat
+    # is GBP -- games-behind points -- and is not a points column.
+    pts_stat = None
+    for key in ("pts", "points"):
+        cand = smap.get(key)
+        if cand and str(cand.get("abbreviation") or "").upper() == "PTS":
+            pts_stat = cand
+            break
+    pts = _stat_display_or_int(pts_stat) if pts_stat else None
+    if pts is not None:
+        row["pts"] = pts
+    seed = _stat_seed(smap)
+    if seed is not None:
+        row["seed"] = seed
+    return row
+
+
+def _group_label(node):
+    raw = (node.get("abbreviation") or node.get("shortName")
+           or node.get("name"))
+    return paneltext.panel_text(raw) if raw else ""
+
+
+def _standings_groups(node, league):
+    """Deepest groups that actually have entries.
+
+    A conference with division children that have rows yields those
+    divisions. A conference whose children are empty (or missing)
+    yields its own standings.entries, if any. ESPN's own order is
+    kept -- this does not sort."""
+    if not isinstance(node, dict):
+        return []
+    children = node.get("children")
+    deeper = []
+    if isinstance(children, list):
+        for child in children:
+            deeper.extend(_standings_groups(child, league))
+    if deeper:
+        return deeper
+    entries = ((node.get("standings") or {}).get("entries")
+               if isinstance(node.get("standings"), dict) else None) or []
+    rows = []
+    for entry in entries:
+        row = _parse_standings_row(entry, league)
+        if row:
+            rows.append(row)
+    if not rows:
+        return []
+    return [{"name": _group_label(node), "rows": rows}]
+
+
+def parse_standings(league, payload):
+    """Normalize one ESPN standings payload into
+    {league, groups:[{name, rows:[...]}]}.
+
+    Missing ESPN fields are omitted, never invented. Rows stay in
+    ESPN's standings order. `league` is the LEAGUE_PATHS key (MLB /
+    NHL / NBA)."""
+    code = str(league or "").upper()
+    folded = paneltext.panel_text(code) or code
+    if not isinstance(payload, dict):
+        return {"league": folded, "groups": []}
+    return {"league": folded, "groups": _standings_groups(payload, code)}
+
+
+def _copy_standings(standings):
+    out = {}
+    for lg, parsed in (standings or {}).items():
+        groups = []
+        for g in (parsed.get("groups") or []):
+            groups.append({
+                "name": g.get("name"),
+                "rows": [dict(r) for r in (g.get("rows") or [])],
+            })
+        out[lg] = {"league": parsed.get("league", lg), "groups": groups}
+    return out
+
+
+def _boxscore_stats(data):
+    """Real per-athlete boxscore stats for a baseball game, keyed by the
+    athlete's real ESPN id (a string).
+
+    CONFIRMED LIVE 2026-08-11 against a real in-progress MLB game
+    (CLE @ DET, event 401816481) -- this is NOT the defensive
+    read-and-hope shape the rest of this file's MLB extras shipped as.
+    The summary endpoint's `boxscore.players[]` carries two real stat
+    blocks per team, each with its own `labels` list naming the columns
+    and a parallel `stats` list per athlete:
+
+      * BATTING labels: H-AB, AB, R, H, RBI, HR, BB, K, #P, AVG, OBP, SLG
+        -- real example: S. Kwan -> ['1-3','3','1','1','0','0','1','0',
+        '19','.266','.365','.329']. `AVG` is the real season batting
+        average the owner asked for; `H-AB` is today's real line.
+      * PITCHING labels: IP, H, R, ER, BB, K, HR, PC-ST, ERA, PC
+        -- real example: T. Bibee -> ['6.0','5','4','4','0','4','0',
+        '81-56','3.94','81']. `PC` is the real PITCH COUNT.
+
+    This is why the earlier `situation.pitcher.pitchCount` guess never
+    rendered anything: that key does not exist on this endpoint at all.
+    The only `pitchCount` present is per-play (`plays[].pitchCount` =
+    {balls, strikes}, the count within one at-bat), NOT a game total.
+
+    Zipping `labels` to `stats` by POSITION rather than hardcoding
+    indices, so a column ESPN adds or reorders can't silently shift
+    every value one slot over -- that would produce confidently wrong
+    numbers, the exact failure this project's "never invent" rule
+    exists to prevent."""
+    out = {}
+    for team in (data.get("boxscore") or {}).get("players") or []:
+        for block in team.get("statistics") or []:
+            labels = block.get("labels")
+            if not isinstance(labels, list):
+                continue
+            for a in block.get("athletes") or []:
+                stats = a.get("stats")
+                ath = a.get("athlete") or {}
+                aid = ath.get("id")
+                if not aid or not isinstance(stats, list):
+                    continue
+                row = out.setdefault(str(aid), {})
+                row.update(dict(zip(labels, stats)))
+                name = ath.get("shortName") or ath.get("displayName")
+                if name:
+                    row["_name"] = paneltext.panel_text(name)
+    return out
+
+
+def fetch_baseball_matchup(league, event_id, data=None):
+    """The real current pitcher-vs-batter matchup for a live MLB game,
+    with the real stats a broadcast scorebug actually shows.
+
+    Direct owner ask, twice ("pitch count, batting average... whos on or
+    next up, pitcher and pitch count"). Everything here is CONFIRMED
+    against a real live payload (see `_boxscore_stats()` for the exact
+    real rows) -- no defensive guessing at key names, which is what made
+    the first attempt at this render nothing at all.
+
+    Returns None if this isn't a real live baseball game with a real
+    current pitcher/batter, or {} keys omitted individually when a
+    specific real stat is genuinely absent. Never a guessed number.
+
+    ON-DECK IS DELIBERATELY NOT INCLUDED, and that is a real finding,
+    not an oversight: the string "onDeck" appears ZERO times anywhere in
+    this endpoint's entire real response (checked directly). ESPN simply
+    does not publish the on-deck batter here. Inventing one from the
+    lineup's bat order would be guessing at a real fact -- a pinch
+    hitter or a mid-inning substitution makes batting-order arithmetic
+    wrong exactly when it matters. If a real field for it ever turns up
+    on another endpoint, that's a genuine follow-up.
+
+    Same narrow per-game scope every other summary-endpoint fetch in
+    this file uses (win probability, the big-moment detectors): ONE
+    game, the one actually on screen, never every game in a league."""
+    path = LEAGUE_PATHS.get(league)
+    if not path:
+        return None
+    if data is None:
+        data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))
+    sit = data.get("situation")
+    if not isinstance(sit, dict):
+        return None
+    stats = _boxscore_stats(data)
+
+    def _side(key, fields):
+        who = sit.get(key)
+        if not isinstance(who, dict):
+            return None
+        # The SUMMARY endpoint's situation carries only {"playerId": N};
+        # the SCOREBOARD endpoint's carries a full nested `athlete`.
+        # Both are real and both are handled -- confirmed live, this
+        # asymmetry between two ESPN endpoints is genuine.
+        pid = who.get("playerId")
+        if pid is None:
+            pid = (who.get("athlete") or {}).get("id")
+        if pid is None:
+            return None
+        row = stats.get(str(pid))
+        if not row:
+            return None
+        out = {"name": row.get("_name")}
+        for label, dest in fields:
+            v = row.get(label)
+            if v not in (None, "", "-"):
+                out[dest] = v
+        return out if out.get("name") else None
+
+    pitcher = _side("pitcher", [("PC", "pitch_count"), ("ERA", "era"),
+                                ("IP", "ip"), ("K", "k"), ("ER", "er")])
+    batter = _side("batter", [("AVG", "avg"), ("H-AB", "today"),
+                              ("HR", "hr"), ("RBI", "rbi")])
+    if not pitcher and not batter:
+        return None
+    return {"pitcher": pitcher, "batter": batter}
+
+
+# ESPN MLB summary `plays[].pitchCoordinate` canvas. Confirmed live
+# 2026-08-12 on BAL@MIN (401816500) and PHI@STL: x ~32..187, y ~102..262,
+# y increases downward (a high pitch has a SMALLER y). There is no named
+# strike-zone rectangle in the payload. The inner box below is the
+# called-strike envelope from those two games (98% of Strike Looking
+# inside, 98% of Balls outside) -- a plot frame, not Statcast rulebook
+# feet. A missing coordinate is a missing dot.
+ESPN_PITCH_X0, ESPN_PITCH_X1 = 40.0, 180.0
+ESPN_PITCH_Y0, ESPN_PITCH_Y1 = 110.0, 250.0
+ESPN_ZONE_X0, ESPN_ZONE_X1 = 89.0, 150.0
+ESPN_ZONE_Y0, ESPN_ZONE_Y1 = 142.0, 193.0
+
+_PITCH_SKIP = {"END BATTER/PITCHER", "PLAY RESULT"}
+
+
+def _mlb_pitch_kind(type_text):
+    t = (type_text or "").upper()
+    if not t or t in _PITCH_SKIP:
+        return None
+    if t.startswith("BALL"):
+        return "ball"
+    if "FOUL" in t:
+        return "foul"
+    if "LOOKING" in t:
+        return "looking"
+    if "SWINGING" in t:
+        return "swinging"
+    if t.startswith("STRIKE"):
+        return "strike"
+    return "inplay"
+
+
+def _mlb_pitches_from_payload(data):
+    """Every real pitch in a summary `plays` list. ZERO I/O."""
+    plays = data.get("plays") if isinstance(data, dict) else None
+    if not isinstance(plays, list):
+        return []
+    out = []
+    for p in plays:
+        if not isinstance(p, dict):
+            continue
+        kind = _mlb_pitch_kind((p.get("type") or {}).get("text"))
+        if not kind:
+            continue
+        coord = p.get("pitchCoordinate")
+        if not isinstance(coord, dict):
+            continue
+        x, y = coord.get("x"), coord.get("y")
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            continue
+        pt = p.get("pitchType") if isinstance(p.get("pitchType"), dict) else {}
+        vel = p.get("pitchVelocity")
+        out.append({
+            "id": str(p.get("id") or ""),
+            "atbat": str(p.get("atBatId") or ""),
+            "n": p.get("atBatPitchNumber") if isinstance(p.get("atBatPitchNumber"), int) else None,
+            "x": float(x),
+            "y": float(y),
+            "kind": kind,
+            "type": paneltext.panel_text(pt.get("abbreviation") or pt.get("text")) or None,
+            "vel": vel if isinstance(vel, int) else None,
+            "text": paneltext.panel_text(p.get("text")) or None,
+        })
+    return out
+
+
+def last_atbat_pitches(pitches):
+    """Pitches from the current (or just-finished) plate appearance."""
+    if not isinstance(pitches, list) or not pitches:
+        return []
+    ab = pitches[-1].get("atbat")
+    if not ab:
+        return pitches[-8:]
+    return [p for p in pitches if p.get("atbat") == ab]
+
+
+def _int_if_sent(v):
+    """Parse a real ESPN number, or None. Never invents 0 from a miss."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float) and v == int(v):
+        return int(v)
+    if isinstance(v, str) and v.strip().lstrip("-").isdigit():
+        return int(v.strip())
+    return None
+
+
+def _mlb_inning_runs(display_value):
+    """One linescore displayValue -> int runs, or None.
+
+    Digits (including ESPN's own "0") become that int. "X" -- home
+    did not bat -- is None, never a fake 0. Any other token is also
+    None rather than guessed.
+    """
+    if isinstance(display_value, bool):
+        return None
+    if isinstance(display_value, int):
+        return display_value
+    if display_value is None:
+        return None
+    s = str(display_value).strip()
+    if s.isdigit():
+        return int(s)
+    return None
+
+
+def _mlb_line_side(competitor):
+    """One header competitor -> {abbr, runs, hits, errors, innings}."""
+    team = competitor.get("team") if isinstance(competitor.get("team"), dict) else {}
+    abbr = team.get("abbreviation") or competitor.get("abbreviation")
+    innings = []
+    lines = competitor.get("linescores")
+    if isinstance(lines, list):
+        for ls in lines:
+            if not isinstance(ls, dict):
+                continue
+            innings.append(_mlb_inning_runs(ls.get("displayValue")))
+    return {
+        "abbr": paneltext.panel_text(abbr) if abbr else "",
+        "runs": _int_if_sent(competitor.get("score")),
+        "hits": _int_if_sent(competitor.get("hits")),
+        "errors": _int_if_sent(competitor.get("errors")),
+        "innings": innings,
+    }
+
+
+def _mlb_line_score_from_payload(data):
+    """header.competitions[0].competitors -> {away, home} or None.
+
+    Confirmed live 2026-08-12, BAL @ MIN event 401816500 (state=post):
+    each competitor carries hits/errors as ints and linescores[] with
+    one {displayValue} per inning actually played. Home (MIN) had 8
+    entries -- they did not bat in the 9th -- and that omitted inning
+    stays omitted here, never padded with a fake 0. displayValue "X"
+    becomes None, not 0. Returns None when neither side has linescores.
+    """
+    if not isinstance(data, dict):
+        return None
+    header = data.get("header") if isinstance(data.get("header"), dict) else data
+    comps = header.get("competitions") if isinstance(header, dict) else None
+    if not isinstance(comps, list) or not comps:
+        comps = data.get("competitions")
+    if not isinstance(comps, list) or not comps:
+        return None
+    comp = comps[0] if isinstance(comps[0], dict) else None
+    if not comp:
+        return None
+    competitors = comp.get("competitors")
+    if not isinstance(competitors, list):
+        return None
+    away = next((c for c in competitors
+                 if isinstance(c, dict) and c.get("homeAway") == "away"), None)
+    home = next((c for c in competitors
+                 if isinstance(c, dict) and c.get("homeAway") == "home"), None)
+    if not away or not home:
+        return None
+    away_side, home_side = _mlb_line_side(away), _mlb_line_side(home)
+    if not away_side["innings"] and not home_side["innings"]:
+        return None
+    return {"away": away_side, "home": home_side}
+
+
+def _win_prob_from_payload(data):
+    wp = data.get("winprobability")
+    if not isinstance(wp, list) or not wp:
+        return None
+    last = wp[-1]
+    pct = last.get("homeWinPercentage")
+    return float(pct) if isinstance(pct, (int, float)) else None
+
+
+def summarize_payload(league, event_id, data):
+    """One summary JSON -> every per-game fact the engine reads.
+
+    Called only from the feed worker. The engine never sees the raw
+    payload and never hits SUMMARY_URL itself. Missing pieces stay
+    missing -- a quiet key is not filled in from another sport.
+    """
+    if not isinstance(data, dict):
+        return {}
+    soccer_goals = _soccer_goals_from_payload(data)
+    mma_cur, mma_total = _mma_rounds_from_payload(data)
+    return {
+        "event_id": event_id,
+        "league": league,
+        "win_prob": _win_prob_from_payload(data),
+        "matchup": (fetch_baseball_matchup(league, event_id, data=data)
+                    if league == "MLB" else None),
+        "home_runs": _fetch_home_run_plays(league, event_id, data=data),
+        "touchdowns": _fetch_touchdown_plays(league, event_id, data=data),
+        "goals": _fetch_goal_plays(league, event_id, data=data),
+        "clutch": _fetch_clutch_plays(league, event_id, data=data),
+        "soccer_goals": soccer_goals,
+        "last_goal": last_goal_from_list(soccer_goals),
+        "mma_method": _mma_finish_from_payload(data),
+        "current_round": mma_cur,
+        "total_rounds": mma_total,
+        "atbat_pitches": last_atbat_pitches(_mlb_pitches_from_payload(data)),
+        "line_score": _mlb_line_score_from_payload(data),
+    }
+
+
+def summary_path(league, sport=None):
+    """ESPN summary path for a league code, a header slug, or a
+    universal-header display name (UFC/PFL). None if this project
+    has no honest path -- caller must not invent one.
+
+    Soccer on the universal header ships as `eng.1` / `usa.1`, not
+    `EPL`. Those slugs are the same tokens LEAGUE_PATHS already
+    uses after the sport prefix, so `soccer/{slug}` is a real path
+    rather than a guess. MMA's per-event summary 404s (see mma.py);
+    UFC/PFL still resolve here so a future working endpoint is
+    one line, but the engine should not poll them for live state.
+    """
+    if league in LEAGUE_PATHS:
+        return LEAGUE_PATHS[league]
+    raw = (league or "").strip()
+    if not raw:
+        return None
+    if raw.upper() in ("UFC", "PFL"):
+        return f"mma/{raw.lower()}"
+    if (sport or "").lower() == "soccer":
+        return f"soccer/{raw.lower()}"
+    return None
+
+
+def _soccer_goals_from_payload(data):
+    """Parse keyEvents scoring plays. ZERO I/O. Same facts
+    fetch_new_soccer_goals() used, just without a network call."""
+    events = data.get("keyEvents") if isinstance(data, dict) else None
+    if not isinstance(events, list):
+        return []
+    out = []
+    for ev in events:
+        if not isinstance(ev, dict) or not ev.get("scoringPlay"):
+            continue
+        key = ev.get("id")
+        if key is None:
+            continue
+        out.append({
+            "id": str(key),
+            "type": paneltext.panel_text((ev.get("type") or {}).get("text")),
+            "text": paneltext.panel_text(ev.get("text")),
+            "scorer": _play_scorer(ev),
+        })
+    return out
+
+
+def _mma_finish_from_payload(data):
+    """Same method extraction as _fetch_mma_finish_method, no I/O."""
+    if not isinstance(data, dict):
+        return None
+    details = data.get("details")
+    if not isinstance(details, list):
+        details = data.get("plays")
+    if not isinstance(details, list):
+        return None
+    for d in details:
+        if not isinstance(d, dict):
+            continue
+        t = d.get("type") or {}
+        text = str(t.get("text") or "")
+        if "Winner" not in text:
+            continue
+        by_id = mma.METHOD_BY_ID.get(str(t.get("id")))
+        if by_id:
+            return by_id
+        token = paneltext.panel_text(text.replace("Unofficial", "").replace("Winner", ""))
+        return mma.METHOD_BY_TEXT.get(token, token or None)
+    return None
+
+
+def _goal_is_own_or_shootout(goal):
+    """True for own-goals and shootout conversions. Regular-time
+    penalties (`Penalty - Scored`) stay -- those are real goals."""
+    blob = " ".join(str(x) for x in (goal.get("type"), goal.get("text")) if x)
+    u = blob.upper()
+    return "OWN GOAL" in u or "SHOOTOUT" in u
+
+
+def last_goal_from_list(goals):
+    """Newest non-own-goal, non-shootout scoring play, or None.
+
+    Walks newest-first so a later own-goal does not erase the last
+    real scorer. Missing list / empty list / every play skipped
+    returns None -- never a guessed name.
+    """
+    if not isinstance(goals, list):
+        return None
+    for g in reversed(goals):
+        if isinstance(g, dict) and not _goal_is_own_or_shootout(g):
+            return g
+    return None
+
+
+def _mma_rounds_from_payload(data):
+    """(current_round, scheduled_rounds) from a summary payload.
+
+    Same `format.regulation.periods` field mma.py already verified
+    on the UFC scoreboard. Read defensively -- MMA's per-event
+    summary 404s today, so both values stay None until a real
+    payload actually carries them.
+    """
+    if not isinstance(data, dict):
+        return None, None
+    header = data.get("header") if isinstance(data.get("header"), dict) else data
+    comps = header.get("competitions") if isinstance(header, dict) else None
+    if not isinstance(comps, list) or not comps:
+        comps = data.get("competitions")
+    if not isinstance(comps, list) or not comps:
+        return None, None
+    comp = comps[0] if isinstance(comps[0], dict) else None
+    if not comp:
+        return None, None
+    periods = ((comp.get("format") or {}).get("regulation") or {}).get("periods")
+    total = periods if isinstance(periods, int) and 1 <= periods <= 5 else None
+    st = comp.get("status") if isinstance(comp.get("status"), dict) else {}
+    cur = st.get("period")
+    current = cur if isinstance(cur, int) and cur >= 1 else None
+    return current, total
+
+
+def _athlete_scorer(ath):
+    if not isinstance(ath, dict):
+        return None
+    jersey = ath.get("jersey")
+    pos = ath.get("position")
+    pos_abbr = pos.get("abbreviation") if isinstance(pos, dict) else None
+    name = ath.get("shortName") or ath.get("displayName")
+    if not (jersey or pos_abbr or name):
+        return None
+    return {
+        "jersey": paneltext.panel_text(str(jersey)) if jersey else None,
+        "position": paneltext.panel_text(str(pos_abbr)) if pos_abbr else None,
+        "name": paneltext.panel_text(str(name)) if name else None,
+    }
+
+
+def _play_scorer(p):
+    """Real jersey number/position/name for whoever's credited on a real
+    scoring play, or None. 2026-08-10, direct owner ask ("player
+    highlight after key plays").
+
+    HONEST GAP, stated per this project's own standing precedent: ESPN's
+    real per-play `participants` list (commonly `[{"athlete": {...},
+    "type": "scorer"}, ...]` on other ESPN site-API endpoints this
+    project has NOT independently confirmed for THIS summary endpoint)
+    is read defensively here, the same way `_situation()`'s own
+    down/distance numeric subfields are documented as "read defensively
+    but NOT verified" -- this sandbox's network to ESPN is unreachable
+    this session (same class of block already documented elsewhere in
+    this file), so this has not been checked against a real live
+    payload. Returns None on ANY unexpected shape (missing key, wrong
+    type, empty list) rather than guessing -- a missing highlight is
+    honest; a wrong player's jersey number is not. Verify against a real
+    live scoring play the first session this sandbox can reach ESPN.
+    """
+    participants = p.get("participants")
+    if isinstance(participants, list) and participants:
+        scorer = next((x for x in participants
+                       if isinstance(x, dict) and x.get("type") == "scorer"), participants[0])
+        ath = scorer.get("athlete") if isinstance(scorer, dict) else None
+        got = _athlete_scorer(ath)
+        if got:
+            return got
+    # Soccer keyEvents often credit the scorer on athletesInvolved
+    # instead of (or as well as) participants. Same defensive read:
+    # missing / wrong shape -> None, never a guessed name.
+    involved = p.get("athletesInvolved")
+    if isinstance(involved, list) and involved:
+        first = involved[0] if isinstance(involved[0], dict) else None
+        nested = first.get("athlete") if isinstance(first, dict) else None
+        got = _athlete_scorer(nested if isinstance(nested, dict) else first)
+        if got:
+            return got
+    return None
+
+
+def _fetch_home_run_plays(league, event_id, data=None):
     """MLB home-run plays from a game's play-by-play, or [] for anything
     else. Returns a list of {"id": str, "text": str}, text already
     paneltext.panel_text()-folded (this is the I/O boundary -- see
     paneltext.py's docstring on why the fold belongs here, not in the
     caller).
+
+    `data` is an already-fetched summary payload (the off-thread
+    worker). When present, this function does ZERO I/O -- it only
+    parses. The engine must never call this without `data` on the
+    render tick.
 
     Confirmed live against a real finished game before writing this: each
     scoring play carries `scoringPlay: bool` and `alternativeType.text`,
@@ -576,8 +1703,9 @@ def _fetch_home_run_plays(league, event_id):
     """
     if league != "MLB":
         return []
-    path = LEAGUE_PATHS[league]
-    data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))
+    if data is None:
+        path = LEAGUE_PATHS[league]
+        data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))
     plays = data.get("plays")
     if not isinstance(plays, list):
         return []
@@ -594,11 +1722,12 @@ def _fetch_home_run_plays(league, event_id):
         out.append({
             "id": str(pid),
             "text": paneltext.panel_text(p.get("text") or ""),
+            "scorer": _play_scorer(p),
         })
     return out
 
 
-def _fetch_touchdown_plays(league, event_id):
+def _fetch_touchdown_plays(league, event_id, data=None):
     """NFL/NCAAF touchdown plays from a game's `scoringPlays` array, or []
     for anything else. Returns a list of {"id": str, "text": str,
     "awayScore": int, "homeScore": int}, text already
@@ -638,8 +1767,9 @@ def _fetch_touchdown_plays(league, event_id):
     """
     if league not in ("NFL", "NCAAF"):
         return []
-    path = LEAGUE_PATHS[league]
-    data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))
+    if data is None:
+        path = LEAGUE_PATHS[league]
+        data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))
     plays = data.get("scoringPlays")
     if not isinstance(plays, list):
         return []
@@ -656,11 +1786,12 @@ def _fetch_touchdown_plays(league, event_id):
             "text": paneltext.panel_text(p.get("text") or ""),
             "awayScore": p.get("awayScore"),
             "homeScore": p.get("homeScore"),
+            "scorer": _play_scorer(p),
         })
     return out
 
 
-def _fetch_goal_plays(league, event_id):
+def _fetch_goal_plays(league, event_id, data=None):
     """NHL goal plays from a game's `scoringPlays` array, or [] for
     anything else. Returns a list of {"id": str, "text": str, "awayScore":
     int, "homeScore": int}, text already paneltext.panel_text()-folded --
@@ -687,8 +1818,9 @@ def _fetch_goal_plays(league, event_id):
     """
     if league != "NHL":
         return []
-    path = LEAGUE_PATHS[league]
-    data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))
+    if data is None:
+        path = LEAGUE_PATHS[league]
+        data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))
     plays = data.get("scoringPlays")
     if not isinstance(plays, list):
         return []
@@ -705,6 +1837,7 @@ def _fetch_goal_plays(league, event_id):
             "text": paneltext.panel_text(p.get("text") or ""),
             "awayScore": p.get("awayScore"),
             "homeScore": p.get("homeScore"),
+            "scorer": _play_scorer(p),
         })
     return out
 
@@ -763,7 +1896,36 @@ def _clock_seconds_remaining(clock):
 FINAL_PERIOD_BY_LEAGUE = {"NBA": 4, "NCAAB": 2}
 
 
-def _fetch_clutch_plays(league, event_id):
+def _play_shot_xy(p):
+    """Real shot x/y for a basketball play, or None. 2026-08-10, direct
+    owner ask ("NBA mini shot-location court").
+
+    Deliberately reuses THIS project's own already-fetched
+    `_fetch_clutch_plays()` summary payload (`play.coordinate.x/y`, a
+    real ESPN field documented across multiple independent public ESPN-
+    API tools) rather than adding stats.nba.com as a brand-new external
+    data source -- a different domain with its own header/rate-limit
+    quirks this project has no existing relationship with, and zero new
+    I/O beyond what the clutch-shot detector already fetches.
+
+    HONEST GAP: this sandbox's network to ESPN is unreachable this
+    session (same documented block as every other new field added this
+    pass), so the real coordinate SYSTEM (which corner is origin, full-
+    court vs half-court feet) is not independently confirmed against a
+    live payload. Returns None on any missing/non-numeric field rather
+    than guessing -- an absent shot dot is honest; a wrong one is not.
+    Verify against a real live clutch shot the first session this
+    sandbox can reach ESPN."""
+    coord = p.get("coordinate")
+    if not isinstance(coord, dict):
+        return None
+    x, y = coord.get("x"), coord.get("y")
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return None
+    return {"x": float(x), "y": float(y)}
+
+
+def _fetch_clutch_plays(league, event_id, data=None):
     """Basketball "clutch shot" plays from a game's `plays` play-by-play
     list, or [] for anything else. Returns a list of {"id": str, "text":
     str, "awayScore": int, "homeScore": int}, text already
@@ -809,8 +1971,9 @@ def _fetch_clutch_plays(league, event_id):
     if league not in ("NBA", "NCAAB"):
         return []
     final_period = FINAL_PERIOD_BY_LEAGUE[league]
-    path = LEAGUE_PATHS[league]
-    data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))
+    if data is None:
+        path = LEAGUE_PATHS[league]
+        data = _get_json(SUMMARY_URL.format(path=path, event_id=event_id))
     plays = data.get("plays")
     if not isinstance(plays, list):
         return []
@@ -850,6 +2013,8 @@ def _fetch_clutch_plays(league, event_id):
             "text": paneltext.panel_text(p.get("text") or ""),
             "awayScore": int(away_score),
             "homeScore": int(home_score),
+            "scorer": _play_scorer(p),
+            "shot_xy": _play_shot_xy(p),
         })
     return out
 
@@ -901,6 +2066,7 @@ def fetch_new_soccer_goals(league, event_id, seen):
         out.append({
             "type": paneltext.panel_text((ev.get("type") or {}).get("text")),
             "text": paneltext.panel_text(ev.get("text")),
+            "scorer": _play_scorer(ev),
         })
     return out
 
@@ -1024,6 +2190,16 @@ def _fetch_mma_finish_method(league_slug, event_id):
 # no live point score, because no field for one was ever observed to
 # confirm a name for.
 TENNIS_TOURS = {"ATP": "tennis/atp", "WTA": "tennis/wta"}
+# Each tour's scoreboard dumps BOTH genders AND doubles (confirmed
+# 2026-08-12: ATP and WTA returned the identical 608-match Rogers +
+# Cincinnati blob). We take Men's Singles from ATP, Women's Singles
+# from WTA, nothing else.
+TENNIS_DRAW = {"ATP": "MEN'S SINGLES", "WTA": "WOMEN'S SINGLES"}
+# Upcoming: seeds 1-16 (a real seeded section). Finished: seed vs
+# seed with a top-8 involved -- late-round results, not every R64
+# a seed already played. Live: any match with a ranked player.
+TENNIS_PRE_SEED = 16
+TENNIS_POST_SEED = 8
 
 TENNIS_REFRESH_LIVE = 20.0     # a match is actually in progress
 TENNIS_REFRESH_IDLE = 300.0    # matches exist today but none live
@@ -1067,19 +2243,199 @@ def _parse_tennis_sets(competitor):
     return out
 
 
+def _tennis_seed_and_rank(c):
+    """Tournament seed and world rank from a raw ESPN competitor.
+
+    HONEST GAP, checked live against the ATP/WTA scoreboard (Rogers +
+    Cincinnati, 608 matches): this endpoint has NO ATP/WTA world-ranking
+    field. `curatedRank.current` is the tournament seed (real values
+    1..33 on that slate). Header tennis sometimes also sends `rank` /
+    `tournamentSeed`; those are read when present. A missing number is
+    unseeded/unranked, never a guessed ranking.
+    """
+    seed = None
+    cr = c.get("curatedRank")
+    if isinstance(cr, dict):
+        seed = _num_or_none(cr.get("current"))
+    if seed is None:
+        seed = _num_or_none(c.get("tournamentSeed"))
+    rank = _num_or_none(c.get("rank"))
+    return rank, seed
+
+
+def _tennis_player_ranked(c):
+    """True when ESPN published a real seed or rank number for them."""
+    return _tennis_player_mark(c) is not None
+
+
+def _tennis_player_mark(c):
+    """Best real seed or world rank on this competitor, or None."""
+    if not isinstance(c, dict):
+        return None
+    best = None
+    for key in ("rank", "seed"):
+        v = c.get(key)
+        if isinstance(v, int) and v >= 1:
+            best = v if best is None else min(best, v)
+    return best
+
+
+def _tennis_best_rank(match):
+    """Lowest real seed/rank on either side. None if both are unmarked."""
+    best = None
+    for c in (match or {}).get("competitors") or []:
+        m = _tennis_player_mark(c)
+        if m is not None:
+            best = m if best is None else min(best, m)
+    return best
+
+
+def _tennis_seeded_count(match):
+    return sum(1 for c in (match or {}).get("competitors") or []
+               if _tennis_player_mark(c) is not None)
+
+
+def _tennis_draw_ok(tour_code, grouping_name):
+    """ATP = men's singles, WTA = women's singles. Doubles and
+    qualifying are not a 64px slate."""
+    n = (grouping_name or "").upper().replace("-", " ").replace("'", "")
+    if "DOUBLE" in n or "QUALIF" in n:
+        return False
+    if tour_code == "ATP":
+        return "MEN" in n and "SINGLE" in n and "WOMEN" not in n
+    if tour_code == "WTA":
+        return "WOMEN" in n and "SINGLE" in n
+    return False
+
+
+def _tennis_has_real_name(match):
+    """TBD vs Zverev is a real next match. TBD vs TBD is not."""
+    names = []
+    for c in (match or {}).get("competitors") or []:
+        n = (c.get("full") or c.get("abbr") or "").strip()
+        if n and n.upper() != "TBD":
+            names.append(n)
+    return bool(names)
+
+
+def _tennis_name_matches(c, want):
+    name = (c.get("full") or c.get("abbr") or "") if isinstance(c, dict) else ""
+    if not name or not want:
+        return False
+    last = name.split()[-1] if name.split() else ""
+    want_last = want.split()[-1] if want.split() else want
+    return name == want or last == want_last or want in name or name in want
+
+
+def _tennis_match_followed(match, pinned=None):
+    """Keep a match the wall can actually use.
+
+    Unranked vs unranked is out. Unranked vs a ranked player stays --
+    that is the only way an unranked name appears. A pinned player
+    always keeps their match.
+
+    The 200-card dump was every seed's entire tournament history plus
+    doubles. Finished early-round beatdowns (seed 1 vs qualifier, four
+    times) are not a slate. Upcoming is seeds 1-16. Live is any match
+    with a ranked player. Post is seed-vs-seed with a top-8 involved.
+    """
+    comps = match.get("competitors") or []
+    if pinned:
+        want = paneltext.panel_text(pinned)
+        if want and any(_tennis_name_matches(c, want) for c in comps):
+            return True
+    if not _tennis_has_real_name(match):
+        return False
+    best = _tennis_best_rank(match)
+    if best is None:
+        return False
+    state = match.get("state")
+    if state == "in":
+        return True
+    if state == "pre":
+        return best <= TENNIS_PRE_SEED
+    if state == "post":
+        return best <= TENNIS_POST_SEED and _tennis_seeded_count(match) >= 2
+    return False
+
+
+def _tennis_collapse_post(matches):
+    """One finished result per top-8 player -- their latest card.
+
+    The scoreboard keeps every prior round. Without this, seed 5 is
+    four extra screens of opponents they already beat."""
+    live_pre = [m for m in matches if m.get("state") != "post"]
+    latest = {}
+    for m in matches:
+        if m.get("state") != "post":
+            continue
+        cid = str(m.get("id") or "")
+        for c in m.get("competitors") or []:
+            mark = _tennis_player_mark(c)
+            if mark is None or mark > TENNIS_POST_SEED:
+                continue
+            pid = c.get("id") or c.get("full")
+            if not pid:
+                continue
+            prev = latest.get(pid)
+            if prev is None or str(prev.get("id") or "") <= cid:
+                latest[pid] = m
+    seen = set()
+    posts = []
+    for m in latest.values():
+        eid = m.get("id")
+        if eid in seen:
+            continue
+        seen.add(eid)
+        posts.append(m)
+    return live_pre + posts
+
+
+def _tennis_sort_key(match, pinned=None):
+    """Live, then upcoming, then results -- and inside that, #1 first.
+
+    A pinned player leads their state so you do not walk 16 seeds to
+    find them. Unmarked ranks sort last, never as 0."""
+    state = {"in": 0, "pre": 1, "post": 2}.get((match or {}).get("state"), 3)
+    pin = 1
+    if pinned:
+        want = paneltext.panel_text(pinned)
+        comps = (match or {}).get("competitors") or []
+        if want and any(_tennis_name_matches(c, want) for c in comps):
+            pin = 0
+    best = _tennis_best_rank(match)
+    return (state, pin, best if best is not None else 999,
+            (match or {}).get("name") or "", (match or {}).get("id") or "")
+
+
+def _dedupe_tennis_matches(matches):
+    """ATP and WTA scoreboards can return the SAME combined event
+    (verified live: Rogers/Cincinnati, 608/608 ids identical). First
+    copy of each competition id wins."""
+    seen = set()
+    out = []
+    for m in matches:
+        eid = m.get("id")
+        if not eid or eid in seen:
+            continue
+        seen.add(eid)
+        out.append(m)
+    return out
+
+
 def _parse_tennis_competitor(c):
     abbr, full = _tennis_competitor_name(c)
+    rank, seed = _tennis_seed_and_rank(c)
     return {
         "id": c.get("id"),
         "is_team": False,
         "abbr": abbr,
         "full": full,
         "winner": bool(c.get("winner")),
-        "seed": _num_or_none(c.get("curatedRank", {}).get("current")
-                              if isinstance(c.get("curatedRank"), dict) else None),
+        "seed": seed,
         "sets": _parse_tennis_sets(c),
         "score": None,       # tennis has no single numeric score -- see "sets"
-        "color": None, "alt_color": None, "record": None, "rank": None,
+        "color": None, "alt_color": None, "record": None, "rank": rank,
         "form": None, "movement": None, "shootout": None,
         "place": None, "thru": None, "hole": None,
         "tee_time": None, "player_state": None, "home_away": c.get("homeAway"),
@@ -1144,6 +2500,8 @@ def _fetch_tennis_matches(tour_code):
         for g in (ev.get("groupings") or []):
             gr = g.get("grouping") or {}
             gname = gr.get("displayName") or gr.get("slug") or ""
+            if not _tennis_draw_ok(tour_code, gname):
+                continue
             for comp in (g.get("competitions") or []):
                 try:
                     out.append(_parse_tennis_match(comp, gname, tour_code, name, short))
@@ -1201,15 +2559,10 @@ def find_pinned_tennis_player(matches, pinned):
     want = paneltext.panel_text(pinned)
     if not want:
         return None, None
-    want_last = want.split()[-1] if want.split() else want
     hits = []
     for m in matches:
         for c in m.get("competitors") or []:
-            name = c.get("full") or c.get("abbr") or ""
-            if not name:
-                continue
-            last = name.split()[-1] if name.split() else ""
-            if name == want or last == want_last or want in name or name in want:
+            if _tennis_name_matches(c, want):
                 hits.append((m, c))
                 break
     if not hits:
@@ -1277,13 +2630,45 @@ class SportsFeed:
         # config value here, re-read on the same _maybe_reload_config()
         # timer as leagues/favorite/golf_player/tennis_player.
         self._favorite_teams, self._favorite_teams_filter = load_favorite_teams()
+        # ESPN poll posture -- re-read on the same _maybe_reload_config()
+        # timer as leagues/favorite/golf_player so a control-panel toggle
+        # applies live without a restart. "off" is the only honest
+        # production lock (see HONEST POSTURE in the module docstring).
+        self._espn_use = load_espn_use()
         self._thread = None
-        self._err = None
+        self._err = ESPN_OFF_ERR if self._espn_use == ESPN_USE_OFF else None
+        # ONE-GAME summary cache -- the off-thread worker that replaced
+        # SportsEngine's tick-thread SUMMARY_URL hits (matchup + every
+        # big-moment detector). Engine calls want_summary() each tick
+        # for the games it actually has on screen; this thread fetches
+        # at WINPROB_REFRESH. get_summary() never blocks.
+        self._summary_wanted = {}     # event_id -> (league, last_want_ts, sport)
+        self._summaries = {}          # event_id -> bundle
+        self._summary_try = {}        # event_id -> last fetch ts
+        # Standings (MLB/NHL/NBA). 15-minute poll -- these are tables, not
+        # live scores. Worker only runs while someone is reading (_last_read
+        # / IDLE_STOP), same as every other poll here.
+        self._standings = {}          # league -> parsed {league, groups}
+        self._standings_try = 0.0
+        self._standings_updated = 0.0
+        # Next future game for the pinned favorite -- only fetched when
+        # they have no game TODAY (scoreboard is dates=TODAY). Never
+        # written into favorite_game: that slot is today-only.
+        self._favorite_next = None
+        self._next_try = 0.0
+        self._next_interval = 0.0
+        self._next_fails = 0
 
     # ---- reading -------------------------------------------------------
     def get(self):
-        """Returns {games: [...], favorite, favorite_game, win_prob,
-        age, err}. Never blocks."""
+        """Returns {games: [...], favorite, favorite_game, favorite_next,
+        win_prob, age, err, standings}. Never blocks.
+
+        favorite_game is TODAY only (today's scoreboard). favorite_next is
+        the next future pre game, and only when there is no game today --
+        a today live/final/pre always wins so next-game cannot look like
+        it is happening now.
+        """
         now = time.time()
         with self._lock:
             self._last_read = now
@@ -1294,6 +2679,8 @@ class SportsFeed:
             favorite = dict(self.favorite) if self.favorite else None
             win_prob = self._win_prob
             err = self._err
+            raw_next = dict(self._favorite_next) if self._favorite_next else None
+            standings = _copy_standings(self._standings)
         self._ensure_thread()
 
         games.sort(key=lambda g: (g["state"] != "in", g["state"] == "post"))
@@ -1305,12 +2692,33 @@ class SportsFeed:
                  favorite["team_abbr"] in (g["home"]["abbr"], g["away"]["abbr"])),
                 None)
 
+        favorite_next = None
+        if favorite and not favorite_game and raw_next:
+            # Identity is league + abbr, never a list index. Drop a
+            # cached next-game that no longer belongs to the pinned team.
+            if (raw_next.get("league") == favorite["league"] and
+                    favorite["team_abbr"] in (
+                        (raw_next.get("home") or {}).get("abbr"),
+                        (raw_next.get("away") or {}).get("abbr"))):
+                favorite_next = raw_next
+
         age = (now - min(updated_times)) if updated_times else None
         return {
             "games": games, "favorite": favorite, "favorite_game": favorite_game,
+            "favorite_next": favorite_next,
             "win_prob": win_prob if favorite_game and favorite_game["state"] == "in" else None,
-            "age": age, "err": err,
+            "age": age, "err": err, "standings": standings,
         }
+
+    def get_standings(self):
+        """Last-good standings tables, or {}. Never blocks. Touches
+        _last_read so the worker keeps polling while a reader is here."""
+        now = time.time()
+        with self._lock:
+            self._last_read = now
+            standings = _copy_standings(self._standings)
+        self._ensure_thread()
+        return standings
 
     def get_config(self):
         with self._lock:
@@ -1343,6 +2751,10 @@ class SportsFeed:
             self._last_try[league] = 0.0
             self._win_prob_try = 0.0
             self._win_prob = None
+            self._favorite_next = None
+            self._next_try = 0.0
+            self._next_interval = 0.0
+            self._next_fails = 0
             leagues = list(self.leagues)
         save_config(leagues, favorite)
         return favorite
@@ -1351,6 +2763,7 @@ class SportsFeed:
         with self._lock:
             self.favorite = None
             self._win_prob = None
+            self._favorite_next = None
             leagues = list(self.leagues)
         save_config(leagues, None)
 
@@ -1362,6 +2775,50 @@ class SportsFeed:
             self._thread = threading.Thread(target=self._loop, daemon=True)
             self._thread.start()
 
+    def _espn_http_blocked(self):
+        """True when the worker must not open a new ESPN request."""
+        with self._lock:
+            return self._espn_use == ESPN_USE_OFF
+
+    def _poke_espn_refresh(self):
+        """Force the next worker pass to hit ESPN immediately. Caller
+        holds `_lock`. Used when posture flips back to personal so a
+        live toggle does not wait out a leftover IDLE/EMPTY interval."""
+        self._last_try = {k: 0.0 for k in self._last_try}
+        self._interval = {k: 0.0 for k in self._interval}
+        self._universal_try = 0.0
+        self._universal_interval = 0.0
+        self._tennis_try = 0.0
+        self._tennis_interval = 0.0
+        self._standings_try = 0.0
+        self._win_prob_try = 0.0
+        self._next_try = 0.0
+        self._next_interval = 0.0
+        self._golf_field_try = 0.0
+        self._summary_try = {}
+
+    def _apply_espn_use(self, value):
+        """Install a posture already persisted by save_espn_use().
+        Caller holds `_lock`."""
+        prev = self._espn_use
+        self._espn_use = value
+        if value == ESPN_USE_OFF:
+            self._err = ESPN_OFF_ERR
+        elif prev == ESPN_USE_OFF:
+            if self._err == ESPN_OFF_ERR:
+                self._err = None
+            self._poke_espn_refresh()
+
+    def set_espn_use(self, value):
+        cleaned = save_espn_use(value)
+        with self._lock:
+            self._apply_espn_use(cleaned)
+        return cleaned
+
+    def get_espn_use(self):
+        with self._lock:
+            return self._espn_use
+
     def _loop(self):
         while True:
             with self._lock:
@@ -1369,16 +2826,29 @@ class SportsFeed:
             if idle > IDLE_STOP:
                 return
             self._maybe_reload_config()
+            # OFF: no new ESPN HTTP. Keep last-good cache. Never invent
+            # scores. LIVE/IDLE/EMPTY intervals are not touched -- those
+            # stay correct for personal use; we just do not spend them.
+            if self._espn_http_blocked():
+                with self._lock:
+                    self._err = ESPN_OFF_ERR
+                time.sleep(2.0)
+                continue
             self._refresh_universal()
             self._refresh_tennis()
             self._refresh_scoreboards()
+            self._refresh_standings()
+            self._refresh_favorite_next()
             self._refresh_win_prob()
+            self._refresh_summaries()
             time.sleep(2.0)
 
     def _refresh_tennis(self):
         """Both tours, real matches, own adaptive interval -- same tiered
         backoff shape as _refresh_scoreboards()/_refresh_universal(), just
         against the dedicated tennis endpoint instead of the header."""
+        if self._espn_http_blocked():
+            return
         now = time.time()
         with self._lock:
             if now - self._tennis_try < self._tennis_interval:
@@ -1391,6 +2861,12 @@ class SportsFeed:
                 matches.extend(_fetch_tennis_matches(tour))
             except Exception:                     # noqa: BLE001 - never die
                 failed += 1
+        with self._lock:
+            pinned = self._tennis_player
+        matches = [m for m in _dedupe_tennis_matches(matches)
+                   if _tennis_match_followed(m, pinned)]
+        matches = _tennis_collapse_post(matches)
+        matches.sort(key=lambda m: _tennis_sort_key(m, pinned))
         with self._lock:
             if failed == len(TENNIS_TOURS) and self._tennis:
                 # Both tours failed and we already have real cached data --
@@ -1426,6 +2902,8 @@ class SportsFeed:
         Cheap by construction: ONE request regardless of how many leagues
         are live, versus one per configured league for the per-league
         path. Backs off the same way everything else here does."""
+        if self._espn_http_blocked():
+            return
         now = time.time()
         with self._lock:
             if now - self._universal_try < self._universal_interval:
@@ -1538,8 +3016,16 @@ class SportsFeed:
         gp = load_golf_player()
         tp = load_tennis_player()
         ft, ftf = load_favorite_teams()
+        eu = load_espn_use()
         with self._lock:
+            if eu != self._espn_use:
+                self._apply_espn_use(eu)
             if leagues != self.leagues or favorite != self.favorite:
+                if favorite != self.favorite:
+                    self._favorite_next = None
+                    self._next_try = 0.0
+                    self._next_interval = 0.0
+                    self._next_fails = 0
                 self.leagues, self.favorite = leagues, favorite
                 self._win_prob_try = 0.0
             if gp != self._golf_player:
@@ -1556,6 +3042,12 @@ class SportsFeed:
         Only tours that actually have a live leaderboard in the header are
         queried, so this never fires out of season, and it is rate-limited
         independently of the header poll."""
+        with self._lock:
+            espn_off = self._espn_use == ESPN_USE_OFF
+            cached = self._golf_field
+        if espn_off:
+            # No new ESPN HTTP. Last-good full-field cache only.
+            return self._match_in_field(cached, pinned)
         tours = sorted({e["league"].lower() for e in events
                         if e.get("leaderboard") and e.get("state") in ("in", "pre")})
         if not tours:
@@ -1632,6 +3124,8 @@ class SportsFeed:
         return SCOREBOARD_REFRESH_EMPTY
 
     def _refresh_scoreboards(self):
+        if self._espn_http_blocked():
+            return
         now = time.time()
         with self._lock:
             leagues = list(self.leagues)
@@ -1663,7 +3157,92 @@ class SportsFeed:
                         ERROR_BACKOFF_BASE * (2 ** (self._fails[lg] - 1)))
                     self._err = f"{type(e).__name__}"
 
+    def _refresh_standings(self):
+        """MLB / NHL / NBA conference tables. 15-minute cadence.
+
+        Only runs while the worker is alive, which is only while
+        someone has touched _last_read recently (get / get_standings /
+        get_universal). A failed league keeps its last-good table;
+        a successful empty parse drops that league so has_content
+        stays honest. Zero I/O on the render thread."""
+        if self._espn_http_blocked():
+            return
+        now = time.time()
+        with self._lock:
+            if now - self._standings_try < STANDINGS_REFRESH:
+                return
+            self._standings_try = now
+        for lg in STANDINGS_LEAGUES:
+            path = LEAGUE_PATHS.get(lg)
+            if not path:
+                continue
+            try:
+                parsed = parse_standings(
+                    lg, _get_json(STANDINGS_URL.format(path=path)))
+            except Exception:                               # noqa: BLE001
+                continue          # keep last-good; never wipe on a blip
+            with self._lock:
+                if parsed.get("groups"):
+                    self._standings[lg] = parsed
+                    self._standings_updated = time.time()
+                else:
+                    self._standings.pop(lg, None)
+
+    def _refresh_favorite_next(self):
+        """Schedule poll for the pinned favorite's next future pre game.
+
+        Only spends a request when a favorite is set AND that team has no
+        game on today's scoreboard. Today's live/final/pre always wins, so
+        next-game is an off-day board, not a second live view.
+        """
+        if self._espn_http_blocked():
+            return
+        now = time.time()
+        with self._lock:
+            favorite = dict(self.favorite) if self.favorite else None
+            games = (list(self._games.get(favorite["league"], []))
+                     if favorite else [])
+            wait = self._next_interval
+            last_try = self._next_try
+        if not favorite:
+            with self._lock:
+                self._favorite_next = None
+            return
+        # Same identity match get() uses: league + team_abbr, not index.
+        today = next(
+            (g for g in games if g["league"] == favorite["league"] and
+             favorite["team_abbr"] in (g["home"]["abbr"], g["away"]["abbr"])),
+            None)
+        if today:
+            with self._lock:
+                self._favorite_next = None
+            return
+        if now - last_try < wait:
+            return
+        snap = (favorite["league"], favorite["team_abbr"])
+        with self._lock:
+            self._next_try = now
+        try:
+            nxt = _fetch_favorite_next(favorite["league"], favorite["team_abbr"])
+        except Exception:                               # noqa: BLE001 - never die
+            with self._lock:
+                self._next_fails += 1
+                self._next_interval = min(
+                    ERROR_BACKOFF_MAX,
+                    ERROR_BACKOFF_BASE * (2 ** (self._next_fails - 1)))
+            return
+        with self._lock:
+            cur = ((self.favorite["league"], self.favorite["team_abbr"])
+                   if self.favorite else None)
+            if cur != snap:
+                return
+            self._favorite_next = nxt
+            self._next_fails = 0
+            self._next_interval = SCHEDULE_REFRESH
+
     def _refresh_win_prob(self):
+        if self._espn_http_blocked():
+            return
         now = time.time()
         with self._lock:
             if now - self._win_prob_try < WINPROB_REFRESH:
@@ -1689,6 +3268,65 @@ class SportsFeed:
         except Exception:                               # noqa: BLE001
             with self._lock:
                 self._win_prob = None
+
+    def want_summary(self, league, event_id, sport=None):
+        """Ask the worker to keep this one game's summary warm.
+
+        Cheap, non-blocking, safe to call every tick. Wants older than
+        8s are dropped so leaving a detail view stops the poll.
+        MMA summaries 404 (mma.py); skip them rather than poll a
+        known-dead URL every 20s.
+        """
+        if not league or not event_id:
+            return
+        if (sport or "").lower() == "mma" or str(league).strip().upper() in ("UFC", "PFL"):
+            return
+        if not summary_path(league, sport):
+            return
+        with self._lock:
+            self._last_read = time.time()
+            self._summary_wanted[str(event_id)] = (league, time.time(), sport)
+
+    def get_summary(self, event_id):
+        """Last-good bundle for this event, or {}. Never blocks."""
+        with self._lock:
+            rec = self._summaries.get(str(event_id))
+            return dict(rec) if rec else {}
+
+    def _refresh_summaries(self):
+        if self._espn_http_blocked():
+            return
+        now = time.time()
+        with self._lock:
+            wanted = {}
+            keep = {}
+            for eid, rec in self._summary_wanted.items():
+                lg, t = rec[0], rec[1]
+                sp = rec[2] if len(rec) > 2 else None
+                if now - t < 8.0:
+                    wanted[eid] = (lg, sp)
+                    keep[eid] = rec
+            self._summary_wanted = keep
+            # Drop caches for games nobody is watching.
+            for eid in list(self._summaries):
+                if eid not in wanted:
+                    self._summaries.pop(eid, None)
+                    self._summary_try.pop(eid, None)
+        for eid, (lg, sp) in wanted.items():
+            with self._lock:
+                if now - self._summary_try.get(eid, 0.0) < WINPROB_REFRESH:
+                    continue
+                self._summary_try[eid] = now
+            try:
+                path = summary_path(lg, sp)
+                if not path:
+                    continue
+                data = _get_json(SUMMARY_URL.format(path=path, event_id=eid))
+                bundle = summarize_payload(lg, eid, data)
+            except Exception:                               # noqa: BLE001
+                continue          # keep last-good; never wipe on a blip
+            with self._lock:
+                self._summaries[eid] = bundle
 
 FEED = SportsFeed()
 
@@ -1769,7 +3407,8 @@ def _header_competitor(c, sport):
             paneltext.panel_text(score) if score is not None else None),
         "home_away": c.get("homeAway"),
         "winner": bool(c.get("winner")),
-        "color": _hex_to_rgb(c.get("color")) if c.get("color") else None,
+        "color": (_hex_to_rgb(_pick_team_hex(c.get("color"), c.get("alternateColor")))
+                 if c.get("color") else None),
         "alt_color": _hex_to_rgb(c.get("alternateColor")) if c.get("alternateColor") else None,
         # `record` is a plain string on this endpoint ("7-2-0"), unlike the
         # per-league API's records[] list.
@@ -1790,11 +3429,77 @@ def _header_competitor(c, sport):
     }
 
 
+def _parse_odds(raw):
+    """Real ESPN odds -> {"spread": str|None, "over_under": float|None},
+    or None. REVERSED 2026-08-10 -- this field was previously deliberately
+    dropped ("betting stays off by default", see this function's own call
+    site) as a project policy; the owner explicitly asked to reverse that
+    this session. This is data ESPN already sends on the same header
+    payload every other field here comes from -- zero new I/O, zero new
+    (and zero PAID) data source, unlike the paid odds-API options this
+    project's competitive-research pass separately flagged and rejected.
+
+    `raw` is ESPN's real `odds` list (one entry per provider, when
+    present). `details` is a pre-formatted string ESPN itself produces
+    ("NYM -1.5"); `overUnder` is a plain float. Only the FIRST provider
+    entry is used -- ESPN's own site widgets do the same, and this
+    project has no reason to prefer a second provider's line over the
+    first ESPN already surfaces as primary.
+
+    HONEST GAP, same as every other field this project ships defensively:
+    this project's sandbox cannot reach ESPN's odds-bearing endpoint this
+    session (network-blocked, same `site.api.espn.com` 403 already
+    documented elsewhere in this file), so the real payload SHAPE here is
+    from ESPN's own publicly documented format, not confirmed against a
+    live response the way most fields in this file are. Guards
+    defensively against every field being missing/malformed rather than
+    assuming the shape; verify against a real live payload the first
+    session this sandbox can reach ESPN again, per this project's own
+    "ship correct, flag honestly" precedent (NHL goal detector, MMA
+    finish detector)."""
+    if not isinstance(raw, list) or not raw:
+        return None
+    entry = raw[0]
+    if not isinstance(entry, dict):
+        return None
+    details = entry.get("details")
+    spread = paneltext.panel_text(details) if isinstance(details, str) and details else None
+    ou = entry.get("overUnder")
+    over_under = float(ou) if isinstance(ou, (int, float)) else None
+    if spread is None and over_under is None:
+        return None
+    return {"spread": spread, "over_under": over_under}
+
+
+def _scheduled_periods(payload):
+    """`format.regulation.periods` when it is a real 1..6 int, else None.
+
+    Same field mma.py already verified (3 or 5). Golf stroke-play cards
+    use it for scheduled rounds when ESPN sends it. Never a default 4.
+    """
+    periods = ((payload.get("format") or {}).get("regulation") or {}).get("periods")
+    return periods if isinstance(periods, int) and 1 <= periods <= 6 else None
+
+
 def _header_event(e, sport, league_slug, league_name):
     """One event from the header endpoint, normalised across sports."""
     comps = [_header_competitor(c, sport) for c in (e.get("competitors") or [])]
     athletes = [c for c in comps if not c["is_team"]]
     leaderboard = len(athletes) > 2
+
+    # REAL BUG FIXED 2026-08-11: _disambiguate_colors() was only ever
+    # called from _parse_event() (the per-league path), never from here
+    # -- but THIS is the path the universal ticker and every expanded
+    # detail view actually render from. Result: a real live CLE @ DET
+    # game drew two solid team-colour bars in visually identical navy
+    # (both teams genuinely ship a dark navy primary), defeating the
+    # entire point of colour-coding the two sides. The measurement that
+    # justified this function in the first place (5 of 19 real games too
+    # close to tell apart) applied here just as much; it simply was not
+    # wired in. Falls back to ESPN's own real alternateColor, never an
+    # invented colour -- same contract as the per-league call site.
+    if len(comps) == 2 and all(c["is_team"] for c in comps):
+        _disambiguate_colors(comps[0], comps[1])
 
     # MLB puts live baserunner state at the EVENT level here.
     bases = [bool(e.get("onFirst")), bool(e.get("onSecond")), bool(e.get("onThird"))]
@@ -1821,9 +3526,11 @@ def _header_event(e, sport, league_slug, league_name):
         "period": _num_or_none(e.get("period")),
         "clock": (paneltext.panel_text(e.get("clock"))
                   if e.get("clock") not in (None, "") else None),
-        # Fields we already pay for and were dropping. Deliberately NOT
-        # including `odds` (betting stays off by default per PRODUCTION.md)
-        # or logos (IP).
+        # Fields we already pay for and were dropping. `odds` (betting)
+        # was dropped here until 2026-08-10 -- the owner explicitly asked
+        # to reverse that default; see _parse_odds()'s own docstring for
+        # the full reasoning and the one honest gap (unverified live
+        # payload shape). Logos still deliberately excluded (IP).
         "broadcast": paneltext.panel_text(
             (e.get("broadcast") or "")
             or ((e.get("broadcasts") or [{}])[0].get("shortName") if e.get("broadcasts") else "")
@@ -1847,6 +3554,8 @@ def _header_event(e, sport, league_slug, league_name):
         "bases": bases if any(bases) else None,
         "outs": outs,
         "runners_text": paneltext.panel_text(e.get("baseRunnersText")) or None,
+        "odds": _parse_odds(e.get("odds")),
+        "total_rounds": _scheduled_periods(e),
     }
 
 

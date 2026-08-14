@@ -179,6 +179,7 @@
       <button data-mode="blog">💬 Guestbook</button>
       <button data-mode="events">🕒 Recent Events</button>
       <button data-mode="nowplaying">🎵 Now Playing</button>
+      <button data-mode="ownernote">📝 Note</button>
       <button data-mode="ambient">🔄 Ambient</button>
       </div>
     </div>
@@ -228,10 +229,16 @@
          genuinely different lists rather than one merged box. -->
     <div class="row"><label>Crypto</label>
       <input type="text" id="tk-crypto" placeholder="BTC, ETH"></div>
+    <div class="row"><label>Quick add</label>
+      <select id="tk-crypto-quick"><option value="">— pick a coin —</option></select></div>
     <div class="row"><label>Stocks</label>
       <input type="text" id="tk-stocks" placeholder="AAPL, NVDA"></div>
+    <div class="row"><label>Quick add</label>
+      <select id="tk-stocks-quick"><option value="">— pick a stock —</option></select></div>
     <div class="row"><button id="tk-save">Save watchlist</button>
       <span id="tk-msg" class="badge"></span></div>
+    <div class="hint">Quick-add lists are just a starting point -- any real
+      ticker symbol works in the text fields whether or not it's listed.</div>
     <div class="hint" id="tk-known"></div>
   </div>
 
@@ -289,10 +296,54 @@
       here once set (same as the Home Assistant token) — leaving the API
       key field blank and saving only changes the username, it won't
       clear an existing key.</div>
+    <div class="row"><label><input type="checkbox" id="np-mic-only">
+      Use the mic as a plain equalizer instead</label></div>
+    <div class="hint">Skips Last.fm entirely and just shows the panel's
+      own mic-driven bars — no account needed.</div>
+  </div>
+
+  <div id="notecard" class="card hide">
+    <h2>Note</h2>
+    <div class="row"><textarea id="note-text" rows="3" style="flex:1"
+      placeholder="A short message that stays on the panel until you change or clear it"></textarea></div>
+    <div class="row"><button id="note-save">Save</button>
+      <button id="note-clear">Clear</button>
+      <span id="note-msg" class="badge"></span></div>
+    <div class="hint">Your own words, persistent — unlike Home
+      Assistant notifications (which auto-clear) or the guestbook
+      (which mirrors visitor posts from the site).</div>
+  </div>
+
+  <div id="ambientcard" class="card hide">
+    <h2>Ambient — director</h2>
+    <div class="row" id="am-channels">
+      <button data-am="auto">AUTO</button>
+      <button data-am="world">WORLD</button>
+      <button data-am="arcade">ARCADE</button>
+      <button data-am="mix">MIX</button>
+    </div>
+    <div class="hint" id="am-hint">AUTO locks a live favorite game in
+      the in-depth view. WORLD is data only. ARCADE is self-playing
+      games. MIX is your list. Up/down on the pad also switches channel.</div>
+    <h2 style="margin-top:14px;">Mix — what you want</h2>
+    <div id="am-mix" class="vlist"></div>
+    <div class="row"><button id="am-mix-save">Save mix</button>
+      <span id="am-msg" class="badge"></span></div>
+    <div class="hint">Saved mix is used only on the MIX channel. AUTO
+      and WORLD ignore this list. A live game still opens in DETAIL
+      whenever sports is showing.</div>
   </div>
 
   <div id="sportscard" class="card hide">
     <h2>Sports — leagues &amp; pinned team</h2>
+    <div class="row"><label>ESPN use</label>
+      <select id="sp-espn-use">
+        <option value="personal">PERSONAL (poll ESPN)</option>
+        <option value="off">OFF (no ESPN)</option>
+      </select>
+      <button id="sp-espn-save">Save</button>
+      <span id="sp-espn-msg" class="badge"></span></div>
+    <div class="hint" style="margin-bottom:10px;">ESPN's unofficial API is for this house. A sold unit stays OFF until a licensed source exists.</div>
     <div class="row"><label>Leagues</label>
       <select id="sp-leagues" multiple style="min-height:96px;flex:1;"></select></div>
     <div class="row"><button id="sp-lg-save">Save leagues</button>
@@ -493,6 +544,18 @@
       <div class="hint">Suppresses the plane-in-window takeover, sports
         celebration interrupts, and normal-priority HA banners. Severe
         weather and urgent HA notifications always still get through.</div>
+      <div class="row" style="margin-top:8px;"><label>Panel skin</label>
+        <select id="skin-select"></select></div>
+      <div class="hint">A local visual theme for sports, weather, and the
+        clock's chrome colors -- team colors, alert severity, and every
+        other real data-driven color stay untouched.</div>
+      <div class="row" style="margin-top:8px;"><label>Sports footer order</label>
+        <input type="text" id="layout-priority" placeholder="odds, class_label, series, venue"></div>
+      <div class="row"><button id="layout-save">Save order</button>
+        <span id="layout-msg" class="badge"></span></div>
+      <div class="hint">Comma-separated, most important first -- whichever
+        of these four real fields has content in that order wins the
+        sports scoreboard's one footer line. Must list all four.</div>
       <div class="hint" id="st-events" style="margin-top:8px;">loading recent events…</div>
     </div>
 
@@ -666,6 +729,40 @@ $('dnd-toggle').addEventListener('click', async () => {
 });
 loadDnd();
 
+/* ---------- skins (sports mode chrome theme) ---------- */
+async function loadSkins(){
+  try{
+    const j = await (await fetch('/api/skins')).json();
+    const sel = $('skin-select');
+    sel.innerHTML = '';
+    (j.options || []).forEach(o => {
+      const opt = document.createElement('option');
+      opt.value = o.id; opt.textContent = o.label;
+      sel.appendChild(opt);
+    });
+    sel.value = j.skin;
+  }catch(_){}
+}
+$('skin-select').addEventListener('change', async (e) => {
+  await post('/api/skins', {skin: e.target.value});
+});
+loadSkins();
+
+/* ---------- layout priority (Tier-3 pilot) ---------- */
+async function loadLayout(){
+  try{
+    const j = await (await fetch('/api/layout')).json();
+    $('layout-priority').value = (j.footer_priority || []).join(', ');
+  }catch(_){}
+}
+$('layout-save').addEventListener('click', async () => {
+  const order = csv('layout-priority');
+  const j = await (await post('/api/layout', {footer_priority: order})).json();
+  say('layout-msg', j.ok ? 'saved' : (j.error || 'invalid order'), !!j.ok);
+  loadLayout();
+});
+loadLayout();
+
 /* ---------- background (HA dynamic modes) ---------- */
 async function loadBackgrounds(){
   try{
@@ -734,14 +831,41 @@ document.querySelectorAll('.card input, .card select').forEach(
   el => el.addEventListener('input', mark));
 
 const csv = el => $(el).value.split(',').map(x=>x.trim()).filter(Boolean);
+function fillQuick(selectId, entries){
+  const sel = $(selectId);
+  // Keep the placeholder option, drop everything after it, repopulate.
+  while (sel.options.length > 1) sel.remove(1);
+  (entries || []).forEach(e => {
+    const opt = document.createElement('option');
+    opt.value = e.sym;
+    opt.textContent = `${e.sym} — ${e.name}`;
+    sel.appendChild(opt);
+  });
+}
+function addSymbol(inputId, sym){
+  if (!sym) return;
+  const cur = csv(inputId);
+  if (!cur.includes(sym)) cur.push(sym);
+  $(inputId).value = cur.join(', ');
+  mark();
+}
 async function loadTicker(){
   try{ const j = await (await fetch('/api/ticker/symbols')).json();
        $('tk-crypto').value = (j.crypto || []).join(', ');
        $('tk-stocks').value = (j.stocks || []).join(', ');
-       $('tk-known').innerHTML = 'Crypto is validated against CoinGecko: <b>'
-         + (j.known_crypto || []).join(' ') + '</b>. Stocks go to Yahoo Finance.';
+       fillQuick('tk-crypto-quick', j.known_crypto);
+       fillQuick('tk-stocks-quick', j.known_stocks);
+       $('tk-known').innerHTML = `${(j.known_crypto || []).length} coins and `
+         + `${(j.known_stocks || []).length} stocks in the quick-add lists -- `
+         + 'any other real symbol also works typed directly.';
   }catch(_){}
 }
+$('tk-crypto-quick').addEventListener('change', e => {
+  addSymbol('tk-crypto', e.target.value); e.target.value = '';
+});
+$('tk-stocks-quick').addEventListener('change', e => {
+  addSymbol('tk-stocks', e.target.value); e.target.value = '';
+});
 $('tk-save').addEventListener('click', async () => {
   const j = await (await post('/api/ticker/symbols',
     {crypto: csv('tk-crypto'), stocks: csv('tk-stocks')})).json();
@@ -788,14 +912,17 @@ async function loadNowPlaying(){
        if (j.user && !$('np-user').matches(':focus')) $('np-user').value = j.user;
        $('np-key').placeholder = j.has_key ? '••••••••  (already set — leave blank to keep it)'
                                             : 'paste a free Last.fm API key';
-       $('np-status').textContent = !j.configured ? ''
+       if (!$('np-mic-only').matches(':focus')) $('np-mic-only').checked = !!j.mic_only;
+       $('np-status').textContent = j.mic_only ? 'Mic-only equalizer active'
+         : !j.configured ? ''
          : (j.playing
              ? ('Now playing: ' + (j.track ? (j.track.track + ' — ' + j.track.artist) : '?'))
              : (j.err ? ('Error: ' + j.err) : 'Nothing playing right now')); }catch(_){}
 }
 $('np-save').addEventListener('click', async () => {
   const j = await (await post('/api/nowplaying',
-    {api_key: $('np-key').value, user: $('np-user').value})).json();
+    {api_key: $('np-key').value, user: $('np-user').value,
+     mic_only: $('np-mic-only').checked})).json();
   $('np-key').value = '';
   say('np-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
   loadNowPlaying();
@@ -805,6 +932,76 @@ $('np-clear').addEventListener('click', async () => {
   $('np-key').value = '';
   say('np-msg', 'key removed');
   loadNowPlaying();
+});
+$('np-mic-only').addEventListener('change', async () => {
+  const j = await (await post('/api/nowplaying',
+    {user: $('np-user').value, mic_only: $('np-mic-only').checked})).json();
+  say('np-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
+  loadNowPlaying();
+});
+
+async function loadNote(){
+  try{ const j = await (await fetch('/api/note')).json();
+       if (!$('note-text').matches(':focus')) $('note-text').value = j.text || ''; }catch(_){}
+}
+$('note-save').addEventListener('click', async () => {
+  const j = await (await post('/api/note', {text: $('note-text').value})).json();
+  say('note-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
+  loadNote();
+});
+$('note-clear').addEventListener('click', async () => {
+  $('note-text').value = '';
+  const j = await (await post('/api/note', {text: ''})).json();
+  say('note-msg', j.ok === false ? (j.error || 'error') : 'cleared', j.ok !== false);
+  loadNote();
+});
+
+const AM_LABEL = {
+  flights:'FLIGHTS', satellite:'ISS', nowplaying:'MUSIC', weather:'WEATHER',
+  sports:'SPORTS', ticker:'TICKER', news:'NEWS', blog:'BLOG',
+  life:'LIFE', tunnel:'TUNNEL', tron:'TRON', powder:'POWDER',
+  departures:'BOARD', events:'EVENTS', ownernote:'NOTE',
+  followflight:'FOLLOW', clock:'CLOCK',
+  snake:'SNAKE', pong:'PONG', breakout:'BREAKOUT', chase:'CHASE',
+  flappy:'FLAPPY', invaders:'INVADERS', dodge:'DODGE', tetris:'TETRIS',
+  '2048':'2048', brawler:'BRAWLER',
+};
+const AM_HINT = {
+  auto: 'AUTO walks every data mode that has something to show. A live favorite locks sports DETAIL. Night or a quiet sky adds the gallery.',
+  world: 'WORLD is every glance mode — flights, ISS, weather radar, sports DETAIL, music, follow, board, ticker, news, events, blog, note, clock.',
+  arcade: 'ARCADE is every self-playing game as living art.',
+  mix: 'MIX is only what you tick below, in that order. Live sports still open in DETAIL.',
+};
+async function loadAmbient(){
+  try{
+    const j = await (await fetch('/api/ambient')).json();
+    const ch = j.channel || 'auto';
+    document.querySelectorAll('#am-channels [data-am]').forEach(b =>
+      b.classList.toggle('active', b.dataset.am === ch));
+    $('am-hint').textContent = AM_HINT[ch] || AM_HINT.auto;
+    const mix = new Set(j.mix || []);
+    const names = j.mixable || Object.keys(AM_LABEL);
+    $('am-mix').innerHTML = names.map(n =>
+      `<label style="display:flex;gap:8px;align-items:center;font-size:11px;">
+         <input type="checkbox" data-am-mix="${n}" ${mix.has(n)?'checked':''}>
+         ${AM_LABEL[n] || n.toUpperCase()}</label>`).join('');
+  }catch(_){}
+}
+document.querySelectorAll('#am-channels [data-am]').forEach(b =>
+  b.addEventListener('click', async () => {
+    cfgTouched = Date.now();
+    const j = await (await post('/api/ambient', {channel: b.dataset.am})).json();
+    say('am-msg', j.ok === false ? (j.error || 'error') : (j.channel || 'saved').toUpperCase(),
+        j.ok !== false);
+    loadAmbient();
+  }));
+$('am-mix-save').addEventListener('click', async () => {
+  cfgTouched = Date.now();
+  const mix = [...document.querySelectorAll('#am-mix [data-am-mix]:checked')]
+    .map(el => el.dataset.amMix);
+  const j = await (await post('/api/ambient', {mix})).json();
+  say('am-msg', j.ok === false ? (j.error || 'error') : 'mix saved', j.ok !== false);
+  loadAmbient();
 });
 
 /* Favorite aircraft — same growable-list interaction as favorite_teams
@@ -884,6 +1081,8 @@ async function loadSports(){
        favTeams = j.favorite_teams || [];
        favTeamsFilter = !!j.favorite_teams_filter;
        renderFavTeams();
+       if (!$('sp-espn-use').matches(':focus'))
+         $('sp-espn-use').value = j.espn_use === 'off' ? 'off' : 'personal';
        if (j.golf_player && !$('sp-golf').matches(':focus')) $('sp-golf').value = j.golf_player;
        const g = j.golf_status, live = (j.golf_live || []);
        // Say plainly whether the saved name actually matched someone, so a
@@ -905,6 +1104,11 @@ async function loadSports(){
          : (j.tennis_player ? 'Not in a live/upcoming ATP or WTA match right now' : '');
      }catch(_){}
 }
+$('sp-espn-save').addEventListener('click', async () => {
+  const j = await (await post('/api/sports/espn_use', {espn_use: $('sp-espn-use').value})).json();
+  say('sp-espn-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
+});
+$('sp-espn-use').addEventListener('change', () => $('sp-espn-save').click());
 $('sp-golf-save').addEventListener('click', async () => {
   const j = await (await post('/api/sports/golf_player', {name: $('sp-golf').value})).json();
   say('sp-golf-msg', j.ok === false ? (j.error || 'error') : 'pinned', j.ok !== false);
@@ -1072,7 +1276,7 @@ $('br-save').addEventListener('click', async () => {
   cfgTouched = 0; loadBrightness();
 });
 
-loadTicker(); loadLoc(); loadFollow(); loadFavAircraft(); loadNowPlaying(); loadSports(); loadNews(); loadBlog(); loadBrightness();
+loadTicker(); loadLoc(); loadFollow(); loadFavAircraft(); loadNowPlaying(); loadNote(); loadAmbient(); loadSports(); loadNews(); loadBlog(); loadBrightness();
 setInterval(loadBrightness, 30000);
 
 /* ---------- power + modes ---------- */
@@ -1114,6 +1318,10 @@ function syncUI(){
   $('favaccard').classList.toggle('hide', base !== 'flights');
   $('npcard').classList.toggle('hide', base !== 'nowplaying');
   if (base === 'nowplaying' && Date.now() - cfgTouched > 3000) loadNowPlaying();
+  $('notecard').classList.toggle('hide', base !== 'ownernote');
+  if (base === 'ownernote' && Date.now() - cfgTouched > 3000) loadNote();
+  $('ambientcard').classList.toggle('hide', base !== 'ambient');
+  if (base === 'ambient' && Date.now() - cfgTouched > 3000) loadAmbient();
   $('sportscard').classList.toggle('hide', base !== 'sports');
   $('newscard').classList.toggle('hide', base !== 'news');
   $('blogcard').classList.toggle('hide', base !== 'blog');

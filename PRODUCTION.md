@@ -106,34 +106,33 @@ similarly free and keyless — consistent with, but not proof of, the same
 policy being applied deliberately every time, rather than these
 particular APIs just happening to be free.
 
-### ⚠ Free-API dependency risk at unit scale (real, quantified, unresolved)
+### ⚠ Free-API dependency risk at unit scale (real, locked)
 
 "Free and keyless" is not the same as "free of risk at scale", and the
-sports feature is the concrete case. Per the polling analysis in
-`CLAUDE.md`, a single unit left running the `ambient` rotation 24/7
-issues roughly **17,000 ESPN requests/day** (~30,000 with all 7 leagues
-enabled) to an **undocumented, unofficial API with no published rate
-limit, no terms of use covering this, and no support channel**.
+sports feature is the concrete case. ESPN's site API is **undocumented
+and unofficial**: no published rate limit, no terms covering commercial
+use, no support channel.
 
-That is per unit. At even a modest realistic volume, the aggregate is
-substantial and originates from many residential IPs running identical
-request patterns against an endpoint ESPN never published for this.
-Three distinct exposures, none currently mitigated:
+The ~17,000 requests/day figure (a flat 20s poll per league, 24/7) is
+**stale**. `sports.py` already uses adaptive tiers:
 
-1. **Technical** — ESPN may throttle or block; the failure mode is
-   sports silently dropping out of the rotation.
-2. **Terms/legal** — using an undocumented internal endpoint commercially
-   is a different posture from doing so personally. Worth a real answer
-   before shipping, alongside the FCC/GPL items below.
-3. **Support cost** — if ESPN changes or closes the endpoint, every unit
-   in the field loses the feature simultaneously, with no vendor
-   relationship through which to see it coming.
+- Scoreboards: `SCOREBOARD_REFRESH_LIVE` 20s / `IDLE` 300s / `EMPTY` 1800s
+- Header: `HEADER_REFRESH_LIVE` 25s / `IDLE` 180s / `EMPTY` 900s
 
-Cheap mitigations exist (longer refresh, skipping off-season leagues —
-both detailed in `CLAUDE.md`) and neither is implemented yet. This does
-not change the "no recurring per-unit cost" advantage, which still holds;
-it means the *reliability* of that advantage is unverified for the one
-data source that is scraped rather than offered.
+`ambient` keeps the feed warm so `IDLE_STOP` (120s) does not fire
+during ambient — that is intended for personal 24/7 house use. The
+LIVE/IDLE/EMPTY intervals themselves are not the production lock.
+
+**Lock:** sellable firmware must set `espn_use=off` until a licensed
+provider is signed. The personal Mac install defaults to `personal`.
+There is no working `commercial` mode — we do not have a commercial
+license. When `espn_use=off`, the sports worker makes no new ESPN HTTP
+calls and keeps last-good cache. Off is the only honest production lock.
+
+Technical / support exposures remain for personal use (ESPN may
+throttle, block, or close the endpoint; last-good cache is the failure
+mode). Those are accepted for this house rig; they are not a reason to
+ship a sold unit against ESPN.
 
 ⚠ **UNKNOWN — needs your input, all of the following are unfilled:**
 - Target retail price (any figure at all)

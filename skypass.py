@@ -19,8 +19,8 @@ recurring cost and shared-credential fragility. polluxlabs, which already
 serves the ISS here, was checked and is ISS-ONLY: it accepts satid/norad/
 sat parameters and ignores all of them, returning ISS (ZARYA) every time.
 
-So instead: CelesTrak publishes the orbital elements for free with no key
-and no rate limit, and the propagation is done here.
+So instead: CelesTrak publishes the orbital elements for free with no key,
+and the propagation is done here.
 
     https://celestrak.org/NORAD/elements/gp.php?GROUP=visual&FORMAT=tle
 
@@ -29,6 +29,17 @@ as the objects actually observable with the naked eye (~160 of them),
 which is the "bright satellites only, don't list hundreds of invisible
 objects" requirement solved upstream rather than by us inventing a
 magnitude cutoff. One fetch per half-day covers everything.
+
+Confirmed 2026-08-12: celestrak.org timed out from this network (IPv4
+TCP, 10s+, same host as .com) while ISS telemetry (wheretheiss.at) and
+ISS/CSS TLEs (SatNOGS, ARISS) answered in under a second. A single
+timed-out fetch used to raise out of `_work()`, which skipped the 1 Hz
+sky snapshot AND retried every second -- error was not "no satellites",
+and hammering a down host is how CelesTrak starts issuing 403s. Same
+discipline as flights.py's replica chain: first non-empty live visual
+wins; last-good disk cache if the catalogue host is dead; ISS+CSS
+station TLEs only when there is no visual catalogue at all; a dead
+fetch never wipes a real sky.
 
 VALIDATED, NOT ASSUMED. The propagator here was checked against
 polluxlabs' ISS predictions -- a source this project already trusts --
@@ -59,6 +70,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import paneltext
 import satellite
@@ -72,8 +84,22 @@ except ImportError:                     # degrade honestly, never guess
     HAVE_SGP4 = False
 
 TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=visual&FORMAT=tle"
+# CelesTrak `visual` is the only full naked-eye catalogue. .org and .com
+# resolve to the same IPv4 (confirmed 2026-08-12) -- listing both would
+# just pay the timeout twice. Station replicas are ISS + CSS only, the
+# real CelesTrak `stations` group, used when visual never arrives.
+TLE_CACHE_PATH = Path(__file__).parent / "skypass_tle_cache.txt"
+ISS_TLE_SOURCES = (
+    ("satnogs", "https://db.satnogs.org/api/tle/?norad_cat_id=25544", "satnogs"),
+    ("ariss", "https://live.ariss.org/iss.txt", "tle"),
+    ("wheretheiss", "https://api.wheretheiss.at/v1/satellites/25544/tles", "wheretheiss"),
+    ("ivanstanojevic", "https://tle.ivanstanojevic.me/api/tle/25544", "ivan"),
+)
+CSS_TLE_URL = "https://db.satnogs.org/api/tle/?norad_cat_id=48274"
 TLE_REFRESH = 43200.0        # 12h -- elements are good for days; this is polite
 TLE_STALE_MAX = 259200.0     # 3 days: beyond this, accuracy degrades enough to stop
+TLE_BACKOFF_START = 60.0     # after a dead fetch, do not retry every 1 Hz loop
+TLE_BACKOFF_MAX = 3600.0
 PASS_REFRESH = 900.0         # recompute the schedule every 15 min
 # All-sky snapshot cadence, DELIBERATELY DECOUPLED FROM THE FRAME RATE.
 # Measured worst-case apparent motion of a real visible object is 0.13
@@ -82,7 +108,7 @@ PASS_REFRESH = 900.0         # recompute the schedule every 15 min
 # that cannot be seen. 1s keeps it comfortably live with margin to spare.
 SKY_NOW_REFRESH = 1.0
 IDLE_STOP = 180.0
-TIMEOUT = 15.0
+TIMEOUT = 6.0            # per replica; a dead CelesTrak must not eat 15s
 _UA = "Mozilla/5.0 (HenderburghArcade)"
 
 # Search parameters.
@@ -107,6 +133,7 @@ FLATTENING = 1 / 298.257223563
 # display NAME, which is one CelesTrak formatting change away from
 # silently breaking a string match.
 ISS_NORAD_ID = 25544
+CSS_NORAD_ID = 48274     # CSS / Tianhe -- the other CelesTrak `stations` object
 
 
 # ---- astronomy ---------------------------------------------------------
@@ -220,10 +247,168 @@ def parse_tles(text):
     return out
 
 
-def fetch_tles():
-    req = urllib.request.Request(TLE_URL, headers={"User-Agent": _UA})
+def _http_bytes(url, headers=None):
+    h = {"User-Agent": _UA}
+    if headers:
+        h.update(headers)
+    req = urllib.request.Request(url, headers=h)
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-        return parse_tles(r.read().decode("utf-8", "replace"))
+        return r.read()
+
+
+def _http_text(url, headers=None):
+    return _http_bytes(url, headers).decode("utf-8", "replace")
+
+
+def _http_json(url, headers=None):
+    return json.loads(_http_text(url, headers))
+
+
+def _norad_of(tle):
+    """NORAD catalog number from a (name, line1, line2) triple. None if
+    the line is malformed -- never guessed."""
+    try:
+        return int(tle[1][2:7])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _triples_from_satnogs(data):
+    out = []
+    if not isinstance(data, list):
+        return out
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("tle0") or "").lstrip("0 ").strip() or "OBJECT"
+        l1 = str(row.get("tle1") or "").strip()
+        l2 = str(row.get("tle2") or "").strip()
+        if l1.startswith("1 ") and l2.startswith("2 "):
+            out.append((name, l1, l2))
+    return out
+
+
+def _triple_from_json_tle(data, default_name="OBJECT"):
+    if not isinstance(data, dict):
+        return None
+    name = str(data.get("header") or data.get("name") or default_name).strip()
+    l1 = str(data.get("line1") or "").strip()
+    l2 = str(data.get("line2") or "").strip()
+    if l1.startswith("1 ") and l2.startswith("2 "):
+        return (name, l1, l2)
+    return None
+
+
+def load_tle_cache():
+    """Last-good visual (or stations) catalogue, or ([], 0.0, None).
+
+    `fetched_at` is when the elements were actually retrieved, not when
+    this process loaded the file -- using `now` here would reset the
+    3-day stale clock and treat day-old elements as fresh. Missing or
+    stale cache is an empty result, never a guessed catalogue."""
+    if not TLE_CACHE_PATH.exists():
+        return [], 0.0, None
+    try:
+        text = TLE_CACHE_PATH.read_text()
+    except OSError:
+        return [], 0.0, None
+    fetched_at = 0.0
+    kind = None
+    body = []
+    for ln in text.splitlines():
+        if ln.startswith("# fetched_at"):
+            parts = ln.split()
+            try:
+                fetched_at = float(parts[-1])
+            except (TypeError, ValueError, IndexError):
+                fetched_at = 0.0
+        elif ln.startswith("# kind"):
+            parts = ln.split()
+            kind = parts[-1] if len(parts) >= 3 else None
+        elif ln.startswith("#"):
+            continue
+        else:
+            body.append(ln)
+    tles = parse_tles("\n".join(body))
+    if not tles or not fetched_at:
+        return [], 0.0, None
+    if (time.time() - fetched_at) > TLE_STALE_MAX:
+        return [], 0.0, None
+    if kind not in ("visual", "stations"):
+        kind = "visual" if len(tles) >= 20 else "stations"
+    return tles, fetched_at, kind
+
+
+def save_tle_cache(tles, fetched_at, kind="visual"):
+    """Persist a real catalogue. Comments are stripped on load so they
+    cannot shift parse_tles' 3-line grouping."""
+    if not tles or not fetched_at:
+        return
+    lines = ["# tle_cache v1", f"# fetched_at {fetched_at:.3f}", f"# kind {kind}"]
+    for name, l1, l2 in tles:
+        lines.extend([name, l1, l2])
+    try:
+        TLE_CACHE_PATH.write_text("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
+def fetch_visual_tles():
+    """Live CelesTrak `visual` catalogue. Raises on network failure.
+    An empty 200 is a hole, not a quiet sky -- the caller must not
+    treat it as 'no satellites'."""
+    tles = parse_tles(_http_text(TLE_URL))
+    if not tles:
+        raise ValueError("empty visual catalogue")
+    return tles
+
+
+def fetch_station_tles():
+    """ISS + CSS only -- the real CelesTrak `stations` group, assembled
+    from sources that answered when CelesTrak itself did not.
+
+    Not a homemade 'visual' list: two known stations, each from a live
+    TLE. Missing one station is omitted, never invented. First ISS
+    replica that returns a real triple wins; CSS is a separate SatNOGS
+    lookup so a dead ISS replica cannot hide Tianhe."""
+    found = {}
+    for _name, url, kind in ISS_TLE_SOURCES:
+        try:
+            if kind == "satnogs":
+                triples = _triples_from_satnogs(_http_json(url))
+            elif kind == "wheretheiss":
+                t = _triple_from_json_tle(_http_json(url), "ISS (ZARYA)")
+                triples = [t] if t else []
+            elif kind == "ivan":
+                t = _triple_from_json_tle(
+                    _http_json(url, headers={"Accept": "application/json"}),
+                    "ISS (ZARYA)")
+                triples = [t] if t else []
+            else:
+                triples = parse_tles(_http_text(url))
+        except Exception:                                 # noqa: BLE001
+            continue
+        for tle in triples:
+            nid = _norad_of(tle)
+            if nid is not None and nid not in found:
+                found[nid] = tle
+        if ISS_NORAD_ID in found:
+            break
+    try:
+        for tle in _triples_from_satnogs(_http_json(CSS_TLE_URL)):
+            nid = _norad_of(tle)
+            if nid is not None and nid not in found:
+                found[nid] = tle
+    except Exception:                                     # noqa: BLE001
+        pass
+    return list(found.values())
+
+
+def fetch_tles():
+    """Live visual catalogue, same entry point the rest of this file
+    already used. Station fallback and disk cache live on the feed so
+    a smaller stations set cannot clobber a real visual last-good."""
+    return fetch_visual_tles()
 
 
 # ---- pass prediction ---------------------------------------------------
@@ -387,14 +572,18 @@ class SkyPassFeed:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._tles = []
-        self._tles_at = 0.0
+        cached, cached_at, cached_kind = load_tle_cache()
+        self._tles = cached
+        self._tles_at = cached_at
+        self._tles_kind = cached_kind
         self._passes = []
         self._passes_at = 0.0
         self._err = None if HAVE_SGP4 else "sgp4 not installed"
         self._last_read = 0.0
         self._thread = None
         self._loc = None
+        self._tle_try = 0.0
+        self._tle_backoff = TLE_BACKOFF_START
         # Live all-sky snapshot for the sky-dome scope. Computed on THIS
         # background thread, never in the engine -- the engine does no work
         # of its own by contract. See SKY_NOW_REFRESH for the cadence and
@@ -425,28 +614,10 @@ class SkyPassFeed:
                 "sky_now": sky_now,
                 "sky_now_age": (now - self._sky_now_at) if self._sky_now_at else None,
             }
-        # WINDOW FILTER (2026-08-08) -- the satellite equivalent of
-        # flights.py's window ring/boost, see satellite.in_window()'s own
-        # notes. A cheap local config read, same cost class as every other
-        # per-call config check in this project (flights._fetch_positions'
-        # own load_window() call, satellite's CONFIG_CHECK reload) -- this
-        # is the feed layer, not the engine, so SatelliteEngine still does
-        # zero I/O of its own.
-        #
-        # UPCOMING (passes): flagged by PEAK azimuth, not rise azimuth --
-        # a pass rises somewhere and can sweep well away from the window by
-        # the time it peaks, and peak is the moment it's most visible, i.e.
-        # the one bearing that actually represents "was this pass visible
-        # out the window". OVERHEAD-NOW (sky_now): flagged by the object's
-        # CURRENT azimuth, the literal live answer to "is it out my window
-        # right now".
-        win = satellite.load_window()
-        for p in out["passes"]:
-            p["in_window"] = satellite.in_window(
-                p.get("peak_az"), win["center_deg"], win["fov_deg"])
-        for o in out["sky_now"]:
-            o["in_window"] = satellite.in_window(
-                o.get("az"), win["center_deg"], win["fov_deg"])
+        # Window flags are stamped on the worker (see _stamp_window),
+        # not here -- get() is called from engine tick() and must not
+        # read location_config.json on the render thread. Copies above
+        # already carry in_window from the last worker pass.
         if HAVE_SGP4:
             self._ensure_thread()
         return out
@@ -482,15 +653,93 @@ class SkyPassFeed:
             # does. Verified by the cost measurements in sky_now().
             time.sleep(SKY_NOW_REFRESH)
 
-    def _work(self, loc):
-        now = time.time()
+    def _stamp_window(self):
+        """Flag passes / overhead objects against the configured window.
+
+        Runs on this worker, never in get(): load_window() reads the
+        shared location_config.json, and get() is on the engine tick
+        path. UPCOMING uses PEAK azimuth; sky_now uses CURRENT azimuth
+        -- same rule the previous in-get() stamp documented."""
+        win = satellite.load_window()
         with self._lock:
-            need_tle = (not self._tles) or (now - self._tles_at > TLE_REFRESH)
-        if need_tle:
-            tles = fetch_tles()
-            if tles:
-                with self._lock:
-                    self._tles, self._tles_at, self._err = tles, time.time(), None
+            for p in self._passes:
+                p["in_window"] = satellite.in_window(
+                    p.get("peak_az"), win["center_deg"], win["fov_deg"])
+            for o in self._sky_now:
+                o["in_window"] = satellite.in_window(
+                    o.get("az"), win["center_deg"], win["fov_deg"])
+
+    def _adopt_tles(self, tles, fetched_at, kind):
+        with self._lock:
+            self._tles = tles
+            self._tles_at = fetched_at
+            self._tles_kind = kind
+            self._err = None
+            self._tle_backoff = TLE_BACKOFF_START
+            # New elements: force a pass recompute next _refresh_sky.
+            if kind != "cache":
+                self._passes_at = 0.0
+
+    def _fill_stations_if_empty(self):
+        """ISS+CSS from live station replicas when there is no visual set.
+
+        Runs BEFORE the CelesTrak attempt so a 6s visual timeout cannot
+        keep the dome blank. Does not overwrite a visual last-good.
+        Also refreshes a stations-only set on the same 12h cadence as
+        visual -- ISS elements still go stale, they just have working
+        hosts."""
+        with self._lock:
+            if self._tles_kind == "visual":
+                return
+            if self._tles and (time.time() - self._tles_at) < TLE_REFRESH:
+                return
+        try:
+            stations = fetch_station_tles()
+        except Exception as e:                                # noqa: BLE001
+            with self._lock:
+                if not self._tles:
+                    self._err = type(e).__name__
+            return
+        if stations:
+            ts = time.time()
+            save_tle_cache(stations, ts, kind="stations")
+            self._adopt_tles(stations, ts, "stations")
+
+    def _maybe_refresh_visual(self, now):
+        """CelesTrak `visual` on its own cadence, with backoff.
+
+        A dead host must not raise out of _work() (that used to skip
+        sky_now for the whole timeout, every second). A stations set
+        never overwrites a real visual last-good still inside
+        TLE_STALE_MAX. Stations-only feeds keep probing visual so the
+        full catalogue returns when the host does."""
+        with self._lock:
+            have = list(self._tles)
+            have_at = self._tles_at
+            kind = self._tles_kind
+            due = (kind != "visual") or (not have) or (now - have_at > TLE_REFRESH)
+            gated = (now - self._tle_try) < self._tle_backoff
+        if not due or gated:
+            return
+        with self._lock:
+            self._tle_try = now
+
+        try:
+            visual = fetch_visual_tles()
+        except Exception as e:                                # noqa: BLE001
+            with self._lock:
+                self._tle_backoff = min(
+                    TLE_BACKOFF_MAX,
+                    max(TLE_BACKOFF_START, self._tle_backoff * 2))
+                if not self._tles:
+                    self._err = type(e).__name__
+            return
+
+        ts = time.time()
+        save_tle_cache(visual, ts, kind="visual")
+        self._adopt_tles(visual, ts, "visual")
+
+    def _refresh_sky(self, loc, now):
         if not loc:
             return
         with self._lock:
@@ -512,7 +761,19 @@ class SkyPassFeed:
         passes = predict(tles, loc[0], loc[1])
         with self._lock:
             self._passes, self._passes_at = passes, time.time()
-            self._err = None
+            if tles:
+                self._err = None
+
+    def _work(self, loc):
+        now = time.time()
+        # Stations first (fast, ~0.5s) so ISS is on the dome before we
+        # pay a CelesTrak timeout. Then snapshot. Then visual, which may
+        # block -- last-good sky_now already ran this cycle.
+        self._fill_stations_if_empty()
+        self._refresh_sky(loc, now)
+        self._maybe_refresh_visual(now)
+        self._refresh_sky(loc, now)
+        self._stamp_window()
 
 
 FEED = SkyPassFeed()

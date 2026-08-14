@@ -61,6 +61,21 @@ SKIP_KEYS = {
     "date", "startDate", "endDate", "seasonStartDate", "seasonEndDate",
     "teeTime", "href", "link", "links", "logo", "logoDark", "headshot",
     "$ref", "slug", "type", "state", "homeAway", "abbreviation",
+    # NWS's raw /points fields weather._fetch_point() reads a UGC zone
+    # code out of (via _zone_id_from_url(), which takes the URL's own
+    # trailing path segment) -- these are URL fields, same category as
+    # href/link/logo just above, and injecting a canary at the end of
+    # the URL string would land IN the extracted zone code (e.g.
+    # ".../SCC051" -> ".../SCC051<canaries>"), which is a real bug in
+    # the test's own injection, not in the fold: a UGC code isn't
+    # display text and was never meant to be folded, the same reasoning
+    # "abbreviation" is already skipped for above. Output field name is
+    # "zones"; skipped too, redundantly, as a second safety net.
+    "county", "forecastZone", "zones",
+    # NWS's real hourly-forecast URL field (weather._fetch_point() reads
+    # it into "hourly_url") -- same URL category as county/forecastZone
+    # just above, never drawn, only used to build the next real fetch.
+    "forecastHourly", "hourly_url",
 }
 
 
@@ -221,9 +236,25 @@ def main():
     try:
         bad += check("weather point (city/state)",
                      lambda: weather._fetch_point(34.0, -81.0),
-                     ignore_paths=("stations", "station", "forecast_url"))
+                     ignore_paths=("stations", "station", "forecast_url", "hourly_url"))
     finally:
         weather._get_json = _real_get_json
+
+    # weather hourly forecast (2026-08-10) -- _fetch_hourly() folds its
+    # own `short` field (e.g. "SLIGHT CHANCE SHOWERS AND THUNDERSTORMS")
+    # at the boundary; real payload, canary-injected, same technique.
+    hourly_url = ((points_raw.get("properties") or {}).get("forecastHourly"))
+    if hourly_url:
+        hourly_raw = _real_get_json(hourly_url)
+        weather._get_json = _mock_get_json([inject(hourly_raw)])
+        try:
+            bad += check("weather hourly forecast",
+                         lambda: {"h": weather._fetch_hourly(hourly_url)},
+                         ignore_paths=("start", "wind_dir"))
+        finally:
+            weather._get_json = _real_get_json
+    else:
+        print("  %-28s skipped (no hourly URL)" % "weather hourly forecast")
 
     # ---- /api/notify pass-through (2026-08-09) -- the fold lives inline
     # in arcade_server.py ("Fold at the boundary" comment on the /api/notify
@@ -260,6 +291,20 @@ def main():
     }]}}
     bad += check("nowplaying track/artist/album",
                  lambda: nowplaying._parse_now_playing(dirty_np))
+
+    # ownernote.py -- the owner's own typed text, folded inside
+    # save_config() itself (the write boundary, not render time). Real
+    # config is captured and restored so this audit run -- which writes
+    # a real dirty note to disk to exercise the real save path, not a
+    # copy of it -- never leaves stray state behind on disk.
+    import ownernote
+    _on_before = ownernote.load_config()
+    def _check_ownernote():
+        return ownernote.save_config("Note" + "".join(CANARIES) + " text")
+    try:
+        bad += check("ownernote.save_config", _check_ownernote)
+    finally:
+        ownernote.save_config(_on_before.get("text"))
 
     # ---- the pure text cleaners each feed exposes ------------------------
     import news

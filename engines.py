@@ -21,10 +21,12 @@ import time
 from collections import deque
 from pathlib import Path
 
+import ambient
 import audio_sync
 import dnd
 import events_log
 import nowplaying
+import ownernote
 import market
 import satellite
 import skypass
@@ -38,6 +40,8 @@ import blog
 import mma
 import gameday
 import notify
+import skins
+import layout
 import tic80_core
 import transitions
 
@@ -153,6 +157,24 @@ def draw_line(buf, x0, y0, x1, y1, color):
         if e2 <= dx:
             err += dx
             y0 += sy
+
+
+def fill_disk(buf, cx, cy, radius, color):
+    """Filled circle. Scanline, not a per-pixel distance test: one sqrt
+    per row, then a tight x-run. Used by the analog clock's weather wash
+    (~40-row face) -- well under the sweep's own put_px budget."""
+    r = int(radius)
+    if r <= 0:
+        return
+    r2 = float(radius) * float(radius)
+    for y in range(-r, r + 1):
+        xx = r2 - y * y
+        if xx < 0:
+            continue
+        dx = int(math.sqrt(xx))
+        yy = cy + y
+        for x in range(cx - dx, cx + dx + 1):
+            put_px(buf, x, yy, color)
 
 
 # Neon palette notes for ambient self-play over WLED backgrounds:
@@ -389,9 +411,63 @@ def color_on_dark(c, floor=140):
     return (min(255, int(c[0] * k)), min(255, int(c[1] * k)), min(255, int(c[2] * k)))
 
 
+def ink_on_color(bg):
+    """Real broadcast-scorebug ink rule: black text on a light team
+    colour, white text on a dark one -- `color_on_dark()` only solves
+    the opposite problem (legible ON near-black), and picking it for
+    text drawn ON TOP of an arbitrary real ESPN team colour produced
+    invisible text on a bright/warm colour (a real orange MLB team bar
+    rendered its own abbreviation in the same orange). Uses the
+    standard perceptual luminance weighting, not a flat average.
+    """
+    lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
+    return (18, 18, 22) if lum >= 140 else (245, 245, 250)
+
+
+def bar_for_cutout(c):
+    """Lift a team colour until unlit (black) letters read on the LED.
+
+    Dark navy/black bars made white ink the only option, and that
+    white then clashed with the score box. Brighter bar + black
+    cutout is the same colour, just readable.
+    """
+    if not c:
+        return (110, 120, 140)
+    r, g, b = c
+    m = max(r, g, b, 1)
+    if m >= 150:
+        return c
+    k = 150.0 / m
+    return (min(255, int(r * k)), min(255, int(g * k)), min(255, int(b * k)))
+
+
 def draw_divider(buf, y, color=(26, 30, 40), inset=2):
     for x in range(inset, WIDTH - inset):
         put_px(buf, x, y, color)
+
+
+def draw_freshness_bar(buf, y, age, color, max_age=1800.0, inset=2):
+    """A real, continuous 'how fresh is this' visual (2026-08-10) --
+    complements the existing binary stale-dot draw_header() already has
+    (a hard age>threshold cutoff) rather than replacing it. Length AND
+    brightness both scale with the SAME real `age` field every mode
+    already carries -- full-length and bright right after a fetch,
+    shrinking and dimming as the cached data ages, floored so it never
+    fully vanishes (an empty bar would read as "no data", not "old
+    data" -- those are different, real facts). `max_age` is the age at
+    which the bar bottoms out; NewsEngine/BlogEngine both pass 1800s,
+    the same threshold their own stale flag already uses, so the two
+    signals agree rather than disagreeing about what "stale" means.
+    Never invents a freshness value: `age is None` (not yet fetched)
+    draws nothing at all."""
+    if not isinstance(age, (int, float)):
+        return
+    frac = max(0.0, 1.0 - min(1.0, age / max_age))
+    width = int((WIDTH - 2 * inset) * max(0.08, frac))
+    glow = max(0.2, frac)
+    bar_col = rim(color, glow)
+    for x in range(inset, inset + width):
+        put_px(buf, x, y, bar_col)
 
 
 class Scroller:
@@ -612,12 +688,529 @@ def draw_diamond(buf, x, y, bases, on_col=BASE_ON, off_col=BASE_OFF):
         put_px(buf, px + 1, py + 1, c)
 
 
+DIAMOND_DIRT = (120, 84, 48)
+DIAMOND_DIRT_EDGE = (150, 108, 62)    # basepath outline, one shade brighter than the infield fill
+DIAMOND_GRASS = (22, 78, 36)
+DIAMOND_GRASS_DARK = (16, 58, 28)     # mown-stripe alternation, real broadcast field detail
+DIAMOND_MOUND = (158, 118, 72)
+DIAMOND_PLATE = (240, 242, 248)
+
+
+def draw_mini_court(buf, x0, y0, w, h, shot_x, shot_y, color):
+    """A tiny half-court rectangle with a hoop mark and a dot at the real
+    shot location (2026-08-10, "NBA mini shot-location court").
+    Deliberately geometric-only -- a rectangle, a hoop tick, one dot --
+    not a detailed court rendering, matching this project's own standing
+    "no logos, simple geometry" rule for every sprite/icon it draws.
+
+    Reuses `draw_basketball_court_hero()`'s own COURT_WOOD/COURT_WOOD_LINE
+    palette (dimmed for the floor, since this draws at a much smaller
+    scale) rather than a second, unrelated court palette -- a design
+    review (2026-08-11) caught the original cool gray-blue floor here
+    reading as visually unrelated to the warm-hardwood court hero the
+    owner sees moments later on the same sport's detail view. One court,
+    one palette, everywhere it appears.
+
+    `shot_x`/`shot_y` are ESPN's real per-play coordinate.x/y
+    (sports._play_shot_xy(), see that function's own honest gap note --
+    the real coordinate SYSTEM is unverified this session). Assumed
+    half-court feet (x: 0-50 sideline-to-sideline, y: 0-47 baseline-to-
+    half-court, the common public convention multiple independent ESPN-
+    API tools document) and CLAMPED into that range rather than trusting
+    an out-of-range value -- a shot plotted at the court's edge when the
+    real value is unverified is a safer honest degrade than plotting off
+    the drawn court entirely."""
+    floor = rim(COURT_WOOD, 0.5)
+    line = rim(COURT_WOOD_LINE, 0.6)
+    for y in range(y0, y0 + h):
+        for x in range(x0, x0 + w):
+            put_px(buf, x, y, floor)
+    for x in range(x0, x0 + w):
+        put_px(buf, x, y0, line)
+        put_px(buf, x, y0 + h - 1, line)
+    for y in range(y0, y0 + h):
+        put_px(buf, x0, y, line)
+        put_px(buf, x0 + w - 1, y, COURT_LINE)
+    # Hoop tick at the baseline (bottom-center) -- the one fixed real
+    # reference point on a half-court view.
+    hoop_x = x0 + w // 2
+    put_px(buf, hoop_x, y0 + h - 2, COURT_LINE)
+    fx = max(0.0, min(1.0, shot_x / 50.0))
+    fy = max(0.0, min(1.0, shot_y / 47.0))
+    px = x0 + 1 + int(fx * (w - 2))
+    py = y0 + h - 2 - int(fy * (h - 3))
+    for ddx in (-1, 0, 1):
+        for ddy in (-1, 0, 1):
+            if ddx * ddx + ddy * ddy <= 1:
+                put_px(buf, px + ddx, py + ddy, color)
+
+
+def draw_baseball_diamond_hero(buf, cx, cy, r, bases, on_col=(255, 255, 255), off_col=(70, 56, 40), pulse=1.0):
+    """A real, full infield diamond -- not the tiny four-dot glyph
+    draw_diamond() uses on the compact main/ticker rows. Built for the
+    baseball EXPANDED-DETAIL view (2026-08-10, redesigned twice same
+    session on direct owner feedback).
+
+    Geometry: a rotated square (dirt infield) with home plate at the
+    bottom, 1st base right, 2nd base top, 3rd base left -- the real
+    orientation draw_diamond()'s own docstring already established
+    ("a diamond drawn wrong is worse than none"), just at hero scale.
+    Base order from ESPN is [onFirst, onSecond, onThird], matched here
+    exactly like the small glyph.
+
+    ROUND 2 REDESIGN (2026-08-11): round 1 added a mown-stripe grass
+    field and a real 5-point home-plate pentagon for visual depth --
+    real feedback was that it had swung too far toward realism at the
+    expense of legibility ("the diamond is too realistic when cartoon
+    version is better... supposed to see who is on base" at a glance).
+    Reverted the stripe texture (flat solid grass instead -- texture was
+    fighting readability, not adding it) and simplified the plate back
+    to a plain bright square. What STAYS from round 1, because it's a
+    real readability win, not realism for its own sake: the brighter
+    basepath edge outline (defines the infield shape) and the mound dot
+    (marks true center). Base markers got BIGGER and bolder (a filled
+    3x3 block instead of a 5-pixel plus) specifically because "who's on
+    base" is the one fact this graphic exists to answer instantly --
+    size now does more of that work than shape ever did.
+
+    `pulse` (0..1) brightens the occupied-base markers -- reused by the
+    caller for a slow breathing glow while at least one base is loaded,
+    same rim()-based technique already established for the flight hero
+    silhouettes and the bases-loaded sustained glow, not a new one."""
+    # ROUND 3 (2026-08-11), direct owner correction against a real photo
+    # of the physical panel: "FIX THE BASEBALL DIAMOND TO HAVE THE SCORE
+    # BUG DIAMOND. JUST THE BASES AND LIT UP WHEN SOMEONE IS ON IT, DONT
+    # MAKE GRASS AND STUFF." Round 2's grass fill + dirt infield + edge
+    # outline + mound dot are ALL removed -- exactly the real scorebug
+    # convention every reference image actually used (a plain outlined
+    # diamond with 3 base squares, nothing else), not a miniature field.
+    home = (cx, cy + r)
+    first = (cx + r, cy)
+    second = (cx, cy - r)
+    third = (cx - r, cy)
+    for a, b in ((home, first), (first, second), (second, third), (third, home)):
+        draw_line(buf, a[0], a[1], b[0], b[1], off_col)
+
+    on = bases or [False, False, False]
+    for i, (bx, by) in enumerate((first, second, third)):
+        lit = on[i] if i < len(on) else False
+        # BIGGER when lit (a filled 3x3 block vs a bare 2x2 dot when
+        # not) -- round 2's real fix. Round 1 kept lit/unlit the SAME
+        # footprint and relied on brightness alone to signal "occupied",
+        # which read as too subtle at a glance; a cartoon scoreboard
+        # base should look obviously bigger/brighter when a runner is
+        # on it, the same "important = bigger AND brighter" hierarchy
+        # language already used on the flight radar scope.
+        c = rim(on_col, pulse) if lit else off_col
+        bx, by = int(bx), int(by)
+        span = 1 if lit else 0
+        for ddx in range(-span, span + 1):
+            for ddy in range(-span, span + 1):
+                put_px(buf, bx + ddx, by + ddy, c)
+        if not lit:
+            put_px(buf, bx, by, c)
+
+    # Home plate -- a plain bright square, simplified back from round
+    # 1's pentagon (the extra shape read as fussy detail, not clarity).
+    hx, hy = home
+    for ddx in (-1, 0, 1):
+        put_px(buf, hx + ddx, hy, DIAMOND_PLATE)
+    put_px(buf, hx, hy - 1, DIAMOND_PLATE)
+
+
+def draw_count_pips(buf, cx, y, balls, strikes,
+                    ball_col=(90, 210, 110), strike_col=(255, 90, 80), off_col=(50, 54, 66)):
+    """Balls/strikes as two short pip rows, the real broadcast-graphic
+    convention (a lit dot per ball/strike so far) rather than bare
+    digits -- niche but instantly legible to anyone who's watched a
+    real broadcast. 3 ball pips (a 4th is a walk, already over by the
+    time it would need a pip) and 2 strike pips (a 3rd is a strikeout),
+    centered as one combined row: B B B  S S."""
+    cells = [(ball_col, i < (balls or 0)) for i in range(3)] + \
+            [(strike_col, i < (strikes or 0)) for i in range(2)]
+    w = len(cells) * 5 + 2   # 3px pip + 2px gap per cell, +2 gap before strikes
+    x = cx - w // 2
+    for i, (col, lit) in enumerate(cells):
+        if i == 3:
+            x += 2       # extra gap separating balls from strikes
+        c = col if lit else off_col
+        for ddx in range(2):
+            for ddy in range(2):
+                put_px(buf, x + ddx, y + ddy, c)
+        x += 5
+
+
+_KZONE_KIND_COL = {
+    "ball": (70, 210, 100),
+    "looking": (255, 220, 70),
+    "swinging": (255, 80, 70),
+    "strike": (255, 140, 60),
+    "foul": (220, 220, 230),
+    "inplay": (80, 180, 255),
+}
+
+
+def _espn_pitch_px(x, y, zx0, zy0, zsize, plot_x0, plot_y0, plot):
+    """Map ESPN coords so the strike zone is a square of `zsize`.
+
+    Same scale on both axes into that square. Chase (balls outside)
+    lands in the margin and is clamped to the plot.
+    """
+    tx = (float(x) - sports.ESPN_ZONE_X0) / (sports.ESPN_ZONE_X1 - sports.ESPN_ZONE_X0)
+    ty = (float(y) - sports.ESPN_ZONE_Y0) / (sports.ESPN_ZONE_Y1 - sports.ESPN_ZONE_Y0)
+    px = zx0 + int(round(tx * (zsize - 1)))
+    py = zy0 + int(round(ty * (zsize - 1)))
+    return (max(plot_x0, min(plot_x0 + plot - 1, px)),
+            max(plot_y0, min(plot_y0 + plot - 1, py)))
+
+
+def draw_mlb_kzone(buf, x0, y0, size, pitches, margin=3):
+    """Catcher's-view K-zone: a square strike box, equal chase around it.
+
+    `size` is the inner zone in pixels (square). Dots are real
+    pitchCoordinate values.
+
+    THIS pitch is a centered plus (one mark). Earlier pitches in the
+    same PA are one dim pixel each. A filled 2x2 used to grow down-right
+    of the true location and read as bleed next to the 1px trail.
+    """
+    if size < 8:
+        return y0
+    plot = size + 2 * margin
+    zx0, zy0 = x0 + margin, y0 + margin
+    zx1, zy1 = zx0 + size - 1, zy0 + size - 1
+    box = (120, 126, 150)
+    for x in range(zx0, zx1 + 1):
+        put_px(buf, x, zy0, box)
+        put_px(buf, x, zy1, box)
+    for y in range(zy0, zy1 + 1):
+        put_px(buf, zx0, y, box)
+        put_px(buf, zx1, y, box)
+
+    rows = [p for p in (pitches or [])
+            if isinstance(p.get("x"), (int, float))
+            and isinstance(p.get("y"), (int, float))]
+    last_i = len(rows) - 1
+    for i, p in enumerate(rows):
+        if i == last_i:
+            continue
+        px, py = _espn_pitch_px(p["x"], p["y"], zx0, zy0, size, x0, y0, plot)
+        put_px(buf, px, py, rim(_KZONE_KIND_COL.get(p.get("kind"), (200, 200, 200)), 0.5))
+    if rows:
+        p = rows[-1]
+        px, py = _espn_pitch_px(p["x"], p["y"], zx0, zy0, size, x0, y0, plot)
+        col = _KZONE_KIND_COL.get(p.get("kind"), (200, 200, 200))
+        for dx, dy in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)):
+            xx, yy = px + dx, py + dy
+            if x0 <= xx < x0 + plot and y0 <= yy < y0 + plot:
+                put_px(buf, xx, yy, col)
+    return y0 + plot
+
+
+def draw_round_ticks(buf, cx, y, current, total, on_col=(255, 200, 60),
+                     off_col=(50, 54, 66), pulse=1.0):
+    """MMA scheduled rounds as pips -- 3 or 5, filled through the
+    current round. The live round breathes. total is a real scheduled
+    length (main=5, otherwise 3) or grown to fit a real period > 3."""
+    total = max(1, min(int(total or 3), 5))
+    current = int(current or 0)
+    w = total * 5 - 1
+    x = cx - w // 2
+    for i in range(total):
+        lit = i < current
+        col = on_col if lit else off_col
+        if lit and i == current - 1:
+            col = rim(on_col, pulse)
+        for ddx in range(3):
+            for ddy in range(3):
+                put_px(buf, x + ddx, y + ddy, col)
+        x += 5
+
+
+def draw_tennis_set_pips(buf, y, comps, best_of=None,
+                         on_col=(230, 220, 90), off_col=(50, 54, 66)):
+    """One pip per set, two rows (one player each).
+
+    Completed sets light for the winner. The live set stays dim.
+    Unplayed scheduled sets (when `best_of` is a real 3 or 5) draw
+    as empty slots -- structure, not a guessed 0-0 score. Without
+    `best_of`, only sets that actually have game counts are drawn.
+    """
+    if len(comps) < 2:
+        return
+    a, b = (comps[0].get("sets") or []), (comps[1].get("sets") or [])
+    n = min(len(a), len(b))
+    slots = n
+    if isinstance(best_of, int) and best_of in (3, 5):
+        slots = max(n, best_of)
+    if slots <= 0:
+        return
+    w = slots * 5 - 1
+    x0 = (WIDTH - w) // 2
+    for row, side, other in ((0, a, b), (1, b, a)):
+        x = x0
+        for i in range(slots):
+            if i >= n:
+                col = off_col
+            else:
+                try:
+                    mine, theirs = int(side[i]["games"]), int(other[i]["games"])
+                except (KeyError, TypeError, ValueError, IndexError):
+                    x += 5
+                    continue
+                done = i < n - 1 or bool(side[i].get("winner"))
+                col = on_col if (done and mine > theirs) else off_col
+            for ddx in range(3):
+                put_px(buf, x + ddx, y + row * 4, col)
+            x += 5
+
+
+def draw_leverage_glow(buf, x0, y0, x1, y1, color, phase):
+    """Sustained 'this state is true RIGHT NOW' wash -- baseball's
+    bases-loaded grammar, reused. Pulse is a real sine of the caller's
+    phase (usually self.scroll). Never a one-shot flash."""
+    pulse = 0.75 + 0.25 * math.sin(phase)
+    wash = rim(color, 0.20 * pulse)
+    for y in range(max(0, y0), min(HEIGHT, y1)):
+        for x in range(max(0, x0), min(WIDTH, x1)):
+            put_px(buf, x, y, wash)
+
+
+def _comp_matches_tag(c, tag):
+    """True when `tag` is this competitor's real id or abbr."""
+    if not tag or not c:
+        return False
+    want = str(tag).upper()
+    for key in ("id", "abbr"):
+        v = c.get(key)
+        if v is not None and str(v).upper() == want:
+            return True
+    return False
+
+
+def draw_scorebug_bars(buf, y, comps, row_h=8, possession=None):
+    """Broadcast scorebug: team-color bar, BLACK cutout name/record,
+    boxed white score. White-on-color clashed with the score on the
+    physical panel. Returns the y after both rows."""
+    ink = (0, 0, 0)
+    for c in (comps or [])[:2]:
+        bar = bar_for_cutout(c.get("color") or (70, 76, 92))
+        for by in range(row_h):
+            for bx in range(3, WIDTH - 3):
+                put_px(buf, bx, y + by, bar)
+        if _comp_matches_tag(c, possession):
+            for by in range(row_h):
+                put_px(buf, 3, y + by, (255, 255, 255))
+        abbr_txt = fit_text(c.get("abbr") or "", 30, 1)
+        draw_text3x5(buf, 6, y + 2, abbr_txt, ink)
+        sc = c.get("score")
+        sc_txt = "" if sc is None else str(sc)
+        box_w = (text_w(sc_txt, 1) + 4) if sc_txt else 0
+        bx0 = WIDTH - 3 - box_w
+        rec = c.get("record")
+        if rec:
+            aw = 6 + text_w(abbr_txt, 1) + 4
+            avail = bx0 - 2 - aw
+            if avail >= text_w(rec, 1):
+                draw_text3x5(buf, aw, y + 2, rec, ink)
+        if sc_txt:
+            for by in range(row_h):
+                for bx in range(bx0, WIDTH - 3):
+                    put_px(buf, bx, y + by, (0, 0, 0))
+            draw_text3x5(buf, bx0 + 2, y + 2, sc_txt, (255, 255, 255))
+        y += row_h
+    return y
+
+
+def draw_football_drive_strip(buf, x0, y0, x1, y1, yard_line=None,
+                              redzone=False, phase=0.0):
+    """Compact live field for football MAIN. Turf is set-dressing (same
+    as the detail hero). A ball marker is drawn ONLY when yard_line is a
+    real 0..100 int from ESPN -- never inferred from down-and-distance
+    text. Redzone glow is a real isRedZone bool, not a guessed yard."""
+    if redzone:
+        draw_leverage_glow(buf, x0, y0, x1, y1, (255, 50, 40), phase)
+    else:
+        for y in range(y0, y1):
+            stripe = FIELD_TURF if ((y // 2) % 2 == 0) else FIELD_TURF_DARK
+            for x in range(x0, x1):
+                put_px(buf, x, y, stripe)
+    mid = (x0 + x1) // 2
+    for y in range(y0, y1):
+        put_px(buf, mid, y, rim(FIELD_YARD_LINE, 0.45))
+    if isinstance(yard_line, int) and 0 <= yard_line <= 100:
+        span = max(1, x1 - x0 - 4)
+        bx = x0 + 2 + int(round(yard_line / 100.0 * span))
+        by = (y0 + y1) // 2
+        for dx, dy in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)):
+            put_px(buf, bx + dx, by + dy, (255, 220, 80))
+
+
+FIELD_TURF = (18, 66, 30)
+FIELD_TURF_DARK = (14, 52, 24)
+FIELD_YARD_LINE = (230, 234, 240)
+
+
+def draw_football_field_hero(buf, x0, y0, x1, y1):
+    """A real turf backdrop for football's live down/distance block
+    (2026-08-10, same 'give the hero visual real depth' ask baseball's
+    diamond redesign answered). Deliberately does NOT plot a precise
+    ball position or yard number on the field -- ESPN's own
+    `downDistanceText` is the only down/distance field this project has
+    ever verified live (see _situation()'s own docstring: the separate
+    numeric down/distance/yardLine subfields were read defensively but
+    NEVER confirmed against a real payload). Drawing a marker at a
+    specific yard line would mean inventing a position this project
+    doesn't actually have confirmed data for -- exactly what the
+    weather-radar redesign earlier this session already learned not to
+    do (plain real numbers beat unlabeled invented precision). This is
+    honest set-dressing: alternating turf stripes (the real look of a
+    televised field, generic, not tied to a specific yard) with the
+    REAL down/distance/clock text drawn on top by the caller."""
+    for y in range(y0, y1):
+        stripe = FIELD_TURF if ((y // 3) % 2 == 0) else FIELD_TURF_DARK
+        for x in range(x0, x1):
+            put_px(buf, x, y, stripe)
+    # Yard-line ticks along the top and bottom edge -- decorative field
+    # markings, not a specific real yard number.
+    for x in range(x0, x1, 6):
+        put_px(buf, x, y0, FIELD_YARD_LINE)
+        put_px(buf, x, y1 - 1, FIELD_YARD_LINE)
+
+
+COURT_WOOD = (120, 84, 44)
+COURT_WOOD_LINE = (235, 220, 190)
+# Real contrast bug fixed 2026-08-11 (design review): the original ice
+# color, (200, 225, 245), sat at almost the exact same real luminance as
+# the default skin's LIVE yellow text drawn on top of it -- on a real
+# LED panel the period/clock line would read as a near-invisible smear
+# instead of popping the way it does on every other hero backdrop. Every
+# OTHER hero's fill (dirt, turf, hardwood, pitch, octagon mat) sits in a
+# dark luminance band specifically so light ink pops; the ice was the
+# one accidental outlier. Darkened to match that same family, which
+# both restores real contrast for any skin's LIVE color and makes all
+# six hero backdrops feel like the same product again.
+RINK_ICE = (130, 155, 185)
+RINK_LINE_BLUE = (50, 90, 200)
+RINK_LINE_RED = (210, 50, 60)
+PITCH_GRASS = (24, 90, 40)
+PITCH_LINE = (235, 240, 230)
+
+
+def draw_basketball_court_hero(buf, x0, y0, x1, y1):
+    """Hardwood + key/center-circle backdrop for basketball's live
+    quarter/clock block (2026-08-11, "every sport needs the attention
+    MLB has"). Same honest-set-dressing contract as
+    draw_football_field_hero() -- no possession/bonus/foul indicator
+    plotted here (no confirmed ESPN field for any of those, see
+    _render_basketball()'s own docstring), just a real court silhouette
+    with the REAL quarter/clock text drawn on top by the caller."""
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            put_px(buf, x, y, COURT_WOOD)
+    w = x1 - x0
+    cx = x0 + w // 2
+    # Center circle (a diamond approximation at this pixel scale, same
+    # "circle reads as a few offset pixels" convention this project's
+    # icons already use).
+    r = 3
+    for dx, dy in ((0, -r), (0, r), (-r, 0), (r, 0), (-2, -2), (2, -2), (-2, 2), (2, 2)):
+        cy_mid = (y0 + y1) // 2
+        put_px(buf, cx + dx, cy_mid + dy, COURT_WOOD_LINE)
+    for x in range(x0, x1):
+        put_px(buf, x, (y0 + y1) // 2, rim(COURT_WOOD_LINE, 0.4))
+    # Key ticks at each end -- decorative, not a real possession marker.
+    for xo in (-3, 3):
+        put_px(buf, cx + xo, y0, COURT_WOOD_LINE)
+        put_px(buf, cx + xo, y1 - 1, COURT_WOOD_LINE)
+
+
+def draw_hockey_rink_hero(buf, x0, y0, x1, y1):
+    """Ice + blue-line/center-line backdrop for hockey's live
+    period/clock block (2026-08-11). Same honest contract -- no
+    power-play/possession marker (NHL power-play state is explicitly
+    documented elsewhere in this project as never having a confirmed
+    field), just real ice with the REAL period/clock text on top."""
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            put_px(buf, x, y, RINK_ICE)
+    w = x1 - x0
+    third = w // 3
+    for x in (x0 + third, x0 + 2 * third):
+        for y in range(y0, y1):
+            put_px(buf, x, y, RINK_LINE_BLUE)
+    cx = x0 + w // 2
+    for y in range(y0, y1):
+        put_px(buf, cx, y, RINK_LINE_RED)
+
+
+OCTAGON_MAT = (40, 20, 20)
+OCTAGON_CAGE = (200, 60, 60)
+
+
+def draw_octagon_hero(buf, cx, cy, r):
+    """A real octagon-cage outline behind the VS matchup (2026-08-11,
+    "every sport needs the attention MLB has"). Geometric-only -- eight
+    points on a circle connected in order, no real promotion's cage
+    branding -- same IP-avoidance rule as every other icon/sprite in
+    this project. Filled mat color inside, cage-red outline, nothing
+    plotted on it beyond the outline itself (no invented octagon-
+    position data -- this is pure set dressing behind real fighter
+    names/records drawn on top by the caller)."""
+    pts = []
+    for i in range(8):
+        ang = math.radians(22.5 + i * 45)
+        pts.append((cx + r * math.sin(ang), cy - r * math.cos(ang)))
+    _fill_poly(buf, pts, OCTAGON_MAT)
+    for a, b in zip(pts, pts[1:] + pts[:1]):
+        draw_line(buf, int(a[0]), int(a[1]), int(b[0]), int(b[1]), OCTAGON_CAGE)
+
+
+def draw_soccer_pitch_hero(buf, x0, y0, x1, y1):
+    """Pitch + halfway-line/center-circle backdrop for soccer's live
+    clock block (2026-08-11). Same honest contract as the other three
+    hero backdrops -- decorative real-pitch-shaped set dressing, no
+    invented ball position, real clock/detail text drawn on top."""
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            put_px(buf, x, y, PITCH_GRASS)
+    w = x1 - x0
+    cy_mid = (y0 + y1) // 2
+    for x in range(x0, x1):
+        put_px(buf, x, cy_mid, rim(PITCH_LINE, 0.5))
+    cx = x0 + w // 2
+    for dx, dy in ((0, -2), (0, 2), (-2, 0), (2, 0)):
+        put_px(buf, cx + dx, cy_mid + dy, PITCH_LINE)
+
+
 def draw_outs(buf, x, y, outs, on_col=OUT_ON, off_col=OUT_OFF):
     """Outs as filled/hollow pips, the way a real scoreboard shows them."""
     for i in range(3):
         c = on_col if (outs or 0) > i else off_col
         put_px(buf, x + i * 3, y, c)
         put_px(buf, x + i * 3 + 1, y, c)
+
+
+def dim_hero_text_band(buf, x0, y0, x1, y1, factor=0.45):
+    """Darken a rectangular band of an already-drawn hero backdrop
+    BEFORE text is drawn on top of it -- 2026-08-11, real owner report
+    against the actual physical LED panel: basketball's court hero
+    (warm brown wood) with the default skin's warm yellow LIVE text sat
+    close enough in HUE that the text was "almost impossible to see" on
+    real diffused LED hardware, even though the two colors have a real
+    luminance gap in RGB math. Picking one "hopefully safe" replacement
+    color doesn't structurally fix this -- skins (skins.py) let LIVE be
+    reconfigured to anything, including a color that could clash with a
+    DIFFERENT hero's backdrop the same way. This guarantees real
+    contrast regardless of skin or backdrop color: darken the pixels
+    under the text FIRST, same technique draw_celebration()'s own dark
+    text plate already uses successfully against its own bright,
+    unpredictable burst backdrops."""
+    for y in range(max(0, y0), min(HEIGHT, y1)):
+        for x in range(max(0, x0), min(WIDTH, x1)):
+            i = (y * WIDTH + x) * 3
+            r, g, b = buf[i], buf[i + 1], buf[i + 2]
+            put_px(buf, x, y, (int(r * factor), int(g * factor), int(b * factor)))
 
 
 # =============================================================================
@@ -648,6 +1241,89 @@ def _draw_offsets(buf, x, y, offsets, color, scale=1):
             for fx in range(scale):
                 for fy in range(scale):
                     put_px(buf, px + fx, py + fy, color)
+
+
+SUN_YELLOW = (255, 200, 60)
+CLOUD_GRAY = (170, 178, 195)
+CLOUD_DARK = (110, 118, 138)
+RAIN_BLUE = (90, 150, 230)
+SNOW_WHITE = (225, 235, 245)
+BOLT_YELLOW = (255, 225, 90)
+
+
+def draw_weather_icon_sun(buf, x, y, scale=1):
+    """A filled disc + eight rays -- the one hero visual element this
+    screen was entirely missing (2026-08-11, real owner ask: "fix
+    weather to be more visually pleasing"). Geometric-only, same
+    put_px-offset convention every sport icon in this project already
+    uses -- not a bitmap asset."""
+    disc = ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (1, -1), (-1, 1))
+    _draw_offsets(buf, x, y, disc, SUN_YELLOW, scale)
+    rays = ((0, -3), (0, 3), (-3, 0), (3, 0), (2, -2), (-2, 2), (2, 2), (-2, -2))
+    _draw_offsets(buf, x, y, rays, SUN_YELLOW, scale)
+
+
+def draw_weather_icon_cloud(buf, x, y, scale=1):
+    """Two overlapping lobes on a flat base -- the generic cloud
+    silhouette every icon in this style ends up converging on."""
+    body = ((-2, 0), (-1, -1), (0, -1), (1, 0), (2, 0), (-3, 1), (-2, 1),
+            (-1, 1), (0, 1), (1, 1), (2, 1), (3, 1))
+    _draw_offsets(buf, x, y, body, CLOUD_GRAY, scale)
+
+
+def draw_weather_icon_rain(buf, x, y, scale=1):
+    """Cloud body + three falling streaks beneath it."""
+    draw_weather_icon_cloud(buf, x, y - 1, scale)
+    drops = ((-2, 3), (0, 4), (2, 3))
+    _draw_offsets(buf, x, y, drops, RAIN_BLUE, scale)
+
+
+def draw_weather_icon_storm(buf, x, y, scale=1):
+    """Cloud body + a jagged bolt -- the one icon that earns a second,
+    brighter color, matching the real urgency a storm actually carries."""
+    draw_weather_icon_cloud(buf, x, y - 1, scale)
+    bolt = ((0, 2), (-1, 3), (1, 4))
+    _draw_offsets(buf, x, y, bolt, BOLT_YELLOW, scale)
+
+
+def draw_weather_icon_snow(buf, x, y, scale=1):
+    """Cloud body + a small snowflake cluster beneath it."""
+    draw_weather_icon_cloud(buf, x, y - 1, scale)
+    flakes = ((-2, 3), (0, 4), (2, 3), (0, 3))
+    _draw_offsets(buf, x, y, flakes, SNOW_WHITE, scale)
+
+
+def draw_weather_icon_fog(buf, x, y, scale=1):
+    """Three flat horizontal bands -- fog/haze/mist, distinct from the
+    cloud's rounded lobes so the two never read as the same condition."""
+    bands = ((-3, -1), (-1, -1), (1, -1), (3, -1),
+            (-2, 1), (0, 1), (2, 1))
+    _draw_offsets(buf, x, y, bands, CLOUD_DARK, scale)
+
+
+def weather_icon_for(text):
+    """Real condition text (NWS's own words, e.g. "PARTLY CLOUDY",
+    "LIGHT RAIN", "THUNDERSTORMS") -> the matching icon function, or
+    None. Ordered so the more specific/severe match wins first (a
+    "THUNDERSTORM" mention must not fall through to the generic RAIN
+    check first). Never invents a condition -- unmatched real text
+    (there are dozens of real NWS phrasings) simply draws no icon rather
+    than guessing one, the same honest-degrade contract every other
+    derived-from-text signal in this project already follows."""
+    t = (text or "").upper()
+    if any(k in t for k in ("THUNDER", "STORM")):
+        return draw_weather_icon_storm
+    if any(k in t for k in ("SNOW", "SLEET", "ICE", "FLURR")):
+        return draw_weather_icon_snow
+    if any(k in t for k in ("RAIN", "SHOWER", "DRIZZLE")):
+        return draw_weather_icon_rain
+    if any(k in t for k in ("FOG", "HAZE", "MIST", "SMOKE")):
+        return draw_weather_icon_fog
+    if any(k in t for k in ("CLOUD", "OVERCAST")):
+        return draw_weather_icon_cloud
+    if any(k in t for k in ("CLEAR", "SUNNY", "FAIR")):
+        return draw_weather_icon_sun
+    return None
 
 
 def draw_icon_football(buf, x, y, color, scale=1):
@@ -704,6 +1380,21 @@ def draw_icon_mma(buf, x, y, color, scale=1):
     _draw_offsets(buf, x, y, mitt, color, scale)
 
 
+def draw_icon_racing(buf, x, y, color, scale=1):
+    """A checkered flag -- a pole plus a 2x2 alternating checker block, the
+    generic universal racing symbol (not any real team/series mark, same
+    IP-avoidance rule as every other icon here). 2026-08-10, F1/NASCAR
+    support -- both leagues share this one icon via SPORT_ICONS["racing"],
+    the same normalized `sport` key ESPN's own universal feed uses for
+    motorsport events."""
+    pole = ((0, 0), (0, 1), (0, 2), (0, 3), (0, 4))
+    _draw_offsets(buf, x, y, pole, color, scale)
+    # Checker pattern -- alternating single pixels reads as a checkerboard
+    # at this size without needing a filled block.
+    checks = ((1, 0), (3, 0), (2, 1), (1, 2), (3, 2))
+    _draw_offsets(buf, x, y, checks, color, scale)
+
+
 def draw_icon_tennis(buf, x, y, color, scale=1):
     """A ball outline with a curved seam suggested by two offset dots --
     deliberately distinct from the soccer ball glyph's single centred
@@ -728,6 +1419,7 @@ SPORT_ICONS = {
     "golf": draw_icon_golf,
     "mma": draw_icon_mma,
     "tennis": draw_icon_tennis,
+    "racing": draw_icon_racing,   # F1 + NASCAR, 2026-08-10 -- see SPORT_ACCENT["racing"]
 }
 
 # Same icons, keyed instead by the OLDER per-league LEAGUE_PATHS code
@@ -824,10 +1516,10 @@ def draw_dots(buf, y, n, cur, on=(150, 160, 185), off=(38, 42, 54), cap=10):
         put_px(buf, x0 + i * 3, y, on if i == (cur % n) else off)
 
 
-# NWS severity -> alert styling. Module level because the SAME styling is
-# used two ways: inside the weather mode's own rotation, and as a global
-# takeover over any other mode (see draw_alert_frame). One definition, so
-# the two can't drift apart visually.
+# NWS severity -> alert styling. Module level because the SAME color table
+# drives both the weather mode's own full-screen rotation (draw_alert_frame)
+# and the global cross-mode banner (draw_severe_alert_banner) -- one
+# definition, so the two can't drift apart visually.
 ALERT_SEVERITY_COLOR = {
     "Extreme": (255, 45, 45), "Severe": (255, 80, 40),
     "Moderate": (255, 170, 40), "Minor": (240, 200, 70),
@@ -842,9 +1534,67 @@ ALERT_SEVERITY_COLOR = {
 GLOBAL_ALERT_SEVERITIES = ("Extreme", "Severe")
 
 
+def draw_severe_alert_banner(frame, alert, ticks, place="", n_alerts=1, cur_alert=0, scroll=0.0):
+    """Composite a bottom-third severe-weather banner over an already-
+    rendered frame -- DEMOTED from a full-screen takeover (2026-08-10,
+    real owner feedback the first time the takeover actually fired
+    live): the original design locked the ENTIRE panel to one static
+    alert screen for as long as a real Extreme/Severe alert stayed
+    active, which can be an hour or more for a real severe thunderstorm/
+    tornado warning -- "stuck", not communicating anything a banner
+    couldn't, and blocking every other mode the whole time.
+
+    Same non-blocking bottom-20px footprint as draw_notify_banner()
+    (whatever's running keeps running, untouched, above it) but themed
+    for real urgency rather than reused verbatim: a THICKER pulsing
+    accent stripe in the real NWS severity color (ALERT_SEVERITY_COLOR),
+    not notify's static 1px cool-blue divider -- so a genuinely severe
+    alert still visibly reads as more serious than an ordinary HA "FYI"
+    banner, without blacking out the panel for the alert's whole real
+    duration. `place`/multi-alert rotation are still shown; the storm
+    mini-scope is deliberately NOT reproduced here (weather mode's own
+    dedicated alert view still has it in full) -- a 20px banner has no
+    room for a second focal point on top of the life-safety text."""
+    buf = bytearray(frame)
+    col = ALERT_SEVERITY_COLOR.get(alert.get("severity"), ALERT_SEVERITY_COLOR["Unknown"])
+    k = 0.55 + 0.45 * abs(math.sin(ticks * 0.09))
+    pulse = tuple(min(255, int(c * k)) for c in col)
+
+    y0 = HEIGHT - 20
+    bg = (10, 2, 2)
+    for y in range(y0, HEIGHT):
+        for x in range(WIDTH):
+            put_px(buf, x, y, bg)
+    for x in range(WIDTH):
+        put_px(buf, x, y0, pulse)
+        put_px(buf, x, y0 + 1, pulse)     # 2px, thicker than notify's 1px divider
+
+    sev = str(alert.get("severity", "")).upper()
+    tag = sev + (f" {cur_alert + 1}/{n_alerts}" if n_alerts > 1 else
+                 (f" - {place}" if place else ""))
+    draw_text_centered(buf, y0 + 4, fit_text(tag, WIDTH - 6), pulse)
+
+    event = str(alert.get("event", ""))
+    lines = wrap_text(event, WIDTH - 6, max_lines=2)
+    overflow = sum(len(ln.split()) for ln in lines) < len(event.split())
+    if overflow:
+        draw_marquee(buf, HEIGHT - 8, event, (255, 255, 255), scroll)
+    elif len(lines) == 1:
+        draw_text_centered(buf, HEIGHT - 8, lines[0], (255, 255, 255))
+    elif lines:
+        draw_text_centered(buf, HEIGHT - 11, lines[0], (255, 255, 255))
+        draw_text_centered(buf, HEIGHT - 5, lines[1], (255, 255, 255))
+    return bytes(buf)
+
+
 def draw_alert_frame(alert, ticks, place="", n_alerts=1, cur_alert=0):
-    """Full-screen severe-weather alert. Used by WeatherEngine and by the
-    global takeover in arcade_server, so both look identical."""
+    """Full-screen severe-weather alert, including the real storm mini-
+    scope. Used by WeatherEngine's own dedicated `weather` mode view --
+    someone who's actually looking at weather gets the full picture.
+    The GLOBAL cross-mode takeover no longer uses this (see
+    draw_severe_alert_banner()'s own docstring for why it was demoted
+    to a non-blocking banner, 2026-08-10) -- this is weather mode's
+    content now, not a shared takeover screen."""
     buf = blank()
     fill(buf, (0, 0, 0))
     col = ALERT_SEVERITY_COLOR.get(alert.get("severity"), ALERT_SEVERITY_COLOR["Unknown"])
@@ -1257,6 +2007,34 @@ def draw_celebration(buf, t, moment, total=CELEBRATION_TICKS):
     if line2:
         draw_text_centered(buf, y, fit_text(line2, WIDTH - 6), (170, 178, 195))
 
+    # PLAYER HIGHLIGHT (2026-08-10) -- real jersey/position, when
+    # sports._play_scorer() found one (see that function's own honest
+    # gap note: unverified against a live payload this session). Placed
+    # at the very bottom, clear of the centered text plate above --
+    # never a photo (unrecognizable at 64x64), just the number + role, a
+    # jersey-style badge in the moment's own real team color.
+    scorer = moment.get("scorer")
+    badge_drawn = False
+    if scorer and (scorer.get("jersey") or scorer.get("position")):
+        by = HEIGHT - 9
+        parts = []
+        if scorer.get("jersey"):
+            parts.append(f"#{scorer['jersey']}")
+        if scorer.get("position"):
+            parts.append(scorer["position"])
+        badge = " ".join(parts)
+        draw_text_centered(buf, by, fit_text(badge, WIDTH - 6), color_on_dark(color, 170))
+        badge_drawn = True
+
+    # NBA MINI SHOT-LOCATION COURT (2026-08-10) -- only for a basketball
+    # CLUTCH moment carrying a real shot_xy, drawn in the corner clear of
+    # the centered text plate and (if present) the player badge below it.
+    shot_xy = moment.get("shot_xy")
+    if moment.get("sport") == "basketball" and shot_xy:
+        # Top-right corner -- the centered text plate leaves every corner
+        # clear regardless of whether the player badge drew below.
+        draw_mini_court(buf, WIDTH - 15, 2, 13, 16, shot_xy["x"], shot_xy["y"], color)
+
     return bytes(buf)
 
 
@@ -1333,10 +2111,15 @@ class BigMomentSource:
         return m
 
     def _set_big_moment(self, kind, line1, line2="", color=None,
-                        tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport=None):
+                        tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport=None,
+                        scorer=None, shot_xy=None):
         """`kind`/`line1`/`line2` must already be paneltext.panel_text()-
         folded by the caller, same as every other externally-sourced
-        string these engines draw.
+        string these engines draw. `scorer`, when present, is already a
+        folded {"jersey", "position", "name"} dict from
+        sports._play_scorer() (2026-08-10) -- see that function's own
+        docstring for the real, honestly-flagged gap (jersey/position
+        fields unverified against a live payload this session).
 
         A TIER_FLASH moment is routed to the in-mode slot instead of the
         interrupt queue -- see the class docstring on why that split is
@@ -1352,7 +2135,7 @@ class BigMomentSource:
         """
         moment = {"kind": kind, "line1": line1, "line2": line2,
                   "color": color or (255, 200, 40), "tier": tier, "system": system,
-                  "sport": sport}
+                  "sport": sport, "scorer": scorer, "shot_xy": shot_xy}
         # RECENT EVENTS LOG (events_log.py) -- record every REAL big
         # sports moment right where the celebration text is finalized, so
         # the log shows the SAME real text the celebration itself draws,
@@ -1484,6 +2267,16 @@ WINDOW_GLOW_FLOOR = 0.92
 # brightest thing the scope can show, full stop, not merely brighter than
 # the sweep's own heartbeat.
 FAVORITE_GLOW_FLOOR = 1.0
+
+# FAVORITES DRIVING AMBIENT DWELL (2026-08-10) -- shared by FlightEngine's
+# and SportsEngine's own ambient_weight() overrides below. A restrained,
+# ADDITIVE-only nudge, same shape as satellite's own WINDOW FILTER nudge
+# to ambient_weight() (+0.25) and flights' WINDOW_BOOST to sort ranking --
+# deliberately smaller than the smallest real tier gap either engine's
+# weight ladder has (0.5), so a favorite can only ever move dwell time
+# within whatever tier it already earned on its own real merits, never
+# leapfrog past a genuinely bigger, unrelated signal. Not a takeover.
+FAVORITE_AMBIENT_BOOST = 0.3
 
 
 def scope_xy(bearing_deg, r_frac, cx=SCOPE_CX, cy=SCOPE_CY, radius=SCOPE_R):
@@ -1624,7 +2417,7 @@ SCOPE_CATEGORY_COLOR = {
 }
 
 
-def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, big=False):
+def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, scale=1.0):
     """One aircraft blip, shaped by `kind` (one of the SCOPE_ICON_*
     constants) and rotated to `heading_deg` (real ADS-B track, not
     guessed) using the identical fwd/right rotation convention
@@ -1665,17 +2458,23 @@ def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, big=False
     safe (2 lines, or a small fixed put_px cluster) -- this round changes
     SHAPE PRECISION and COLOR, not the cost profile.
     """
+    # HIERARCHY SIZE TIERS (2026-08-10) -- `scale` replaced the old
+    # boolean `big` so importance can step in more than one increment:
+    # selection is now the single LARGEST tier (bigger than even a
+    # favorite), so "the one you picked" always visually wins regardless
+    # of what else is true about it -- real owner ask: "make selection
+    # unmistakable". See _frame_scope()'s own call site for the real
+    # tier values (routine/notable/window/favorite/selected).
     col = (int(color[0] * glow), int(color[1] * glow), int(color[2] * glow))
     theta = math.radians(heading_deg if heading_deg is not None else 0.0)
     xi, yi = int(round(x)), int(round(y))
-    scale = 1.25 if big else 1.0
 
     if kind == SCOPE_ICON_HELI:
         # Filled disc, screen-space, mirrored only -- see the docstring
         # above for why this deliberately does NOT rotate with heading.
         face_right = math.sin(theta) >= 0
         fx = 1 if face_right else -1
-        r = 2 if big else 1
+        r = 2 if scale >= 1.2 else 1
         # A small filled circle via a fixed offset cluster -- cheaper and
         # more predictable at this pixel density than a general circle
         # algorithm, same reasoning draw_window_ring()'s fixed-diamond
@@ -1717,6 +2516,20 @@ def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, big=False
     # to the wingtips (a chevron), not a perpendicular cross. This is
     # what actually makes it read as "pointed at something" (heading)
     # rather than "a plus sign that happens to rotate".
+    # FILLED DART, not a hollow two-line chevron (2026-08-11, direct
+    # owner report: "still triangles... not visually stunning"). Round 2
+    # (2026-08-08) fixed the SHAPE FAMILY (dash/dart/disc instead of one
+    # shared scaled cross) but the dart itself was still just two open
+    # line strokes from the nose to each wingtip -- no fuselage, no tail,
+    # no fill -- which is exactly why it kept reading as a bare triangle
+    # outline rather than a plane silhouette. A real paper-airplane-style
+    # dart -- nose, swept wingtip, a tail notch cut back in toward
+    # center, the other swept wingtip -- filled SOLID via _fill_poly()
+    # (the same primitive the flight hero silhouettes and the MMA
+    # octagon already use, proven cheap at this scale: the fill is
+    # bounded to the icon's own tiny vertical extent, a handful of rows,
+    # not a general shape). A filled silhouette reads as a solid object
+    # from across a room; a two-line V reads as a wireframe fragment.
     nose_fx, wing_fx, wing_fy = {
         # wing_fx: how far BACK from the nose the wingtips sit (fraction
         # of nose_fx, not an absolute -- keeps the sweep proportional at
@@ -1729,8 +2542,12 @@ def draw_scope_aircraft(buf, x, y, heading_deg, kind, color, glow=1.0, big=False
     tail_fx = -nose_fx * wing_fx
     nose = pt(nose_fx, 0)
     wl, wr = pt(tail_fx, -wing_fy), pt(tail_fx, wing_fy)
-    draw_line(buf, nose[0], nose[1], wl[0], wl[1], col)
-    draw_line(buf, nose[0], nose[1], wr[0], wr[1], col)
+    # Tail notch sits closer to center than the wingtips (a real dart's
+    # fuselage tapers to a point at the tail, narrower than the wingspan)
+    # -- this is what turns two open lines into a real closed arrowhead
+    # silhouette instead of a flat-backed kite.
+    tail = pt(tail_fx * 0.55, 0)
+    _fill_poly(buf, [nose, wr, tail, wl], col)
 
 
 def draw_window_ring(buf, x, y, color):
@@ -1747,6 +2564,50 @@ def draw_window_ring(buf, x, y, color):
     xi, yi = int(round(x)), int(round(y))
     for dx, dy in ((0, -3), (0, 3), (-3, 0), (3, 0)):
         put_px(buf, xi + dx, yi + dy, color)
+
+
+def draw_window_cone(buf, center_deg, fov_deg, r_frac,
+                     color, cx=SCOPE_CX, cy=SCOPE_CY, radius=SCOPE_R):
+    """The configured window as a faint fan on the ground radar.
+
+    Geometry is REAL: center/fov from satellite.load_window() (the same
+    cone `in_window()` already uses), outer radius from the same
+    sqrt-scaled r_frac every other scope element uses. Drawn as radial
+    spokes, same cost class as draw_scope_sweep -- a filled wedge at
+    this size is a blob that drowns the coastline. Edge rays sit a
+    hair brighter so the cone reads as "that sector" without a label.
+    Unlabelled on purpose: the N/S/E/W letters and the HOME/MYR caption
+    were both tried on this scope and reverted as instrument-panel
+    clutter. The violet is the same WINDOW_RING the in-window aircraft
+    already wear, so the two signals share a color, not a second one.
+    """
+    if not isinstance(center_deg, (int, float)) or not isinstance(fov_deg, (int, float)):
+        return
+    if fov_deg <= 0 or r_frac is None or r_frac <= 0:
+        return
+    r_px = max(2, int(round(min(1.0, r_frac) * radius)))
+    half = fov_deg / 2.0
+    # Spoke every 6 deg -- enough to read as a fan, sparse enough that
+    # the coastline and sweep still show through.
+    step = 6
+    n = max(1, int(round(fov_deg / step)))
+    for i in range(n + 1):
+        brg = (center_deg - half + (fov_deg * i / n)) % 360.0
+        edge = (i == 0 or i == n)
+        col = color if edge else rim(color, 0.35)
+        a = math.radians(brg)
+        sa, ca = math.sin(a), math.cos(a)
+        r0 = 3 if not edge else 2
+        for rr in range(r0, r_px + 1, 1 if edge else 2):
+            put_px(buf, int(round(cx + rr * sa)), int(round(cy - rr * ca)), col)
+    # Outer arc of the cone -- the "how far is visible" rim, same
+    # max_nm the in_window flag already applies.
+    a0 = center_deg - half
+    for i in range(n + 1):
+        brg = (a0 + (fov_deg * i / n)) % 360.0
+        a = math.radians(brg)
+        put_px(buf, int(round(cx + r_px * math.sin(a))),
+               int(round(cy - r_px * math.cos(a))), rim(color, 0.55))
 
 
 def draw_scope_airport(buf, x, y, color, glow=1.0):
@@ -1791,6 +2652,12 @@ WORLD_PATH = (255, 226, 60)     # the great circle -- FlightEngine.ROUTE's yello
 WORLD_ORIGIN = (80, 235, 130)   # green, "came from" -- an OPEN box (see below)
 WORLD_DEST = (255, 110, 80)     # coral, "going to" -- a FILLED box
 WORLD_AC = (255, 255, 255)      # white -- the same "this is the selected thing"
+# Cyan, deliberately far from WORLD_PATH's yellow on the color wheel --
+# 2026-08-11, the real flown trail needs to read as "a DIFFERENT line
+# from the planned route" at a glance, specifically so a real deviation
+# is visible as two lines splitting apart, not as one line changing
+# shade.
+WORLD_FLOWN = (80, 220, 235)
                                  # white the scope already uses for selection
 GC_STEPS = 24                   # great-circle sample count -- see draw_world_map
 
@@ -2001,11 +2868,12 @@ def _draw_map_box(buf, x, y, color, filled, box=None):
 
 
 def draw_world_map(buf, route, ac_lat=None, ac_lon=None,
-                   x0=0, y0=10, w=WIDTH, h=32):
+                   x0=0, y0=10, w=WIDTH, h=32, flown_trail=None):
     """The global flight-path view's map body. Draws, back to front:
     the embedded real world coastline (dim), a faint equator/prime-
-    meridian graticule, the REAL great-circle route, the real origin and
-    destination markers, and the aircraft's real current position.
+    meridian graticule, the REAL great-circle route, the real flown
+    trail (if any), the real origin and destination markers, and the
+    aircraft's real current position.
 
     EVERY element is drawn only from real data and skipped when that data
     genuinely isn't there -- a route adsbdb never resolved draws no path
@@ -2015,13 +2883,24 @@ def draw_world_map(buf, route, ac_lat=None, ac_lon=None,
     can caption the honest gaps rather than leaving a blank map
     unexplained.
 
+    `flown_trail` (2026-08-11, direct owner ask: a real diversion needs
+    to be visually SEEN, not just theoretically knowable) is an optional
+    real list of (lat, lon) points -- the aircraft's own actually-
+    observed recent positions, converted from FlightEngine's existing
+    scope trail via flights.destination_point(). Drawn in a THIRD color,
+    distinct from both the ideal great-circle route and the coastline,
+    specifically so a real course deviation (weather, ATC reroute,
+    whatever the real reason) reads as "the flown line visibly peels
+    away from the planned line" rather than needing the viewer to
+    already understand what a great-circle path should look like.
+
     See world_xy() for why the projection is equirectangular, and
     _fit_bounds() for why the window is fitted to the real route rather
     than always showing the whole Earth. Everything is clipped to the map
     box -- `put_px` only guards the panel edge, so a windowed view would
     otherwise paint stray coastline through the header and captions."""
     drew = {"path": False, "origin": False, "dest": False, "aircraft": False,
-            "bounds": WORLD_BOUNDS}
+            "flown": False, "bounds": WORLD_BOUNDS}
     box = (x0, y0, x0 + w - 1, y0 + h - 1)
 
     r = route or {}
@@ -2033,7 +2912,10 @@ def draw_world_map(buf, route, ac_lat=None, ac_lon=None,
 
     # The window is fitted to the REAL points about to be drawn, before
     # anything is drawn -- see _fit_bounds() for why a whole-Earth window
-    # makes a real domestic leg three pixels wide.
+    # makes a real domestic leg three pixels wide. The flown trail's own
+    # points are included so a real deviation stays inside the fitted
+    # window rather than getting clipped off the edge of a map framed
+    # only around the ideal route.
     fit = []
     if o_ok:
         fit.append((olat, olon))
@@ -2041,6 +2923,8 @@ def draw_world_map(buf, route, ac_lat=None, ac_lon=None,
         fit.append((dlat, dlon))
     if a_ok:
         fit.append((ac_lat, ac_lon))
+    for flat, flon in (flown_trail or []):
+        fit.append((flat, flon))
     bounds = _fit_bounds(fit, w, h)
     drew["bounds"] = bounds
 
@@ -2066,6 +2950,15 @@ def draw_world_map(buf, route, ac_lat=None, ac_lon=None,
         _draw_geo_polyline(buf, great_circle_points(olat, olon, dlat, dlon),
                            WORLD_PATH, x0, y0, w, h, bounds)
         drew["path"] = True
+    # REAL FLOWN TRAIL (2026-08-11) -- drawn on top of the planned route,
+    # under the endpoint markers and the aircraft itself, in a distinct
+    # color specifically so a real deviation reads as two lines visibly
+    # splitting apart rather than one line quietly being "a bit off".
+    # Only 2+ real points draw anything -- one point is a dot, not a
+    # trail, and would just look like noise next to the planned line.
+    if flown_trail and len(flown_trail) >= 2:
+        _draw_geo_polyline(buf, list(flown_trail), WORLD_FLOWN, x0, y0, w, h, bounds)
+        drew["flown"] = True
     # Markers draw even when only ONE end resolved -- half a real fact is
     # still a real fact, and it's better than a blank map. Only the PATH
     # needs both ends, since a line to nowhere would be invented.
@@ -2301,6 +3194,10 @@ def draw_marquee(buf, y, text, color, scroll, scale=1, gap="   "):
 # =============================================================================
 class SnakeEngine:
     name = "snake"
+
+    def has_content(self):
+        return True          # generative; arcade ambient channel
+
     GRID = 32
     CELL = WIDTH // 32  # 2 px
 
@@ -2611,6 +3508,10 @@ _LINE_SCORE = (0, 100, 300, 500, 800)
 
 class TetrisEngine:
     name = "tetris"
+
+    def has_content(self):
+        return True          # generative; arcade ambient channel
+
     COLS = 10
     ROWS = 20
     CELL = 3
@@ -3017,6 +3918,9 @@ class PongEngine:
     name = "pong"
     tick_rate = 0.020
 
+    def has_content(self):
+        return True          # generative; arcade ambient channel
+
     BG = (0, 0, 0)
     MID = (0, 60, 50)           # dashed net — teal, readable on dark FX
     BALL = (255, 255, 255)
@@ -3318,6 +4222,9 @@ class PongEngine:
 class BreakoutEngine:
     name = "breakout"
     tick_rate = 0.028
+
+    def has_content(self):
+        return True          # generative; arcade ambient channel
 
     # Canonical Atari field: 8 rows x 14 bricks.
     COLS, ROWS = 14, 8
@@ -4048,6 +4955,9 @@ class TronEngine:
     name = "tron"
     tick_rate = 0.055
 
+    def has_content(self):
+        return True          # generative; night gallery / ambient rest face
+
     BG = (0, 0, 0)
     WALL = (0, 55, 80)
     YOU = (0, 255, 220)
@@ -4499,6 +5409,9 @@ class FlappyEngine:
     name = "flappy"
     tick_rate = 0.05
 
+    def has_content(self):
+        return True          # generative; arcade ambient channel
+
     # Pure black sky so dynamic FX show through as the “sky”
     BG = (0, 0, 0)
     BIRD = (255, 240, 60)       # bright lemon — not lost on fire/aurora
@@ -4681,6 +5594,9 @@ class FlappyEngine:
 class InvadersEngine:
     name = "invaders"
     tick_rate = 0.05
+
+    def has_content(self):
+        return True          # generative; arcade ambient channel
 
     BG = (0, 0, 0)
     SHIP = (80, 255, 160)
@@ -5112,6 +6028,9 @@ class LifeEngine:
     name = "life"
     tick_rate = 0.1
 
+    def has_content(self):
+        return True          # generative; night gallery / ambient rest face
+
     BG = (0, 0, 0)              # black field → ambient FX shows through dead cells
     CYCLE_MEM = 16              # longest oscillator period we can recognise
     FADE = 5                    # frames of dissolve between seeds
@@ -5413,6 +6332,9 @@ class DodgeEngine:
     name = "dodge"
     tick_rate = 0.045
 
+    def has_content(self):
+        return True          # generative; arcade ambient channel
+
     BG = (0, 0, 0)
     YOU = (80, 255, 200)        # aqua runner
     BLOCK = (255, 50, 90)       # hot rose slabs
@@ -5603,6 +6525,9 @@ class DodgeEngine:
 class Game2048Engine:
     name = "2048"
     tick_rate = 0.16
+
+    def has_content(self):
+        return True          # generative; arcade ambient channel
 
     SIZE = 4
     CELL = 14
@@ -6025,16 +6950,39 @@ class TickerEngine(Browsable):
         under 2% while the occasional crypto move hits 15%, so a linear
         bar rendered almost everything as 1-2 invisible pixels. sqrt gives
         small everyday moves real visible length while still leaving
-        headroom for the big ones (±12% saturates)."""
+        headroom for the big ones (±12% saturates).
+
+        BRIGHTNESS also now scales with the same real magnitude
+        (2026-08-10, direct ask -- "price-strength visuals... color
+        intensity scaled to how big the move is"), on top of the bar's
+        existing LENGTH scaling -- length says "how far", brightness now
+        also says "how much", so a glance at intensity alone (useful at a
+        distance where the bar's exact length is harder to judge than its
+        glow) still communicates real magnitude. Floored at 0.35 so a
+        near-zero move stays visible as a real (if quiet) bar rather than
+        vanishing -- an invisible bar reads as "no data", not "no move"."""
         half = (WIDTH - 8) // 2
         cx = WIDTH // 2
         for x in range(cx - half, cx + half):
             put_px(buf, x, y, (24, 28, 38))
-        n = int(math.sqrt(min(1.0, abs(pct) / 12.0)) * half)
+        frac = min(1.0, abs(pct) / 12.0)
+        # Real bug fixed 2026-08-11: the "0.35 floor keeps a near-zero
+        # move visible" claim above was false for any move under
+        # ~0.0153% -- `int(sqrt(frac) * half)` rounds straight to 0
+        # before the color floor ever gets a pixel to apply to, so the
+        # bar genuinely vanished exactly in the case this was meant to
+        # prevent. Real-world reachable: this session's own stablecoin
+        # additions (USDT/USDC/DAI) routinely sit at 0.00-0.01% 24h
+        # change. `max(n, 1)` when frac > 0 guarantees at least one lit
+        # pixel for any genuinely nonzero move, matching the docstring's
+        # actual intent.
+        n = max(1, int(math.sqrt(frac) * half)) if frac > 0 else 0
+        glow = max(0.35, math.sqrt(frac))
+        bar_col = rim(col, glow)
         for i in range(n):
             x = cx + i if pct > 0 else cx - i
-            put_px(buf, x, y, col)
-            put_px(buf, x, y + 1, rim(col, 0.5))
+            put_px(buf, x, y, bar_col)
+            put_px(buf, x, y + 1, rim(bar_col, 0.5))
         for dy in (-1, 0, 1, 2):
             put_px(buf, cx, y + dy, (90, 98, 118))     # fixed centre tick
 
@@ -6099,12 +7047,27 @@ class TickerEngine(Browsable):
         draw_dots(buf, 46, len(self.rows), self.cur, on=accent)
         draw_divider(buf, 49)
 
+        # The tape now carries real per-row gain/loss color instead of a
+        # flat neutral gray (2026-08-10, same "price-strength visuals"
+        # ask as the spotlight bar above) -- draw_marquee only takes ONE
+        # color for the whole string though, so this can't tint each
+        # symbol individually within one call without a real per-glyph
+        # marquee rewrite (out of scope for a visual polish pass). The
+        # honest, real compromise: color the WHOLE tape by the tape's own
+        # aggregate real mood -- more real gainers than losers among
+        # currently-loaded rows tints it toward UP, more losers toward
+        # DOWN, a real tie stays neutral. Still real, derived data, not
+        # an invented single-row color applied to every row.
+        gainers = sum(1 for r in self.rows if r["pct"] > 0.05)
+        losers = sum(1 for r in self.rows if r["pct"] < -0.05)
+        tape_col = self.UP if gainers > losers else (self.DOWN if losers > gainers else self.INK_DIM)
+        tape_col = rim(tape_col, 0.6) if tape_col is not self.INK_DIM else tape_col
         parts = []
         for r in self.rows:
             sign = "+" if r["pct"] >= 0 else "-"
             parts.append(f"{r['sym']} {self._fmt_price(r['price'])} "
                          f"{sign}{abs(r['pct']):.1f}%")
-        draw_marquee(buf, 53, "   ".join(parts), self.INK_DIM, self.scroll)
+        draw_marquee(buf, 53, "   ".join(parts), tape_col, self.scroll)
         return bytes(buf)
 
 
@@ -6195,6 +7158,23 @@ class SatelliteEngine(Browsable, BigMomentSource):
         self.view = self.VIEW_PASSES
         self.sweep = 0.0
         self._overhead_ids = set()   # (norad_id, rise) seen overhead last tick
+        # ISS COMET TRAIL (2026-08-10) -- ISS ONLY, deliberately, not
+        # every catalogued object. Real measured apparent motion for the
+        # WHOLE catalogue averages ~0.13px/sec (see the satellite
+        # PERFORMANCE section this project already measured), dominated
+        # by slow-moving high-altitude satellites -- a trail on those
+        # would be motionless noise. The ISS is genuinely different: its
+        # real orbital velocity (~7.66 km/s) makes it the one object that
+        # visibly crosses the dome over just a few real seconds during a
+        # close pass, so a trail here is a real, legible signal, not
+        # decoration applied blindly to everything. Pixel positions
+        # (not az/el) are stored directly -- the dome's SCOPE_CX/CY/R
+        # projection constants are fixed at module level and never change
+        # at runtime, unlike flights' local-plane trail storage, which
+        # exists because that scope's center/radius genuinely can differ
+        # per call site.
+        self._iss_trail = deque(maxlen=12)
+        self._iss_trail_sample = None
         self._init_scroll()
         self._init_big_moments()
         # Seen-pass cursor for _detect_go_outside_pass() -- same one-shot
@@ -6274,6 +7254,29 @@ class SatelliteEngine(Browsable, BigMomentSource):
         self.data = satellite.FEED.get()
         lat, lon, _lbl = satellite.FEED.get_location()
         self.sky = skypass.FEED.get(lat, lon)
+        # ISS comet trail -- sample the real current dome position every
+        # tick the ISS is genuinely above the horizon (not just
+        # `visible`, since the trail shows real sky position, not just
+        # the "worth looking at" subset -- same distinction _frame_scope
+        # already draws between a dim vs bright target). Cleared to empty
+        # the instant the ISS drops out of sky_now entirely, so a trail
+        # never survives to imply a pass that already ended.
+        iss = next((o for o in (self.sky.get("sky_now") or []) if o.get("is_iss")), None)
+        if iss is not None:
+            frac = self._dome_r_frac(iss.get("el"))
+            az = iss.get("az")
+            el = iss.get("el")
+            if frac is not None and az is not None and isinstance(el, (int, float)):
+                # sky_now updates at 1 Hz; tick is 20 Hz. Appending every
+                # tick filled the 12-sample trail with the same pixel.
+                # Distinct 1 Hz samples only -- a real path, not a blob.
+                sample = (round(float(az), 2), round(float(el), 2))
+                if sample != self._iss_trail_sample:
+                    self._iss_trail_sample = sample
+                    self._iss_trail.append(scope_xy(az, frac))
+        else:
+            self._iss_trail.clear()
+            self._iss_trail_sample = None
         ps = self.sky.get("passes") or []
         if ps:
             self.cur %= len(ps)
@@ -6624,6 +7627,15 @@ class SatelliteEngine(Browsable, BigMomentSource):
         draw_scope_crosshair(buf, color=(20, 34, 58))
         draw_scope_sweep(buf, self.sweep, color=(24, 66, 120))
 
+        # ISS comet trail, drawn UNDER the object loop so the live icon
+        # always paints over its own tail -- same layering rule flights'
+        # own trail already established.
+        pts = list(self._iss_trail)
+        if len(pts) >= 2:
+            for i, ((x0, y0), (x1, y1)) in enumerate(zip(pts, pts[1:])):
+                fade = (i + 1) / len(pts)          # oldest = dimmest
+                draw_line(buf, x0, y0, x1, y1, rim(self.ISS, fade * 0.5))
+
         for o in objs:
             frac = self._dome_r_frac(o.get("el"))
             az = o.get("az")
@@ -6668,10 +7680,28 @@ class SatelliteEngine(Browsable, BigMomentSource):
             # (both sit at cy-2=31) -- caught by render_audit's rotate-
             # driven coverage, not by eye. y=40 clears the W/E row
             # (ends y=36) and the S label row (starts y=47) with margin.
-            draw_text_centered(buf, 40, "NOTHING UP", self.INK_DIM)
+            # Dead catalogue ≠ empty sky: NOTHING UP is only honest
+            # when we actually have elements to propagate.
+            reason = self._sky_empty_reason()
+            if reason == "signal":
+                draw_text_centered(buf, 40, "NO SIGNAL", self.LOSE)
+            elif reason == "looking":
+                draw_text_centered(buf, 40, "LOOKING", self.INK_DIM)
+            else:
+                draw_text_centered(buf, 40, "NOTHING UP", self.INK_DIM)
         lbl = "EL " + "/".join(str(e) for e in self.SCOPE_RING_EL) + "/0"
         draw_text_centered(buf, 58, fit_text(lbl, WIDTH - 4), (86, 94, 116))
         return bytes(buf)
+
+    def _sky_empty_reason(self):
+        """Why the pass list / dome is empty -- never conflate a dead
+        catalogue with a quiet sky. Same tri-state follow-flight uses:
+        no predictor, no signal, still looking, or honestly empty."""
+        if not self.sky.get("available"):
+            return "predictor"
+        if not self.sky.get("tle_count"):
+            return "signal" if self.sky.get("err") else "looking"
+        return "empty"
 
     def frame(self):
         buf = blank()
@@ -6685,11 +7715,15 @@ class SatelliteEngine(Browsable, BigMomentSource):
         ps = self.sky.get("passes") or []
         if not ps:
             draw_header(buf, "SKY", self.ACCENT)
-            if not self.sky.get("available"):
+            reason = self._sky_empty_reason()
+            if reason == "predictor":
                 draw_text_centered(buf, 26, "PREDICTOR", self.INK_DIM)
                 draw_text_centered(buf, 34, "UNAVAILABLE", self.INK_DIM)
-            elif self.sky.get("err"):
-                draw_text_centered(buf, 30, "NO SKY DATA", self.LOSE)
+            elif reason == "signal":
+                draw_text_centered(buf, 26, "NO SIGNAL", self.LOSE)
+                draw_text_centered(buf, 34, "STILL LOOKING", self.INK_DIM)
+            elif reason == "looking":
+                draw_text_centered(buf, 30, "LOOKING", self.INK_DIM)
             else:
                 draw_text_centered(buf, 26, "NO VISIBLE", self.INK_DIM)
                 draw_text_centered(buf, 34, "PASSES", self.INK_DIM)
@@ -6884,10 +7918,15 @@ class FlightEngine(Browsable, BigMomentSource):
             ac["_ext_dist_nm"] = math.hypot(x_nm, y_nm)
             ac["_ext_dir_deg"] = math.degrees(math.atan2(x_nm, y_nm)) % 360.0
 
-    # Real flown-path trail -- ~5min of real polls at flights.POSITION_
-    # REFRESH (~15s): 20 * 15s = 300s. Bounded per aircraft, evicted the
-    # moment an aircraft leaves the tracked list (see _update_trail()).
-    TRAIL_MAX_POINTS = 20
+    # Real flown-path trail -- ~2.5min of real polls at flights.POSITION_
+    # REFRESH (~15s): 10 * 15s = 150s. SHORTENED 2026-08-10 from 20
+    # (~5min) -- real owner ask: the trail should support the aircraft,
+    # not compete with it; a shorter real history reads as "where it
+    # just came from" rather than a long line that starts to rival the
+    # scope's own range rings for visual weight. Bounded per aircraft,
+    # evicted the moment an aircraft leaves the tracked list (see
+    # _update_trail()).
+    TRAIL_MAX_POINTS = 10
 
     def _update_trail(self, ac_list, new_poll):
         """Bounded per-aircraft REAL flown-path history, for the "show the
@@ -7020,6 +8059,21 @@ class FlightEngine(Browsable, BigMomentSource):
                                     # white, so "in the window" is never confused with
                                     # "radio-matched" or "currently selected"
                                  # from the general-log amber (never the same color as "just data")
+
+    # SCOPE ICON SIZE TIERS (2026-08-10) -- one consistent size ladder,
+    # matching the SAME favorite > window > notable > routine ordering
+    # brightness already uses (NOTABLE_GLOW_FLOOR/WINDOW_GLOW_FLOOR/
+    # FAVORITE_GLOW_FLOOR above), so size REINFORCES the hierarchy
+    # instead of being a second, independently-tuned signal. SELECTED
+    # sits ABOVE all of them -- the real owner ask was that picking an
+    # aircraft must be unmistakable regardless of what else is true
+    # about it, so "you're looking at this one right now" outranks even
+    # a favorite on size.
+    SCALE_ROUTINE = 1.0
+    SCALE_NOTABLE = 1.12
+    SCALE_WINDOW = 1.22
+    SCALE_FAVORITE = 1.32
+    SCALE_SELECTED = 1.5
     ATC_PAGE_TICKS = 90       # ~4.5s per page, long enough to actually read one before it turns
 
     # PART 2: the airport is a genuinely selectable target on the scope,
@@ -7031,6 +8085,7 @@ class FlightEngine(Browsable, BigMomentSource):
     def reset(self):
         self.data = {"aircraft": [], "age": None, "home_label": "HOME",
                     "configured": False, "err": None}
+        self._sky_wx = {}
         # SELECTION IS IDENTITY-KEYED, not positional. `self.sel_key` is
         # the stable key (hex, falling back to ident) of whichever real
         # aircraft is selected, or None meaning "no explicit selection --
@@ -7203,25 +8258,32 @@ class FlightEngine(Browsable, BigMomentSource):
         majority case, same "no badge for the mundane case" rule flight
         phase CRUISE already follows.
 
-        HONEST LIMITATION: `flights.load_airport()` stores only ONE code
-        form (whatever the owner configured, e.g. MYR/IATA), not both
-        IATA and ICAO. adsbdb's route field prefers IATA too, so this
-        matches correctly in the common case, but a route that only
-        resolved an ICAO code (e.g. "KMYR") against an IATA-configured
-        home ("MYR") would false-negative to TRANSIT rather than
-        DEPARTING/ARRIVING -- a real format-mismatch gap, not fabricated
-        past by guessing a conversion.
+        HOME MATCH is IATA *and* ICAO. A home configured as MYR must
+        still classify a route that only resolved as KMYR (and the
+        reverse). `flights.airport_codes()` expands the North-American
+        K/C/M+IATA pair; adsbdb's unused ICAO/IATA fields ride along
+        on the route dict so we compare every real code the payload
+        actually sent, never a guessed worldwide converter (EGLL is
+        not invented into LHR).
         """
         if not route or not airport:
             return None
-        home = (airport.get("code") or "").upper()
-        if not home:
+        homes = flights.airport_codes(airport.get("code"))
+        for extra in (airport.get("icao"), airport.get("iata")):
+            homes |= flights.airport_codes(extra)
+        if not homes:
             return None
-        origin = (route.get("origin") or "").upper()
-        dest = (route.get("dest") or "").upper()
-        if origin and origin == home:
+
+        def _hits(keys):
+            for k in keys:
+                v = (route.get(k) or "").upper()
+                if v and v in homes:
+                    return True
+            return False
+
+        if _hits(("origin", "origin_icao", "origin_iata")):
             return "DEPARTING"
-        if dest and dest == home:
+        if _hits(("dest", "dest_icao", "dest_iata")):
             return "ARRIVING"
         return None
 
@@ -7320,14 +8382,16 @@ class FlightEngine(Browsable, BigMomentSource):
             if self.hangar_entries:
                 self.hangar_idx = (self.hangar_idx + direction) % len(self.hangar_entries)
             return
-        # SELECTION MENU -- left/right moves the cursor, same tap-to-step/
-        # hold-to-accelerate Browsable machinery the ATC log's paging and
-        # THE HANGAR's own browsing already reuse. Stepping AIRCRAFT has
-        # no meaning here: the menu is about the one already selected.
+        # SELECTION MENU -- real UX bug fixed 2026-08-11 (direct owner
+        # report): the menu renders as a VERTICAL stacked list
+        # (_frame_menu()'s own `y = MENU_ROW0 + i * MENU_ROW_STEP`), but
+        # left/right -- a horizontal gesture -- was moving the cursor,
+        # while up/down did something else entirely (jumped straight to
+        # THE HANGAR, abandoning the open menu). Left/right now does
+        # nothing while the menu is open; up/down moves the cursor (see
+        # input()'s "up"/"down" branch below) -- the axis now matches
+        # what's actually on screen.
         if self.view == self.VIEW_MENU:
-            n = len(self._menu_entries())
-            if n:
-                self.menu_idx = (self.menu_idx + direction) % n
             return
         aircraft = self.data.get("aircraft") or []
         # PART 2: the airport is a real stop in the SAME step cycle, not
@@ -7427,6 +8491,18 @@ class FlightEngine(Browsable, BigMomentSource):
                 self.cycling = not self.cycling
             self.hold = 0
         elif cmd in ("up", "down"):
+            # SELECTION MENU -- up/down now moves the cursor through the
+            # real vertical list on screen (2026-08-11 fix, see _step()'s
+            # own note above for the full before/after). Takes priority
+            # over the Hangar toggle below: while the menu is open,
+            # up/down is unambiguously about the menu, not a whole-view
+            # switch.
+            if self.view == self.VIEW_MENU:
+                n = len(self._menu_entries())
+                if n:
+                    direction = 1 if cmd == "down" else -1
+                    self.menu_idx = (self.menu_idx + direction) % n
+                return
             # THE HANGAR toggle -- identical idiom to SatelliteEngine's
             # own up/down dome toggle (see its input()): unclaimed axis
             # (FlightEngine is not VERTICAL_BROWSE) reused for a whole-
@@ -7445,6 +8521,12 @@ class FlightEngine(Browsable, BigMomentSource):
         self._scroll_tick()
         self.route_scroll += 0.5   # same per-tick speed every other marquee in this project uses
         self.data = flights.FEED.get()
+        # Cheap cached read (weather.FEED is already running for any other
+        # mode reading it, e.g. ClockEngine -- reading it here adds no new
+        # I/O of its own) so the idle CLEAR SKIES screen can show real
+        # night stars, same real sunrise/sunset gate WeatherEngine's own
+        # ambient touch uses. Only ever used for that one honest signal.
+        self._sky_wx = weather.FEED.get()
         # DEAD RECKONING poll-boundary detection -- see
         # _update_dead_reckoning()'s own docstring. `age` (seconds since
         # flights.FEED's cached snapshot was actually fetched) increases
@@ -7680,22 +8762,40 @@ class FlightEngine(Browsable, BigMomentSource):
         fabricated to test (see this feature's own design note --
         flagged honestly, not worked around with a synthetic trigger).
 
-        One-shot per real ident PER SIGHTING: a squawk can legitimately
+        One-shot per real aircraft PER SIGHTING: a squawk can legitimately
         be re-set on a later refresh after clearing, so this tracks
-        which idents are CURRENTLY squawking, not an ever-growing seen
+        which aircraft are CURRENTLY squawking, not an ever-growing seen
         set -- an aircraft that squawks 7700 twice in one session on two
-        separate real emergencies should fire twice, not once."""
-        current = {ac["ident"] for ac in ac_list
-                  if ac.get("notable") and ac["notable"][1] == 5 and ac.get("ident")}
+        separate real emergencies should fire twice, not once.
+
+        Keyed by _sel_key() (hex preferred, ident fallback), NOT bare
+        `ident` -- a real audit fix (2026-08-11). Two problems with the
+        old `ac["ident"]` keying, both real: (1) `flights._ac_key()`'s
+        own docstring explicitly warns a callsign can theoretically
+        repeat across two different real aircraft, exactly why hex is
+        preferred everywhere else in this project (selection, dead
+        reckoning, trail, ATC hand-off); (2) the old set-builder also
+        REQUIRED a truthy `ident` to be included at all, which silently
+        excluded any real aircraft broadcasting hex but no callsign from
+        emergency-squawk detection entirely -- a real MAYDAY on such an
+        aircraft would never have fired this at all, not just risked a
+        collision."""
+        current = {self._sel_key(ac) for ac in ac_list
+                  if ac.get("notable") and ac["notable"][1] == 5 and self._sel_key(ac)}
         if self._seen_squawks is None:
             self._seen_squawks = current
             return
         new = current - self._seen_squawks
         self._seen_squawks = current
         if new:
-            ac = next(a for a in ac_list if a.get("ident") in new)
+            ac = next(a for a in ac_list if self._sel_key(a) in new)
             tag = ac["notable"][0]
-            self._set_big_moment(tag, ac["ident"],
+            # ac.get(), not ac["ident"] -- a real aircraft with hex but no
+            # broadcast callsign is exactly the case the _sel_key() fix
+            # above stopped excluding; the display line must degrade to
+            # the hex rather than KeyError on a genuinely missing ident.
+            label = ac.get("ident") or ac.get("hex") or "?"
+            self._set_big_moment(tag, label,
                                  flights._type_name(ac.get("type")) or "",
                                  (255, 70, 70), tier=TIER_TAKEOVER, system=SYSTEM_FLIGHTS)
 
@@ -7706,17 +8806,21 @@ class FlightEngine(Browsable, BigMomentSource):
         already got their own real-sample counts checked (6 rotorcraft,
         11 heavies out of 213) are deliberately NOT promoted here for
         exactly that reason -- they are common enough that an interrupt
-        would stop being special within days."""
-        current = {ac["ident"] for ac in ac_list
-                  if ac.get("notable") and ac["notable"][0] == "AIRSHIP" and ac.get("ident")}
+        would stop being special within days.
+
+        Keyed by _sel_key(), same real fix and same reasoning as
+        _detect_emergency_squawk() just above (2026-08-11 audit)."""
+        current = {self._sel_key(ac) for ac in ac_list
+                  if ac.get("notable") and ac["notable"][0] == "AIRSHIP" and self._sel_key(ac)}
         if self._seen_airships is None:
             self._seen_airships = current
             return
         new = current - self._seen_airships
         self._seen_airships = current
         if new:
-            ac = next(a for a in ac_list if a.get("ident") in new)
-            self._set_big_moment("AIRSHIP", ac["ident"],
+            ac = next(a for a in ac_list if self._sel_key(a) in new)
+            label = ac.get("ident") or ac.get("hex") or "?"
+            self._set_big_moment("AIRSHIP", label,
                                  flights._type_name(ac.get("type")) or "",
                                  (200, 170, 255), tier=TIER_INTERRUPT, system=SYSTEM_FLIGHTS)
 
@@ -7772,6 +8876,30 @@ class FlightEngine(Browsable, BigMomentSource):
     # render_audit before shipping.
     FLT_CX, FLT_CY, FLT_R = SCOPE_CX, 32, 26
 
+    # DECORATIVE BASE COLORS, dimmed 2026-08-10 -- real owner ask: soften
+    # the sweep, keep the coastline "clearly subordinate to aircraft".
+    # Both were previously drawn at draw_scope_sweep()'s/an inline
+    # literal's default brightness, the SAME brightness class as a
+    # routine aircraft icon -- decoration was visually competing with
+    # the actual subject instead of sitting behind it. Aircraft colors
+    # (SCOPE_CATEGORY_COLOR) all sit well above 150 in at least one
+    # channel; both of these are kept under 90 so "what's decoration"
+    # and "what's traffic" separate at a glance, not just in theory.
+    SWEEP_COLOR = (10, 68, 32)      # was the shared module default (18,120,58) -- ~55% dimmer
+    COASTLINE_COLOR = (16, 46, 64)  # was (26,78,108) -- ~40% dimmer
+
+    # CALM/BUSY DENSITY SCALING (2026-08-10) -- real owner ask: with only
+    # 1-2 aircraft up, the scope should feel calm, not sparse-and-noisy.
+    # A full-brightness sweep/coastline was previously identical whether
+    # 1 aircraft or 8 were being tracked, so a quiet sky still looked as
+    # "busy" as a full one. Scales the (already-dimmed) decorative
+    # colors down further as real aircraft count drops, floored so
+    # they never vanish outright (still real context, just quieter).
+    # This tunes EXISTING elements' brightness from a real fact (count),
+    # not a new visual system.
+    CALM_DENSITY_FLOOR = 0.55
+    CALM_DENSITY_AT = 4    # count at/above which decoration reaches full brightness
+
     def _frame_scope(self, aircraft):
         buf = blank()
         fill(buf, self.BG)
@@ -7780,6 +8908,8 @@ class FlightEngine(Browsable, BigMomentSource):
                     stale=bool(self.data.get("age") and self.data["age"] > 60))
 
         cx, cy, r = self.FLT_CX, self.FLT_CY, self.FLT_R
+        calm = max(self.CALM_DENSITY_FLOOR,
+                  min(1.0, len(aircraft) / float(self.CALM_DENSITY_AT)))
         draw_scope_rings(buf, [math.sqrt(nm / float(flights.RADIUS_NM))
                                for nm in self.SCOPE_RING_NM], cx=cx, cy=cy, radius=r)
 
@@ -7793,68 +8923,87 @@ class FlightEngine(Browsable, BigMomentSource):
         # Drawn as CONNECTED segments through the same bearing/distance ->
         # scope_xy() pipeline every other element uses, so it moves
         # correctly if the configured home ever changes -- not baked in
-        # as fixed pixels.
+        # as fixed pixels. Dimmed (COASTLINE_COLOR) and density-scaled
+        # (calm) so it stays clearly subordinate to real traffic.
         lat, lon, _lbl = satellite.FEED.get_location()
         pts = []
+        coast_col = rim(self.COASTLINE_COLOR, calm)
         for clat, clon in flights.COASTLINE:
             brg, nm = flights.bearing_distance(lat, lon, clat, clon)
             frac = self._scope_r_frac(nm)
             pts.append(scope_xy(brg, frac, cx=cx, cy=cy, radius=r) if frac is not None else None)
         for a, b in zip(pts, pts[1:]):
             if a is not None and b is not None:
-                draw_line(buf, a[0], a[1], b[0], b[1], (26, 78, 108))
+                draw_line(buf, a[0], a[1], b[0], b[1], coast_col)
 
         draw_scope_crosshair(buf, cx=cx, cy=cy, radius=r)
-        draw_scope_sweep(buf, self.sweep, cx=cx, cy=cy, radius=r)
+        # WINDOW CONE -- the real measured window (center/fov/max_nm from
+        # satellite.load_window()), drawn as a faint fan BEFORE the sweep
+        # and the aircraft so traffic paints over it. Same violet as the
+        # per-aircraft window ring, so "this sector is the window" and
+        # "this blip is in it" share a color. No caption: this scope
+        # already rejected instrument-panel labels twice.
+        win = flights.load_window()
+        if win:
+            wfrac = self._scope_r_frac(win.get("max_nm"))
+            if wfrac is not None:
+                draw_window_cone(buf, win["center_deg"], win["fov_deg"], wfrac,
+                                 rim(self.WINDOW_RING, 0.28),
+                                 cx=cx, cy=cy, radius=r)
+        draw_scope_sweep(buf, self.sweep, color=rim(self.SWEEP_COLOR, calm), cx=cx, cy=cy, radius=r)
 
-        # FEATURE 1 + 2/3: the currently SELECTED aircraft's real flown
-        # path, and a real route-bearing ray toward wherever it's real
-        # origin/destination airport actually is. Deliberately only the
-        # ONE selected aircraft, never all 8 -- this project already hit
-        # and fixed a real lag complaint from over-drawing this exact
-        # scope earlier this session (6 strokes -> 2 per aircraft icon);
-        # drawing every aircraft's trail every frame would reopen it.
-        # Both are context layers (same tier as the coastline/airport
-        # marker), drawn before the aircraft loop so the live icon paints
-        # over them, never the reverse.
+        # SELECTED-AIRCRAFT TRAIL ONLY (2026-08-10: route-bearing ray
+        # REMOVED, not just hidden). Real owner feedback against a
+        # rendered scene with a real screenshot: this scope's various
+        # context lines read as unlabeled "random lines", too much for a
+        # 64px screen to communicate at a glance. Auditing what each line
+        # actually contributes: the route-bearing ray toward the
+        # departure/arrival airport DUPLICATED information the dedicated
+        # VIEW_FLIGHT_PATH world-map view already shows more legibly
+        # (real city names, a proper equirectangular projection, no
+        # crowding from 7 other aircraft) -- removing it loses no real
+        # information, it just stops drawing the same fact twice in two
+        # places. The trail (recent real flown path) has no such
+        # duplicate anywhere else in the mode, so it stays -- still only
+        # for the ONE selected aircraft, never all 8 (this scope already
+        # hit and fixed a real lag complaint from over-drawing once
+        # before; drawing every aircraft's trail every frame would
+        # reopen it), still a context layer drawn before the aircraft
+        # loop so the live icon paints over it, never the reverse.
         if self.sel_key not in (None, self.AIRPORT_KEY):
             sel_ac = next((a for a in aircraft if self._sel_key(a) == self.sel_key), None)
             if sel_ac is not None:
-                # Trail: dim/muted version of the aircraft's own real
-                # altitude-band color -- reads as "history", stays
-                # visually secondary to the bright live icon.
+                # Dim/muted version of the aircraft's own real altitude-
+                # band color -- reads as "history", stays visually
+                # secondary to the bright live icon. Dimmed further
+                # 2026-08-10 (c//3 -> c//5, ~20% brightness) alongside
+                # the shortened TRAIL_MAX_POINTS above -- same "support,
+                # don't compete" direction.
                 trail_pts = self._trail_points_px(self.sel_key, cx, cy, r)
                 if len(trail_pts) >= 2:
                     base_col = self._alt_color(sel_ac.get("alt_ft"))
-                    trail_col = tuple(c // 3 for c in base_col)
+                    trail_col = tuple(c // 5 for c in base_col)
                     for (x0, y0), (x1, y1) in zip(trail_pts, trail_pts[1:]):
                         draw_line(buf, x0, y0, x1, y1, trail_col)
-                # Route-bearing ray(s): only when a real route resolved
-                # AND adsbdb gave real coordinates for the end(s) being
-                # drawn -- no route, no guessed ray, ever. "Departing
-                # means show where it's headed, arriving means show where
-                # it came from, transit shows both" -- the ray toward the
-                # end that ISN'T home is the informative one; a ray back
-                # to home when departing FROM home would be redundant.
-                route = sel_ac.get("route")
-                if route:
-                    status = self._route_status(route, self.airport)
-                    if status == "DEPARTING":
-                        ends = [("dest_lat", "dest_lon")]
-                    elif status == "ARRIVING":
-                        ends = [("origin_lat", "origin_lon")]
-                    else:
-                        ends = [("origin_lat", "origin_lon"), ("dest_lat", "dest_lon")]
-                    home_lat, home_lon, _hlbl = satellite.FEED.get_location()
-                    for lat_k, lon_k in ends:
-                        lat, lon = route.get(lat_k), route.get(lon_k)
-                        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
-                            brg, _nm = flights.bearing_distance(home_lat, home_lon, lat, lon)
-                            # Short ray, not a full rim-to-rim line -- a
-                            # handful of pixels of real bearing, cheap and
-                            # secondary to the live traffic it's context for.
-                            rx, ry = scope_xy(brg, 0.42, cx=cx, cy=cy, radius=r)
-                            draw_line(buf, cx, cy, rx, ry, (60, 110, 80))
+
+        # FORWARD HEADING TICK -- ADDED 2026-08-10, REMOVED 2026-08-11.
+        # Real, direct owner feedback on the actual live panel: "random
+        # purple and orange line, this is NOT logical" -- this tick was
+        # a second line radiating from the selected aircraft (in
+        # addition to the trail), and it recreated the EXACT confusing-
+        # crossing-lines problem the route-bearing ray was deliberately
+        # removed for earlier this same project (see "Flight radar full
+        # audit -- route-bearing ray removed as a real duplicate" in
+        # this doc's own history). The reasoning that shipped it
+        # (a real ATC vector-line convention) was real, but the
+        # execution failed the same "obvious in under a second" bar
+        # this scope holds everything else to -- a short dim line with
+        # no legend read as noise, not signal, to an actual owner
+        # looking at the actual panel. Removed outright, not hidden
+        # behind a flag: the trail alone (kept, real, and never flagged
+        # as confusing) already answers "which way has it been going",
+        # which covers the same real intent this tried to add without
+        # the same clutter cost.
 
         # Airport first, UNDER the aircraft: it is context, not traffic,
         # and a plane on final should never be hidden by the runway it is
@@ -7942,8 +9091,26 @@ class FlightEngine(Browsable, BigMomentSource):
                 glow = max(glow, WINDOW_GLOW_FLOOR)
             if is_favorite:
                 glow = max(glow, FAVORITE_GLOW_FLOOR)
+            # SIZE now steps through the SAME ordering as brightness,
+            # instead of one shared "big" tier for every reason an
+            # aircraft might stand out (2026-08-10 hierarchy pass).
+            # SELECTED is the single largest tier, above even a favorite
+            # -- "the one you picked right now" always visually wins,
+            # per the real owner ask that selection be unmistakable.
+            # ATC-matched keeps its own distinct color (self.ATC_MATCH)
+            # so it doesn't need extra size to stand out.
+            if sel:
+                icon_scale = self.SCALE_SELECTED
+            elif is_favorite:
+                icon_scale = self.SCALE_FAVORITE
+            elif in_window:
+                icon_scale = self.SCALE_WINDOW
+            elif ac.get("notable") or matched:
+                icon_scale = self.SCALE_NOTABLE
+            else:
+                icon_scale = self.SCALE_ROUTINE
             draw_scope_aircraft(buf, x, y, ac.get("track_deg"), kind, mark_col,
-                                glow=glow, big=(sel or matched or in_window or is_favorite))
+                                glow=glow, scale=icon_scale)
 
         draw_scope_home(buf, cx=cx, cy=cy)
         # Tried an alternating text legend ("<>=HOME +=MYR") same session,
@@ -7959,8 +9126,23 @@ class FlightEngine(Browsable, BigMomentSource):
         # flights.RADIUS_NM actually are), only the printed label
         # changes. One compact line, not "NM" appended, to leave the
         # bigger scope its full bottom margin.
-        mi_txt = "/".join(str(round(nm_to_mi(nm))) for nm in self.SCOPE_RING_NM) + "MI"
-        draw_text_centered(buf, 59, fit_text(mi_txt, WIDTH - 4), (70, 76, 92))
+        # HIDDEN while something's selected (2026-08-10) -- real owner
+        # ask: reduce competing secondary content while focused on one
+        # aircraft; the ring-distance legend is reference context for
+        # reading the WHOLE scope, not something a focused view needs.
+        # Dimmed further even when shown (was (70,76,92), a similar
+        # brightness class to a routine icon's off-sweep floor) so it
+        # reads as background reference, not a competing subject.
+        if self.sel_key is None:
+            if aircraft:
+                mi_txt = "/".join(str(round(nm_to_mi(nm))) for nm in self.SCOPE_RING_NM) + "MI"
+                draw_text_centered(buf, 59, fit_text(mi_txt, WIDTH - 4), (46, 50, 62))
+            else:
+                # Radar stays a radar when the sky is empty -- a dim
+                # CLEAR tag, not a different screen. The rings, coastline,
+                # window cone and sweep keep running so "nothing nearby"
+                # still looks like a live scope.
+                draw_text_centered(buf, 59, "CLEAR", (46, 50, 62))
         # TIER_FLASH -- drawn LAST, over whatever scope content sits in
         # its band. That's the intended tradeoff for a cheap, in-mode-
         # only notice (see draw_flash_banner()'s own docstring on why
@@ -8046,9 +9228,22 @@ class FlightEngine(Browsable, BigMomentSource):
 
     def ambient_weight(self):
         acs = self.data.get("aircraft") or []
-        if any((a.get("notable") or (None, 0))[1] >= 3 for a in acs):
-            return 2.5            # something genuinely unusual overhead
-        return 1.0 if acs else 0.5
+        weight = 2.5 if any((a.get("notable") or (None, 0))[1] >= 3 for a in acs) \
+            else (1.0 if acs else 0.5)
+        # FAVORITES DRIVING AMBIENT DWELL (2026-08-10): a small, RESTRAINED
+        # additive nudge, not a takeover -- same shape as the window-filter
+        # nudge a few sections up (satellite's own +0.25 "and it's out my
+        # window" bump on top of its quality tier). 0.3 sits well under
+        # the smallest real gap between the tiers just above (0.5, between
+        # "nothing" and "aircraft present"), so a favorite in range can
+        # never leapfrog a genuinely notable aircraft into a bigger tier --
+        # it only ever nudges within whichever tier is already earned.
+        # `is_favorite` is a real, already-computed field on every
+        # aircraft dict (flights._fetch_positions(), see FAVORITE_BOOST's
+        # own sort-side precedent) -- nothing new derived here.
+        if any(a.get("is_favorite") for a in acs):
+            weight += FAVORITE_AMBIENT_BOOST
+        return weight
 
 
     def _frame_unconfigured(self, buf):
@@ -8061,6 +9256,33 @@ class FlightEngine(Browsable, BigMomentSource):
     def _frame_idle(self):
         buf = blank()
         fill(buf, self.BG)
+        # Real night stars, same real sunrise/sunset gate WeatherEngine's
+        # own ambient touch uses -- reused, not a fabricated "plane flying
+        # by" animation. A decorative plane on the ONE screen that exists
+        # specifically to say "no aircraft nearby" would be exactly the
+        # kind of invented visual this project's own standing rule
+        # forbids -- the REAL version of "plane goes by, panel reacts" is
+        # PlaneWatchEngine, which already exists and only ever fires for a
+        # genuinely tracked aircraft. This only adds real-signal-gated sky
+        # texture to the wait, honestly labelled by what's actually true
+        # (it's nighttime) rather than by what isn't (a plane).
+        cond = (self._sky_wx or {}).get("conditions") or {}
+        text = str(cond.get("text") or "").upper()
+        raining = any(k in text for k in ("RAIN", "SHOWER", "STORM", "DRIZZLE"))
+        sr, ss = (self._sky_wx or {}).get("sunrise"), (self._sky_wx or {}).get("sunset")
+        now = time.time()
+        is_night = (isinstance(sr, (int, float)) and isinstance(ss, (int, float))
+                   and not (sr <= now <= ss))
+        if raining:
+            for i in range(9):
+                x = (i * 7 + 3) % WIDTH
+                y = (self.ticks * 2 + i * 11) % (HEIGHT - 12)
+                put_px(buf, x, y, (40, 60, 90))
+                put_px(buf, x, y + 1, (28, 44, 66))
+        elif is_night:
+            for i, (sx, sy) in enumerate(WeatherEngine.NIGHT_STARS):
+                if (self.ticks // 20 + i) % 5 != 0:
+                    put_px(buf, sx, sy, (55, 62, 85))
         msg = "CLEAR SKIES"
         draw_text3x5(buf, (WIDTH - (4 * len(msg) - 1)) // 2, 26, msg, self.INK_DIM)
         sub = "NO AIRCRAFT NEARBY" if not self.data.get("err") else "CONNECTION ERROR"
@@ -8395,7 +9617,10 @@ class FlightEngine(Browsable, BigMomentSource):
         instrument-panel text, and the window ring has stayed unlabelled
         for the same reason. Shape+colour carries it (hollow green =
         origin, solid coral = destination, white cross = the aircraft
-        right now)."""
+        right now, cyan = the real flown trail -- see draw_world_map()'s
+        own docstring for why it's a deliberately different colour from
+        the planned route's yellow: a real deviation should read as two
+        lines splitting apart, not one line changing shade)."""
         buf = blank()
         fill(buf, self.BG)
         ac = self._sel_aircraft() or {}
@@ -8404,7 +9629,28 @@ class FlightEngine(Browsable, BigMomentSource):
                     self.ROUTE, right_tag="PATH",
                     stale=(self.data.get("age") or 0) > 60)
 
-        drew = draw_world_map(buf, route, ac.get("lat"), ac.get("lon"))
+        # REAL FLOWN TRAIL (2026-08-11, direct owner ask: a real
+        # diversion -- weather, ATC, anything -- needs to be visually
+        # SEEN on this map, not just theoretically inferable). Reuses
+        # the SAME real trail the ground radar scope already accumulates
+        # (`self._trail`, sampled only on real polls -- see
+        # _update_trail()'s own docstring), converted from its local
+        # nm-plane to real lat/lon via flights.destination_point() run
+        # against the real configured home location. Zero new I/O and
+        # zero new sampling -- the same real observed positions, read
+        # through a different projection for a different view.
+        flown_trail = None
+        if self.sel_key not in (None, self.AIRPORT_KEY):
+            local_pts = self._trail.get(self.sel_key)
+            if local_pts and len(local_pts) >= 2:
+                home_lat, home_lon, _lbl = satellite.FEED.get_location()
+                flown_trail = []
+                for x_nm, y_nm in local_pts:
+                    dist_nm = math.hypot(x_nm, y_nm)
+                    brg = math.degrees(math.atan2(x_nm, y_nm)) % 360.0
+                    flown_trail.append(flights.destination_point(home_lat, home_lon, brg, dist_nm))
+
+        drew = draw_world_map(buf, route, ac.get("lat"), ac.get("lon"), flown_trail=flown_trail)
 
         rows = []
         origin, dest = route.get("origin"), route.get("dest")
@@ -8457,7 +9703,12 @@ class FlightEngine(Browsable, BigMomentSource):
 
         aircraft = self.data.get("aircraft") or []
         if not aircraft:
-            return self._frame_idle()
+            # Scope stays up when the sky is empty (rings / coastline /
+            # window / sweep). ATC log is the one other view that still
+            # has something real to show with no aircraft selected.
+            if self.view == self.VIEW_ATC_LOG:
+                return self._frame_atc_log()
+            return self._frame_scope([])
 
         if self.view == self.VIEW_SCOPE:
             return self._frame_scope(aircraft)
@@ -8811,13 +10062,15 @@ class FollowFlightEngine:
     framing anywhere on this card, on purpose -- the flight may not be
     anywhere near home.
 
-    Three real states, matching flights.FOLLOW_FEED.get()'s own
-    `airborne` tri-state exactly (None/False/True):
+    Four real states, matching flights.FOLLOW_FEED.get()'s own
+    `airborne` tri-state (None/False/True) plus an explicit error:
       - not configured  -> "NO FLIGHT SET" with instructions
-      - configured, not currently airborne -> honest "NOT CURRENTLY
-        AIRBORNE" state (adsb.lol's real, non-error "ac": [] result --
-        see flights.py's own FOLLOW_URL docstring) -- never a stale or
-        guessed position.
+      - configured, looking (airborne is None, no err) -> LOOKING
+      - configured, feed failed (airborne is None, err set) -> NO SIGNAL
+        -- a dead replica is NOT "not airborne"
+      - configured, not currently airborne (airborne is False -- every
+        replica that answered returned empty) -> honest "NOT CURRENTLY
+        AIRBORNE"
       - configured, airborne -> the real card: hero silhouette (same
         `draw_hero_silhouette()`/`FlightEngine._ac_kind()` every other
         hero moment in this project uses), altitude-band color (same
@@ -8848,14 +10101,13 @@ class FollowFlightEngine:
         pass
 
     def has_content(self):
-        # Force-reachable like any ordinary data mode (menu-selectable,
-        # a real button in arcade.html) -- unlike PlaneWatchEngine/
-        # NotifyEngine this is NOT force-triggered-only, so it follows
-        # the normal has_content() contract every glance mode uses.
-        # "Content" here means "a callsign is configured" -- even the
-        # honest NOT-AIRBORNE state is real, meaningful content to show
-        # (that's the whole point of the tri-state), not an empty mode.
-        return bool(self.data.get("configured"))
+        # Ambient only dwells on a flight that is actually in the air.
+        # "NOT AIRBORNE" / "LOOKING" are honest when you open this mode
+        # by hand -- they are not a 20s rotation slot.
+        return bool(self.data.get("configured") and self.data.get("airborne") is True)
+
+    def ambient_weight(self):
+        return 2.4 if self.has_content() else 0.5
 
     def input(self, cmd):
         # Nothing to browse -- one flight, one card. Left/right/up/down/
@@ -8893,17 +10145,27 @@ class FollowFlightEngine:
 
         title = fit_text(callsign or "FLIGHT", WIDTH - 20)
 
-        if not airborne:
-            # Real, honest "not currently airborne" state -- adsb.lol's
-            # genuine "ac": [] result for this callsign, never a stale or
-            # invented position (see flights.FOLLOW_URL's own docstring
-            # for why this is a real non-error outcome, not a bug).
-            draw_header(buf, title, self.NOT_AIRBORNE,
-                        stale=bool(self.data.get("err")))
-            draw_text_centered(buf, 24, "NOT CURRENTLY", self.NOT_AIRBORNE)
-            draw_text_centered(buf, 33, "AIRBORNE", self.NOT_AIRBORNE)
-            draw_text_centered(buf, 46, fit_text("STILL WATCHING", WIDTH - 4), self.INK_DIM)
-            draw_text_centered(buf, 54, fit_text("FOR THIS FLIGHT", WIDTH - 4), self.INK_DIM)
+        if airborne is not True:
+            # airborne False = every replica that answered said empty.
+            # airborne None (while configured) = still looking, or the
+            # feed failed -- a dead replica is NOT "not airborne".
+            err = self.data.get("err")
+            if airborne is False:
+                draw_header(buf, title, self.NOT_AIRBORNE)
+                draw_text_centered(buf, 24, "NOT CURRENTLY", self.NOT_AIRBORNE)
+                draw_text_centered(buf, 33, "AIRBORNE", self.NOT_AIRBORNE)
+                draw_text_centered(buf, 46, fit_text("STILL WATCHING", WIDTH - 4), self.INK_DIM)
+                draw_text_centered(buf, 54, fit_text("FOR THIS FLIGHT", WIDTH - 4), self.INK_DIM)
+            elif err:
+                draw_header(buf, title, self.INK, stale=True)
+                draw_text_centered(buf, 24, "NO SIGNAL", self.INK)
+                draw_text_centered(buf, 33, "FROM FEED", self.INK_DIM)
+                draw_text_centered(buf, 46, fit_text(str(err).upper(), WIDTH - 4), self.INK_DIM)
+                draw_text_centered(buf, 54, fit_text("STILL WATCHING", WIDTH - 4), self.INK_DIM)
+            else:
+                draw_header(buf, title, self.ACCENT)
+                draw_text_centered(buf, 26, "LOOKING", self.INK)
+                draw_text_centered(buf, 36, "FOR THIS FLIGHT", self.INK_DIM)
             return bytes(buf)
 
         # Airborne: the real card. Vertical budget, checked to not
@@ -9027,6 +10289,9 @@ class DepartureBoardEngine(Browsable):
         # now", distinguished in frame(), never conflated).
         return bool(self.airport) and bool(self.rows)
 
+    def ambient_weight(self):
+        return 1.8 if self.has_content() else 0.5
+
     def _step(self, direction):
         pages = max(1, -(-len(self.rows) // self.ROWS_PER_PAGE))
         self.page = (self.page + direction) % pages
@@ -9142,33 +10407,58 @@ class NowPlayingEngine:
     on whether Last.fm resolved anything, since these are two
     independent real signals and one being honestly absent must never
     hide the other.
+
+    `mic_only` (nowplaying.py's config toggle) skips the Last.fm side
+    entirely and shows a plain full-height equalizer off the same real
+    FFT data -- for anyone who wants the mic visualizer without setting
+    up a Last.fm account at all.
     """
 
     name = "nowplaying"
-    tick_rate = 0.1
+    tick_rate = 0.05
 
     BG = (0, 0, 0)
     INK = (150, 160, 185)
     INK_DIM = (70, 76, 92)
     ACCENT = (255, 90, 200)          # magenta -- distinct from every other mode's accent
     BAR_COLOR = (90, 220, 255)       # cool cyan, reads as "signal" not "text"
+    AMBIENT_STYLE = "iris_open"
 
     def __init__(self):
         self.score = 0
-        self.data = {"configured": False, "playing": None, "track": None,
-                     "age": None, "err": None}
+        self.data = {"configured": False, "mic_only": False, "playing": None,
+                     "track": None, "age": None, "err": None}
         self.pulse = Pulse()
         self.scroll = 0.0
+        self._fft_smooth = [0.0] * 16
+        self._fft_peaks = [0.0] * 16
 
     def reset(self):
-        pass
+        self._fft_smooth = [0.0] * 16
+        self._fft_peaks = [0.0] * 16
 
     def has_content(self):
-        # Ordinary glance mode, not force-triggered -- "content" means a
-        # Last.fm account is configured, same as FollowFlightEngine's own
-        # has_content() reasoning: even the honest NOTHING-PLAYING state
-        # is real, meaningful content to show.
-        return bool(self.data.get("configured"))
+        # Ambient / music-steal only dwell on a NAMED track. A live
+        # mic equalizer with no Last.fm identity is a visualizer you
+        # open by hand -- sitting the rotation on nameless bars was
+        # the mic_only vs steal collision (EQ without a song name).
+        t = self.data.get("track") or {}
+        return bool(self.data.get("playing") and t.get("track"))
+
+    def ambient_weight(self):
+        return 2.2 if self.has_content() else 0.5
+
+    def track_key(self):
+        """Identity of the current scrobble, or None. Ambient uses this
+        to steal the rotation when a new track starts -- not when the
+        same song is still playing."""
+        if not self.data.get("playing"):
+            return None
+        t = self.data.get("track") or {}
+        name, artist = t.get("track"), t.get("artist")
+        if not name:
+            return None
+        return (name, artist)
 
     def input(self, cmd):
         pass       # nothing to browse -- one track, one card
@@ -9182,13 +10472,87 @@ class NowPlayingEngine:
         self.pulse.note((t.get("track"), t.get("artist")) if t else None)
         self.scroll += 0.6
 
+    @staticmethod
+    def _band_color(i, n, peak=False):
+        """Warm lows -> cool highs. Real frequency order from the 16-band
+        FFT, not a decorative rainbow. Peak flash lifts toward white."""
+        t = i / float(max(1, n - 1))
+        col = (int(255 * (1 - t) + 80 * t),
+               int(130 * (1 - t) + 220 * t),
+               int(50 * (1 - t) + 255 * t))
+        if peak:
+            return tuple(min(255, c + 70) for c in col)
+        return col
+
+    def _draw_fft_bars(self, buf, y0, y1, color):
+        """REAL live visualizer -- the panel's own mic, via WLED-MM's own
+        on-device 16-band FFT (audio_sync.py), not synthesized. Only
+        drawn while real packets are actually arriving (not `stale`) --
+        an idle/silent bar row would be worse than no row, the same
+        "never invent a visual" rule backgrounds.py's own WLED-effect
+        capture already follows. Shared by the track view's small bar
+        row and the mic-only equalizer's full-height one.
+
+        Peak-hold ticks and per-band color are derived from the SAME
+        real fft[] / samplePeak fields -- no invented spectrum."""
+        a = audio_sync.FEED.get()
+        if a.get("stale"):
+            return
+        fft = a.get("fft") or []
+        n = len(fft)
+        if n == 0:
+            return
+        if len(self._fft_smooth) != n:
+            self._fft_smooth = [0.0] * n
+            self._fft_peaks = [0.0] * n
+        bar_h = y1 - y0
+        bw = WIDTH / n
+        peaked = bool(a.get("peak"))
+        for i, level in enumerate(fft):
+            v = max(0.0, min(1.0, (level if isinstance(level, (int, float)) else 0) / 255.0))
+            self._fft_smooth[i] = self._fft_smooth[i] * 0.55 + v * 0.45
+            if v > self._fft_peaks[i]:
+                self._fft_peaks[i] = v
+            else:
+                self._fft_peaks[i] = max(0.0, self._fft_peaks[i] - 0.028)
+            h = max(1, int(self._fft_smooth[i] * bar_h))
+            x0 = int(i * bw)
+            x1 = int((i + 1) * bw) - 1
+            col = self._band_color(i, n, peak=peaked)
+            for x in range(x0, max(x0, x1) + 1):
+                for y in range(y1 - h, y1):
+                    # Slight vertical fade so the bar reads as energy
+                    # rising, not a flat brick.
+                    fade = 0.45 + 0.55 * ((y1 - y) / float(max(1, h)))
+                    put_px(buf, x, y, tuple(int(c * fade) for c in col))
+            ph = int(self._fft_peaks[i] * bar_h)
+            if ph > 1:
+                py = y1 - ph
+                tick = rim(col, 1.0)
+                for x in range(x0, max(x0, x1) + 1):
+                    put_px(buf, x, py, tick)
+
     def frame(self):
         buf = blank()
         fill(buf, self.BG)
 
         configured = self.data.get("configured")
+        mic_only = self.data.get("mic_only")
         playing = self.data.get("playing")
         track = self.data.get("track")
+
+        if mic_only and not (playing and track and track.get("track")):
+            # Plain equalizer only when there is no real scrobble to
+            # name. If Last.fm resolved a track, fall through and put
+            # the name on the EQ -- mic_only must not hide identity.
+            a = audio_sync.FEED.get()
+            draw_header(buf, "EQUALIZER", self.BAR_COLOR, stale=bool(a.get("stale")))
+            if a.get("stale"):
+                draw_text_centered(buf, 28, "NO AUDIO SIGNAL", self.INK_DIM)
+                draw_text_centered(buf, 36, "FROM PANEL MIC", self.INK_DIM)
+            else:
+                self._draw_fft_bars(buf, 10, HEIGHT - 2, self.BAR_COLOR)
+            return bytes(buf)
 
         if not configured:
             draw_header(buf, "NOW PLAYING", self.ACCENT)
@@ -9223,25 +10587,7 @@ class NowPlayingEngine:
         if album:
             draw_text_centered(buf, 29, fit_text(album, WIDTH - 4), self.INK_DIM)
 
-        # REAL live visualizer -- the panel's own mic, via WLED-MM's own
-        # on-device 16-band FFT (audio_sync.py), not synthesized. Only
-        # drawn while real packets are actually arriving (not `stale`) --
-        # an idle/silent bar row would be worse than no row, the same
-        # "never invent a visual" rule backgrounds.py's own WLED-effect
-        # capture already follows.
-        a = audio_sync.FEED.get()
-        if not a.get("stale"):
-            bar_y0, bar_y1 = 38, 58
-            bar_h = bar_y1 - bar_y0
-            n = len(a["fft"])
-            bw = WIDTH / n
-            for i, level in enumerate(a["fft"]):
-                h = max(1, int((level / 255.0) * bar_h))
-                x0 = int(i * bw)
-                x1 = int((i + 1) * bw) - 1
-                for x in range(x0, max(x0, x1) + 1):
-                    for y in range(bar_y1 - h, bar_y1):
-                        put_px(buf, x, y, self.BAR_COLOR)
+        self._draw_fft_bars(buf, 38, 58, self.BAR_COLOR)
         return bytes(buf)
 
 
@@ -9500,21 +10846,22 @@ class PlaneWatchEngine:
         if ac is None:
             return bytes(buf)
 
-        # BACKDROP (2026-08-08 refresh): this takeover shipped with a flat
-        # black background, the one thing every genuine TIER_TAKEOVER-class
-        # event elsewhere in this project already has (see
-        # CELEBRATION_BACKDROPS / _backdrop_flights). Reused here rather
-        # than invented -- same radar-sweep wedge the flights celebration
-        # already uses, tinted RING (violet) instead of an altitude color:
-        # this event fired BECAUSE of the window, so the backdrop itself
-        # is the piece that visually says "window", freeing the
-        # silhouette's own color to keep meaning "kind of traffic" (see
-        # ALT_BANDS below) instead of overloading one color with two
-        # meanings. Only one aircraft draws per frame here (same
-        # reasoning the sports celebration's own cost note already
-        # makes), so the backdrop's ~500 put_px cost is the same
-        # already-proven-safe budget, not a new one.
-        _backdrop_flights(buf, self.ticks, self.RING)
+        # BACKDROP -- DIMMED 2026-08-10 (real "make it feel like a
+        # discovery, not a data screen" ask, framed against the London
+        # digital-billboard "what plane is that" moment: the emotional
+        # beat is the plane appearing, not the backdrop performing).
+        # Originally drawn at full RING brightness -- the flights
+        # celebration's sweep wedge, at 7deg/tick, over 2x the already-
+        # dimmed 3deg/tick idle scope sweep -- which meant the busiest,
+        # fastest-moving thing on this whole card was the decoration
+        # BEHIND the hero, not the hero itself. Same "decoration must
+        # stay subordinate to the subject" principle just applied to the
+        # main radar scope, applied here a second time: still the same
+        # shared _backdrop_flights() language (this event fired BECAUSE
+        # of the window, so a violet-tinted wedge still correctly says
+        # "window"), just at roughly half brightness so the silhouette
+        # is unmistakably the thing to look at.
+        _backdrop_flights(buf, self.ticks, rim(self.RING, 0.5))
 
         kind = FlightEngine._ac_kind(ac)
         col = FlightEngine._alt_color(ac.get("alt_ft"))
@@ -9562,15 +10909,26 @@ class PlaneWatchEngine:
         if typ:
             draw_text_centered(buf, 54, fit_text(typ, WIDTH - 4), FlightEngine.INK)
 
-        dist_nm = ac.get("dist_nm")
-        alt_ft = ac.get("alt_ft")
-        parts = []
-        if isinstance(dist_nm, (int, float)):
-            parts.append(f"{nm_to_mi(dist_nm):.0f}MI")
-        if isinstance(alt_ft, (int, float)):
-            parts.append(f"{alt_ft:.0f}FT")
-        if parts:
-            draw_text_centered(buf, 59, fit_text(" ".join(parts), WIDTH - 4), FlightEngine.INK_DIM)
+        # ONE meaningful fact, not a raw dist+alt data pair (2026-08-10 --
+        # real ask: "flight identity + one or two perfect facts... not a
+        # data dump"). Real distance/altitude are still one press away on
+        # the DETAIL card this hands off to; this screen's whole job is
+        # the moment of "that's the plane", and the real Hangar fact --
+        # first time ever seen, or the Nth time -- is the more emotional,
+        # story-shaped answer to "why does this matter" than a raw number
+        # pair. It's also the SAME fact the post-dismissal DETAIL card
+        # leads with (FIRST SIGHTING / SEEN NX), so the takeover and its
+        # own handoff now say the same real thing instead of two
+        # different ones -- "you just saw it" here, "here's its story"
+        # there, continuous rather than a jump to new information.
+        if entry:
+            times = entry.get("times_seen") or 1
+            story = "FIRST SIGHTING" if times <= 1 else f"SEEN {times}X"
+            draw_text_centered(buf, 59, fit_text(story, WIDTH - 4), self.RING)
+        else:
+            dist_nm = ac.get("dist_nm")
+            if isinstance(dist_nm, (int, float)):
+                draw_text_centered(buf, 59, f"{nm_to_mi(dist_nm):.0f}MI AWAY", FlightEngine.INK_DIM)
 
         # Position within the batch, only when there's more than one --
         # a small, honest "there's more" signal, same spirit as
@@ -9634,6 +10992,7 @@ class SportsEngine(Browsable, BigMomentSource):
     BASE_OFF = (46, 50, 62)
     OUT_ON = (255, 90, 80)
     OUT_OFF = (46, 50, 62)
+    BASES_LOADED_GLOW = (255, 60, 40)   # urgent red -- distinct from BASE_ON's gold, so the sustained state reads as tension, not just "runners on"
 
     LEAGUE_COLOR = {
         "NFL": (255, 90, 120), "NBA": (255, 140, 40),
@@ -9654,9 +11013,47 @@ class SportsEngine(Browsable, BigMomentSource):
         self.score = 0
         self.reset()
 
+    def _apply_skin(self):
+        """Read the active skin (skins.py) and shadow this instance's own
+        chrome-color CLASS attributes with instance attributes -- Python
+        attribute lookup finds the instance one first, so every existing
+        `self.INK`/`self.LIVE`/etc. read elsewhere in this class picks up
+        the skin with ZERO call-site changes. Cheap local file read
+        (cached on mtime by skins.py itself, same cost class as
+        dnd.is_enabled()) -- called from reset() (mode entry) and tick()
+        (so a skin change from the control panel applies live, without
+        needing to leave and re-enter sports mode).
+
+        ONLY chrome colors are ever overridden here (see skins.py's own
+        module docstring for the full reasoning) -- BASE_ON/OUT_ON/
+        LEAGUE_COLOR/SPORT_ACCENT/team colors/BASES_LOADED_GLOW are
+        deliberately NOT in this list. Those are real, meaningful,
+        data-driven colors (a real team's ESPN color, a real base-loaded
+        urgency signal) -- a skin restyles the FRAME around the data,
+        never the data's own real color."""
+        skin = skins.get_active()
+        self.INK = skin["ink"]
+        self.INK_DIM = skin["ink_dim"]
+        self.WIN = skin["win"]
+        self.LOSE = skin["lose"]
+        self.LIVE = skin["live"]
+        self.STALE = skin["stale"]
+        self.HERO_INK = skin["hero_ink"]
+
     def reset(self):
+        self._apply_skin()
         self.data = {"games": [], "favorite": None, "favorite_game": None,
-                    "win_prob": None, "age": None, "err": None}
+                    "favorite_next": None,
+                    "win_prob": None, "age": None, "err": None,
+                    "standings": {}}
+        # Standings cursor: league then group. Seeded to the favorite's
+        # own group on first data (identity, not a list index). Manual
+        # left/right sets _stand_nav so a later poll does not yank the
+        # viewer back.
+        self._stand_lg_i = 0
+        self._stand_grp_i = 0
+        self._stand_nav = False
+        self._stand_sig = None
         # PANELS, not a fixed view index. `view` used to be 0=PINNED /
         # 1=TICKER, where slot 0 was CONTESTED: the favourite team and the
         # pinned golfer both wanted it, and whichever lost silently became
@@ -9758,6 +11155,61 @@ class SportsEngine(Browsable, BigMomentSource):
         # game, so these detectors match its pace instead of inventing a
         # separate one.
         self._detector_last_poll = {}
+        # Real pitcher/batter matchup stats for the ONE baseball game
+        # currently expanded, keyed by event id (so browsing to another
+        # game can never show the previous game's pitcher). Filled by
+        # _refresh_matchup(); see that method for the scope reasoning.
+        self._matchup = {}
+
+    def _want_summary_ev(self, ev):
+        if not ev:
+            return
+        eid = ev.get("id") or ev.get("event_id")
+        lg = ev.get("league")
+        if eid and lg:
+            sports.FEED.want_summary(lg, eid, ev.get("sport"))
+
+    def _request_summaries(self):
+        """Tell the feed worker which ONE-GAME summaries to keep warm.
+        Never fetches. The worker hits SUMMARY_URL off this thread."""
+        fg = self.data.get("favorite_game")
+        if fg and fg.get("state") == "in":
+            self._want_summary_ev(fg)
+        if self.detail:
+            ev = next((e for e in self.universal if e.get("id") == self.detail), None)
+            if ev and (ev.get("live") or ev.get("state") == "post"):
+                self._want_summary_ev(ev)
+        cur = self._current_event()
+        if cur and cur.get("live"):
+            self._want_summary_ev(cur)
+        # Stamp last soccer goal / MMA rounds onto any event we already
+        # have a bundle for, so MAIN can draw them with no extra lookup.
+        for ev in self.universal:
+            bun = sports.FEED.get_summary(ev.get("id"))
+            if not bun:
+                continue
+            if bun.get("last_goal"):
+                ev["last_goal"] = bun["last_goal"]
+            if bun.get("total_rounds"):
+                ev["total_rounds"] = bun["total_rounds"]
+            if bun.get("current_round") and not ev.get("period"):
+                ev["period"] = bun["current_round"]
+            if bun.get("atbat_pitches"):
+                ev["atbat_pitches"] = bun["atbat_pitches"]
+            if bun.get("line_score"):
+                ev["line_score"] = bun["line_score"]
+
+    def _refresh_matchup(self):
+        """Read the cached pitcher-vs-batter bundle. ZERO I/O -- the
+        feed worker already fetched this summary because tick() called
+        want_summary() for the expanded game."""
+        ev_id = self.detail
+        if not ev_id:
+            self._matchup = {}
+            return
+        bun = sports.FEED.get_summary(ev_id)
+        m = bun.get("matchup") if bun else None
+        self._matchup = {ev_id: m} if m else {}
 
     def _detector_due(self, key):
         """True at most once per sports.WINPROB_REFRESH seconds for a given
@@ -9776,8 +11228,82 @@ class SportsEngine(Browsable, BigMomentSource):
     def has_content(self):
         """Anything on anywhere -- the universal feed covers every sport
         ESPN is featuring, so this is only empty when genuinely nothing is
-        happening, not merely when the configured leagues are off-season."""
-        return bool(self.universal or self.data.get("games"))
+        happening, not merely when the configured leagues are off-season.
+        Standings still count in the off-season: the table exists even
+        when no game is on today. A pinned next-game is content.
+        An empty ticker ("NO GAMES") is not -- ambient must skip it."""
+        if self.universal or self.data.get("games") or self._has_standings():
+            return True
+        if self.data.get("favorite_game"):
+            return True
+        if self.data.get("favorite") and self.data.get("favorite_next"):
+            return True
+        return False
+
+    def ambient_ready(self):
+        """AUTO will dwell on a game, not the off-season table.
+
+        Standings are real content when you open sports by hand. They
+        are not a reason for the director to leave the sky. Live games,
+        today's slate, and a pinned next-game are."""
+        if self.favorite_live():
+            return True
+        if any(ev.get("live") or ev.get("state") == "in"
+               for ev in (self.universal or [])):
+            return True
+        if self.data.get("favorite_game"):
+            return True
+        if self.data.get("games"):
+            return True
+        if self.data.get("favorite") and self.data.get("favorite_next"):
+            return True
+        return False
+
+    def adopt_live_detail(self, prefer_favorite=True):
+        """Point ucur+detail at a live game so ambient shows DETAIL.
+
+        Favorite live game wins. Otherwise keep the current live DETAIL
+        if it is still live, else the first live universal event.
+        Returns True when a live game is now on DETAIL (or the pinned
+        team panel, if the favorite is live but not in the universal
+        list). Returns False when nothing is live -- DETAIL is cleared
+        so we never sit on a finished game's expanded view.
+        """
+        live_idx = [i for i, e in enumerate(self.universal)
+                    if e.get("live") or e.get("state") == "in"]
+        target = None
+        fg = self.data.get("favorite_game") if prefer_favorite else None
+        if fg and fg.get("state") == "in":
+            eid = fg.get("event_id") or fg.get("id")
+            if eid:
+                hit = next((i for i in live_idx
+                            if self.universal[i].get("id") == eid), None)
+                if hit is not None:
+                    target = hit
+                else:
+                    # Favorite is live but ESPN's header slate does not
+                    # have it -- pinned MAIN is the honest card, not a
+                    # guessed DETAIL.
+                    self.detail = None
+                    if self.PANEL_TEAM in self.panels:
+                        self.panel_i = self.panels.index(self.PANEL_TEAM)
+                    return True
+        if target is None and live_idx:
+            if self.detail:
+                stay = next((i for i in live_idx
+                             if self.universal[i].get("id") == self.detail), None)
+                target = stay if stay is not None else live_idx[0]
+            else:
+                target = live_idx[0]
+        if target is None:
+            if self.detail is not None:
+                self.detail = None
+            return False
+        self.ucur = target
+        ev = self.universal[target]
+        self.detail = ev.get("id")
+        self._want_summary_ev(ev)
+        return True
 
     # pop_big_moment()/_set_big_moment() now come from BigMomentSource --
     # see that class for the shared contract every system uses. Sports
@@ -9789,20 +11315,26 @@ class SportsEngine(Browsable, BigMomentSource):
     PANEL_TEAM = "team"
     PANEL_GOLF = "golf"
     PANEL_TENNIS = "tennis"
+    PANEL_STANDINGS = "standings"
     PANEL_EVENTS = "events"
 
     def _build_panels(self):
         """Every panel with real data behind it, in a stable order.
 
         Order is deliberate: the things you explicitly PINNED come before
-        the general rotation, because you asked for them by name."""
+        the general rotation, because you asked for them by name.
+        Standings sit after the pinned panels and before the events
+        ticker so a favorite/golfer/tennis pin still leads."""
         p = []
-        if self.data.get("favorite_game"):
+        if self.data.get("favorite_game") or (
+                self.data.get("favorite") and self.data.get("favorite_next")):
             p.append(self.PANEL_TEAM)
         if self.golf_pinned:
             p.append(self.PANEL_GOLF)
         if self.tennis_pinned:
             p.append(self.PANEL_TENNIS)
+        if self._has_standings():
+            p.append(self.PANEL_STANDINGS)
         if self.universal:
             p.append(self.PANEL_EVENTS)
         return p
@@ -9811,6 +11343,137 @@ class SportsEngine(Browsable, BigMomentSource):
         if not self.panels:
             return None
         return self.panels[self.panel_i % len(self.panels)]
+
+    STAND_ROW0 = 10
+    STAND_STRIDE = 6
+    STAND_ROWS = 8          # y=10..52; last legal 3x5 row is y=59
+
+    def _has_standings(self):
+        st = (self.data or {}).get("standings") or {}
+        for parsed in st.values():
+            for g in (parsed or {}).get("groups") or []:
+                if g.get("rows"):
+                    return True
+        return False
+
+    def _standings_league_ids(self):
+        """Leagues that actually have a table, MLB/NHL/NBA first."""
+        st = (self.data or {}).get("standings") or {}
+        out = []
+        for lg in sports.STANDINGS_LEAGUES:
+            parsed = st.get(lg) or {}
+            if any(g.get("rows") for g in (parsed.get("groups") or [])):
+                out.append(lg)
+        for lg, parsed in st.items():
+            if lg not in out and any(
+                    g.get("rows") for g in ((parsed or {}).get("groups") or [])):
+                out.append(lg)
+        return out
+
+    def _standings_groups_for(self, league):
+        parsed = ((self.data or {}).get("standings") or {}).get(league) or {}
+        return [g for g in (parsed.get("groups") or []) if g.get("rows")]
+
+    def _is_standings_favorite(self, league, row):
+        """Favorite by identity (league + abbr), never a list index."""
+        fav = (self.data or {}).get("favorite") or {}
+        abbr = (row or {}).get("abbr")
+        return bool(fav and league and abbr
+                    and fav.get("league") == league
+                    and fav.get("team_abbr") == abbr)
+
+    def _sync_standings_cursor(self):
+        """Clamp indices; default to the favorite's group until the
+        viewer has walked left/right themselves."""
+        leagues = self._standings_league_ids()
+        sig = tuple(
+            (lg, tuple(g.get("name") or "" for g in self._standings_groups_for(lg)))
+            for lg in leagues)
+        if sig != self._stand_sig:
+            keep_nav = self._stand_nav and self._stand_sig is not None
+            self._stand_sig = sig
+            if not keep_nav:
+                self._stand_nav = False
+        if not leagues:
+            self._stand_lg_i = 0
+            self._stand_grp_i = 0
+            return None, None
+        if not self._stand_nav:
+            self._stand_goto_favorite(leagues)
+        self._stand_lg_i %= len(leagues)
+        groups = self._standings_groups_for(leagues[self._stand_lg_i])
+        if not groups:
+            self._stand_grp_i = 0
+            return leagues[self._stand_lg_i], None
+        self._stand_grp_i %= len(groups)
+        return leagues[self._stand_lg_i], groups[self._stand_grp_i]
+
+    def _stand_goto_favorite(self, leagues):
+        fav = (self.data or {}).get("favorite") or {}
+        want_lg = fav.get("league")
+        want_abbr = fav.get("team_abbr")
+        if not want_lg or not want_abbr:
+            self._stand_lg_i = 0
+            self._stand_grp_i = 0
+            return
+        for li, lg in enumerate(leagues):
+            if lg != want_lg:
+                continue
+            for gi, g in enumerate(self._standings_groups_for(lg)):
+                if any(r.get("abbr") == want_abbr for r in (g.get("rows") or [])):
+                    self._stand_lg_i = li
+                    self._stand_grp_i = gi
+                    return
+        self._stand_lg_i = 0
+        self._stand_grp_i = 0
+
+    def _step_standings(self, direction):
+        """LEFT/RIGHT: next group, then next league. Only called while
+        the standings panel is showing -- see _step."""
+        leagues = self._standings_league_ids()
+        if not leagues:
+            return
+        self._stand_nav = True
+        self._stand_lg_i %= len(leagues)
+        groups = self._standings_groups_for(leagues[self._stand_lg_i])
+        n = len(groups) or 1
+        nxt = self._stand_grp_i + int(direction)
+        if nxt < 0:
+            self._stand_lg_i = (self._stand_lg_i - 1) % len(leagues)
+            groups = self._standings_groups_for(leagues[self._stand_lg_i])
+            self._stand_grp_i = max(0, len(groups) - 1)
+        elif nxt >= n:
+            self._stand_lg_i = (self._stand_lg_i + 1) % len(leagues)
+            self._stand_grp_i = 0
+        else:
+            self._stand_grp_i = nxt
+        self.hold = 0
+
+    def _standings_window(self, league, rows):
+        """At most STAND_ROWS rows, scrolled so a favorite below the
+        fold is still visible. Window is computed from the favorite's
+        real index in `rows`, never from a guessed rank."""
+        rows = list(rows or [])
+        if len(rows) <= self.STAND_ROWS:
+            return rows
+        fav_i = next((i for i, r in enumerate(rows)
+                      if self._is_standings_favorite(league, r)), None)
+        start = 0
+        if fav_i is not None and fav_i >= self.STAND_ROWS:
+            start = fav_i - (self.STAND_ROWS - 1)
+        if start + self.STAND_ROWS > len(rows):
+            start = max(0, len(rows) - self.STAND_ROWS)
+        return rows[start:start + self.STAND_ROWS]
+
+    def _standings_record(self, row):
+        """'72-48' or '50-22-7' from keys ESPN actually sent. Incomplete
+        records are omitted rather than padded with a guessed 0."""
+        if "wins" not in row or "losses" not in row:
+            return ""
+        rec = f"{row['wins']}-{row['losses']}"
+        if "otl" in row:
+            rec += f"-{row['otl']}"
+        return rec
 
     # ---- league grouping (the vertical axis) -----------------------------
     def _league_key(self, ev):
@@ -9837,7 +11500,13 @@ class SportsEngine(Browsable, BigMomentSource):
 
         Wraps inside the league rather than spilling into the next one --
         the two axes stay independent, so moving sideways never silently
-        changes which league you are in."""
+        changes which league you are in.
+
+        On the standings panel this walks groups, then leagues -- it
+        must not steal events browsing when that panel is not showing."""
+        if self._panel() == self.PANEL_STANDINGS:
+            self._step_standings(direction)
+            return
         if not self.universal:
             return
         key = self._current_league()
@@ -9856,6 +11525,8 @@ class SportsEngine(Browsable, BigMomentSource):
         Lands on a live game if the league has one, else its first -- so
         arriving in a league shows you something happening rather than
         whichever fixture happens to be first."""
+        if self._panel() == self.PANEL_STANDINGS:
+            return
         if not self.universal:
             return
         order = self._league_order()
@@ -9903,6 +11574,9 @@ class SportsEngine(Browsable, BigMomentSource):
         return self.universal[self.ucur % len(self.universal)]
 
     def input(self, cmd):
+        # Standings left/right is handled in _step (Browsable routes
+        # tap/hold there) so press() and input() share one path and
+        # events left/right is not stolen when this panel is not up.
         if self._browse_input(cmd):
             return
         # SELECT-TO-EXPAND. `rotate` is the select button on this hardware
@@ -9938,6 +11612,7 @@ class SportsEngine(Browsable, BigMomentSource):
     def tick(self):
         self.ticks += 1
         self._scroll_tick()
+        self._apply_skin()      # cheap cached-mtime read; live-updates a skin change
         self.data = sports.FEED.get()
         u = sports.FEED.get_universal()
         self.universal = u.get("events") or []
@@ -9980,6 +11655,8 @@ class SportsEngine(Browsable, BigMomentSource):
                 g = by_id.get(ev.get("id"))
                 if g and g.get("situation"):
                     ev["situation"] = g["situation"]
+        self._request_summaries()
+        self._refresh_matchup()
         # Stay on the ticker when PINNED has nothing real to draw: either
         # no favorite is configured at all, or one is but that team has no
         # game today. The second case was previously missed, so with a
@@ -10122,6 +11799,9 @@ class SportsEngine(Browsable, BigMomentSource):
         fav = self.data.get("favorite") or {}
 
         if not fg:
+            nxt = self.data.get("favorite_next")
+            if nxt:
+                return self._frame_next(nxt)
             sub = f"NO {fav.get('team_abbr','')} GAME TODAY".strip()
             return self._frame_empty("PINNED TEAM", self._fit(sub, WIDTH - 4) or "NO GAME TODAY")
 
@@ -10194,6 +11874,53 @@ class SportsEngine(Browsable, BigMomentSource):
                 put_px(buf, bx0 + fill_w, by + dy, (235, 240, 255))
         return bytes(buf)
 
+    def _frame_next(self, g):
+        """Off-day next-game board. Not live: no diamond, no win%, no score."""
+        buf = blank()
+        fill(buf, self.BG)
+        lg_col = self.LEAGUE_COLOR.get(g.get("league"), self.INK_DIM)
+        draw_header(buf, g.get("league") or "", lg_col, right_tag="NEXT",
+                    icon=LEAGUE_ICON.get(g.get("league")))
+
+        away, home = g.get("away") or {}, g.get("home") or {}
+        a_abbr = away.get("abbr") or ""
+        h_abbr = home.get("abbr") or ""
+        two = (a_abbr and h_abbr
+               and text_w(a_abbr, 2) <= WIDTH - 10
+               and text_w(h_abbr, 2) <= WIDTH - 10)
+        if two:
+            for i, team in enumerate((away, home)):
+                abbr = team.get("abbr") or ""
+                row_y = 12 + i * 16
+                bar_col = team.get("color") or self.INK_DIM
+                for by in range(10):
+                    put_px(buf, 1, row_y + by, bar_col)
+                    put_px(buf, 2, row_y + by, bar_col)
+                draw_text_centered(buf, row_y, abbr, self.INK, scale=2)
+            draw_text_centered(buf, 23, "@", self.INK_DIM)
+            y = 40
+        else:
+            line = f"{a_abbr} @ {h_abbr}".strip(" @")
+            sc = 2 if line and text_w(line, 2) <= WIDTH - 6 else 1
+            draw_text_centered(buf, 16, fit_text(line, WIDTH - 6, sc),
+                               self.INK, scale=sc)
+            y = 32
+
+        when = g.get("when") or ""
+        if when:
+            draw_text_centered(buf, y, fit_text(when, WIDTH - 4), self.HERO_INK)
+            y += 8
+        ar, hr = away.get("record"), home.get("record")
+        if ar and hr:
+            draw_text_centered(buf, y, fit_text(f"{ar} / {hr}", WIDTH - 4),
+                               (110, 118, 140))
+            y += 8
+        sn = g.get("short_name") or ""
+        shown = f"{a_abbr} @ {h_abbr}" if a_abbr and h_abbr else ""
+        if sn and y <= 54 and (two or sn != shown):
+            draw_text_centered(buf, 54, fit_text(sn, WIDTH - 4), self.INK_DIM)
+        return bytes(buf)
+
     def _frame_ticker(self):
         games = self.data.get("games") or []
         if not games:
@@ -10233,11 +11960,39 @@ class SportsEngine(Browsable, BigMomentSource):
 
     AMBIENT_STYLE = "wipe_right"    # scoreboard wipe
 
+    def favorite_live(self):
+        """True when a favorite -- the pinned team's own game, or any
+        match surviving the favorite-teams ticker filter -- is genuinely
+        live right now. Pulled out of ambient_weight() so AmbientEngine's
+        own sticky-recall check (2026-08-10) can ask the same real
+        question without re-deriving it a second way."""
+        fav_game = self.data.get("favorite_game")
+        fav_live = bool(fav_game and fav_game.get("state") == "in")
+        if not fav_live:
+            _, filter_enabled = sports.FEED.get_favorite_teams()
+            if filter_enabled and any(ev.get("live") for ev in self.universal):
+                fav_live = True
+        return fav_live
+
     def ambient_weight(self):
+        # Weight the board the viewer actually sees (universal), not
+        # just configured-league slates -- a live golf/UFC night with
+        # NFL off-season is not an empty sports mode.
+        live = any(ev.get("live") or ev.get("state") == "in"
+                   for ev in (self.universal or []))
         games = self.data.get("games") or []
-        if any(g.get("state") == "in" for g in games):
-            return 3.0            # a live game is the most "happening" thing here
-        return 1.0 if games else 0.5
+        weight = 3.0 if live \
+            else (1.0 if (self.universal or games or self._has_standings())
+                  else 0.5)
+        # FAVORITES DRIVING AMBIENT DWELL (2026-08-10): same restrained,
+        # additive-only shape as FlightEngine's own version just above --
+        # 0.3, well under the smallest real tier gap here (0.5, between
+        # "no games today" and "games exist"), so a favorite can only ever
+        # nudge within its earned tier, never leapfrog a genuinely live
+        # game into the top tier on its own.
+        if self.favorite_live():
+            weight += FAVORITE_AMBIENT_BOOST
+        return weight
 
 
     # ---- universal ticker + expanded detail -----------------------------
@@ -10410,11 +12165,58 @@ class SportsEngine(Browsable, BigMomentSource):
         draw_divider(buf, 44)
         draw_text_centered(buf, 47, fit_text(line, WIDTH - 6),
                            self.LIVE if ev["live"] else self.INK_DIM)
-        if ev.get("class_label"):
-            draw_text_centered(buf, 56, fit_text(ev["class_label"], WIDTH - 6), self.INK_DIM)
-        elif ev.get("series"):
-            draw_text_centered(buf, 56, fit_text(ev["series"], WIDTH - 6), self.INK_DIM)
+        # ODDS (2026-08-10, reversed from this project's earlier
+        # "betting stays off" default -- see sports._parse_odds()'s own
+        # docstring). Only one footer row is available here, so odds
+        # take priority over class_label/series before the game starts
+        # -- a spread only matters pre-tip/pre-kickoff, and once live the
+        # game's own state (score, clock) is already the more useful
+        # fact for that slot.
+        field, text = self._footer_pick(ev)
+        if text:
+            col = self.STALE if field == "odds" else self.INK_DIM
+            draw_text_centered(buf, 56, fit_text(text, WIDTH - 6), col)
         return bytes(buf)
+
+    def _footer_odds_text(self, ev):
+        """Spread OR over/under, never both concatenated -- an early
+        draft combined them into one line and the panel's own WIDTH-6
+        budget silently dropped the over/under NUMBER (fit_text drops
+        whole trailing words), leaving a meaningless bare "O/U" on
+        screen. Caught on a synthetic render before shipping; spread
+        wins when both are real, since "who's favored by how much" is
+        the more universally useful single fact for this one-line slot.
+        Odds only ever apply pre-game -- once live, the game's own state
+        (score, clock) is the more useful fact for that slot."""
+        if ev["live"]:
+            return None
+        odds = ev.get("odds")
+        if not odds:
+            return None
+        if odds.get("spread"):
+            return odds["spread"]
+        if odds.get("over_under") is not None:
+            return f"O/U {odds['over_under']:g}"
+        return None
+
+    def _footer_pick(self, ev):
+        """Walk the OWNER-CONFIGURED priority order (layout.py,
+        2026-08-10 Tier-3 pilot -- "a way to reorder which field wins
+        this slot without editing engines.py") and return the (field,
+        text) of the first one with real content. Same real fields this
+        seam already chose between, just config-driven order instead of
+        a hardcoded odds > class_label > series > venue chain."""
+        getters = {
+            "odds": lambda: self._footer_odds_text(ev),
+            "class_label": lambda: ev.get("class_label"),
+            "series": lambda: ev.get("series"),
+            "venue": lambda: ev.get("venue"),
+        }
+        for field in layout.get_footer_priority():
+            text = getters[field]()
+            if text:
+                return field, text
+        return None, None
 
     def _frame_golf_pinned(self):
         """The pinned player, given the panel.
@@ -10556,12 +12358,18 @@ class SportsEngine(Browsable, BigMomentSource):
 
         line = self._tennis_set_line(comps[:2]) if len(comps) >= 2 else ""
         y += 2
+        if self._tennis_is_deciding(ev):
+            draw_leverage_glow(buf, 2, y - 1, WIDTH - 2, y + 16,
+                               (230, 220, 90), self.scroll * 0.35)
         if line:
             draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.HERO_INK, x_min=3)
             y += 7
         elif ev.get("state") == "pre":
             draw_text_centered(buf, y, "NOT STARTED", self.INK_DIM, x_min=3)
             y += 7
+        if any(c.get("sets") for c in comps[:2]) or ev.get("best_of") in (3, 5):
+            draw_tennis_set_pips(buf, y, comps[:2], best_of=ev.get("best_of"))
+            y += 10
 
         foot = ev.get("detail") or ev.get("name") or ""
         draw_text_centered(buf, min(max(y, 48), 56), fit_text(foot, WIDTH - 8),
@@ -10577,12 +12385,15 @@ class SportsEngine(Browsable, BigMomentSource):
     def _draw_scoreline(self, buf, ev, y, accent):
         """Two team rows with real colours, abbreviation and score. Shared
         by the team-sport renderers so they stay visually consistent with
-        each other even while their live-state areas differ."""
+        each other even while their live-state areas differ. Possession
+        (when ESPN sent a real tag) widens that team's colour rail."""
+        poss = (ev.get("situation") or {}).get("possession")
         for i, c in enumerate(ev["competitors"][:2]):
             row = y + i * 12
             bar = c.get("color") or self.INK_DIM
+            wide = 3 if _comp_matches_tag(c, poss) else 2
             for by in range(10):
-                for bx in (1, 2):
+                for bx in range(1, 1 + wide):
                     put_px(buf, bx, row + by, bar)
             sc = c.get("score")
             sc_txt = "" if sc is None else str(sc)
@@ -10606,6 +12417,22 @@ class SportsEngine(Browsable, BigMomentSource):
           * count  -- NOT in the header at all. Comes from the per-league
             scoreboard's `situation`, joined by event id in tick().
         Anything missing is simply not drawn.
+
+        BASES-LOADED SUSTAINED GLOW (2026-08-10, sflems/cfl-led-scoreboard's
+        own redzone-glow precedent -- "lit for the duration of the real
+        state, not a one-shot flash"). Deliberately the ONLY sustained-glow
+        state built this pass: it is the one real, always-derivable
+        "something is tense right now" fact in this whole renderer table --
+        `onFirst`/`onSecond`/`onThird` all truthy needs no new field and no
+        guess. Football's redzone and hockey's power-play were considered
+        for the same treatment and explicitly NOT built (see the FOOTBALL/
+        BASKETBALL section above): neither ESPN payload this project has
+        actually inspected carries a confirmed field for either, and
+        inventing one would be exactly what this project's "never invent"
+        rule exists to prevent. This is a second, complementary grammar to
+        the existing one-shot `Pulse` scoring flash, not a replacement --
+        `Pulse` still marks "a score just happened", this marks "a
+        high-leverage state IS true right now".
         """
         accent = self._sport_accent(ev)
         pos, total = self._league_position(ev)
@@ -10629,6 +12456,11 @@ class SportsEngine(Browsable, BigMomentSource):
                 draw_text3x5(buf, x, 40, str(inning), self.LIVE)
                 x += text_w(str(inning)) + 4
 
+            bases = ev.get("bases")
+            loaded = bool(bases) and len(bases) >= 3 and all(bases[:3])
+            if loaded:
+                draw_leverage_glow(buf, x - 2, 33, x + 11, 49,
+                                   self.BASES_LOADED_GLOW, self.scroll * 0.3)
             draw_diamond(buf, x, 39, ev.get("bases"))
             x += 9
             outs = ev.get("outs")
@@ -10691,6 +12523,7 @@ class SportsEngine(Browsable, BigMomentSource):
         # point of the view. The record is the thing that can afford its
         # own dimmer line.
         y = 25
+        live = ev["live"]
         for i, c in enumerate(ev["competitors"][:2]):
             won = c.get("winner")
             col = self.WIN if won else (self.INK if ev["state"] == "post" else self.HERO_INK)
@@ -10703,9 +12536,13 @@ class SportsEngine(Browsable, BigMomentSource):
                     for dx in range(2):
                         put_px(buf, 2 + dx, y + 1 + dy, self.WIN)
             rec = c.get("record")
-            if rec:
+            # Live: drop records so the round ticks have a row. Pre/post
+            # keep them -- they are the stakes / the result's context.
+            if rec and not live:
                 draw_text3x5(buf, 8, y + 6, rec, self.INK_DIM)
-            y += 13
+                y += 13
+            else:
+                y += 7
             if i == 0:
                 draw_text_centered(buf, y, "VS", color_on_dark(accent))
                 y += 8
@@ -10716,9 +12553,20 @@ class SportsEngine(Browsable, BigMomentSource):
             line = f"R{rnd}  {clk}"
         else:
             line = ev.get("detail") or ""
-        if line:
-            draw_text_centered(buf, 58, fit_text(line, WIDTH - 6),
-                               self.LIVE if ev["live"] else self.INK)
+        current, total = self._mma_round_pair(ev)
+        if ev["live"]:
+            draw_leverage_glow(buf, 2, 50, WIDTH - 2, 63,
+                               (255, 180, 40), self.scroll * 0.3)
+            if clk:
+                draw_text_centered(buf, 50, fit_text(str(clk), WIDTH - 6), self.LIVE)
+            draw_round_ticks(buf, WIDTH // 2, 57, current, total,
+                             pulse=0.75 + 0.25 * math.sin(self.scroll * 0.3))
+        elif current or ev.get("total_rounds"):
+            draw_round_ticks(buf, WIDTH // 2, 52, current, total)
+            if line:
+                draw_text_centered(buf, 58, fit_text(line, WIDTH - 6), self.INK)
+        elif line:
+            draw_text_centered(buf, 58, fit_text(line, WIDTH - 6), self.INK)
 
     def _render_soccer(self, buf, ev):
         """Soccer. Three things a football scoreboard has that a generic
@@ -10784,9 +12632,17 @@ class SportsEngine(Browsable, BigMomentSource):
                 y += 11
         else:
             clock = ev.get("clock") or ""
+            tight = ev["live"] and self._soccer_is_tight_late(ev)
+            if tight:
+                draw_leverage_glow(buf, 2, y - 1, WIDTH - 2, min(HEIGHT - 1, y + 14),
+                                   (255, 200, 40), self.scroll * 0.35)
             if clock:
                 draw_text_centered(buf, y, fit_text(clock, WIDTH - 6),
                                    self.LIVE if ev["live"] else self.INK_DIM)
+                y += 7
+            scorer = self._last_goal_label(ev.get("last_goal"))
+            if scorer and y + 5 <= HEIGHT:
+                draw_text_centered(buf, y, fit_person(scorer, WIDTH - 6), self.INK)
                 y += 7
             detail = ev.get("detail") or ""
             if detail and detail != clock and y + 5 <= HEIGHT:
@@ -10835,7 +12691,7 @@ class SportsEngine(Browsable, BigMomentSource):
         self._draw_league_rail(buf, ev)
 
         comps = ev["competitors"]
-        rows = 6
+        rows = 5
         for i, c in enumerate(comps[:rows]):
             y = 10 + i * 8
             pos_txt = str(c.get("place") or i + 1)
@@ -10853,6 +12709,12 @@ class SportsEngine(Browsable, BigMomentSource):
             draw_text3x5(buf, WIDTH - 2 - text_w(sc), y,
                          sc, self.WIN if str(sc).startswith("-") else self.INK)
 
+        current, total = self._golf_round_pair(ev)
+        if total:
+            draw_round_ticks(buf, WIDTH // 2, 51, current, total,
+                             on_col=(140, 230, 120),
+                             pulse=0.75 + 0.25 * math.sin(self.scroll * 0.3)
+                             if ev["live"] else 1.0)
         leader_thru = comps[0].get("thru") if comps else None
         foot = f"THRU {leader_thru}" if leader_thru else (ev.get("detail") or "")
         # y=59 is the LAST row that fits a scale=1 glyph (5px tall on a
@@ -10885,21 +12747,37 @@ class SportsEngine(Browsable, BigMomentSource):
         y = 10
         for c in comps:
             col = self.WIN if c.get("winner") else self.HERO_INK
-            draw_text3x5(buf, 4, y, fit_person(c.get("abbr") or c.get("full") or "", WIDTH - 8), col)
+            name = c.get("abbr") or c.get("full") or ""
+            tag = c.get("seed") if isinstance(c.get("seed"), int) else c.get("rank")
+            if isinstance(tag, int) and tag >= 1:
+                prefix = f"{tag} "
+                draw_text3x5(buf, 4, y, prefix, self.INK_DIM)
+                draw_text3x5(buf, 4 + text_w(prefix), y,
+                             fit_person(name, WIDTH - 8 - text_w(prefix)), col)
+            else:
+                draw_text3x5(buf, 4, y, fit_person(name, WIDTH - 8), col)
             y += 7
         y += 2
 
         # Set-by-set score, own line, scale 1 -- never scale 2 (see
         # docstring above and CLAUDE.md's own layout rule on this exact
         # sport). Real data only: an unplayed set is simply absent, never
-        # a guessed "0-0".
+        # a guessed "0-0". Pips sit under the line -- winner of each
+        # completed set, empty slots only when best_of is real.
         line = self._tennis_set_line(comps)
+        deciding = self._tennis_is_deciding(ev)
+        if deciding:
+            draw_leverage_glow(buf, 2, y - 1, WIDTH - 2, y + 16,
+                               (230, 220, 90), self.scroll * 0.35)
         if line:
             draw_text_centered(buf, y, fit_text(line, WIDTH - 6), self.INK)
             y += 7
         elif ev["state"] == "pre":
             draw_text_centered(buf, y, "NOT STARTED", self.INK_DIM)
             y += 7
+        if any(c.get("sets") for c in comps) or ev.get("best_of") in (3, 5):
+            draw_tennis_set_pips(buf, y, comps, best_of=ev.get("best_of"))
+            y += 10
 
         # The DRAW (Men's/Women's Singles or Doubles) -- real structure a
         # generic renderer would have had no room for.
@@ -10948,24 +12826,46 @@ class SportsEngine(Browsable, BigMomentSource):
         self._draw_scoreline(buf, ev, 11, accent)
 
         draw_divider(buf, 36)
-        y = 40
+        y = 39
+        sit = ev.get("situation") or {}
         if ev["live"]:
             period, clock = ev.get("period"), ev.get("clock") or ""
             line = f"Q{period} {clock}".strip() if period else clock
-            if line:
-                draw_text_centered(buf, y, fit_text(line, WIDTH - 6), self.LIVE)
-                y += 7
             dd = situation_line(ev)
-            if dd:
-                draw_text_centered(buf, y, fit_text(dd, WIDTH - 6), self.INK)
-                y += 7
+            # Drive strip -- turf + optional real yard-line ball + redzone
+            # glow. Text sits ON the strip so the field is the subject,
+            # same way the diamond is baseball's subject.
+            if y <= HEIGHT - 16:
+                draw_football_drive_strip(
+                    buf, 3, y, WIDTH - 5, y + 13,
+                    yard_line=sit.get("yard_line"),
+                    redzone=bool(sit.get("is_redzone")),
+                    phase=self.scroll * 0.3)
+                if line:
+                    draw_text_centered(buf, y + 1, fit_text(line, WIDTH - 8),
+                                       self.LIVE)
+                if dd:
+                    draw_text_centered(buf, y + 7, fit_text(dd, WIDTH - 8),
+                                       FIELD_YARD_LINE)
+                y += 14
+            else:
+                if line:
+                    draw_text_centered(buf, y, fit_text(line, WIDTH - 6), self.LIVE)
+                    y += 7
+                if dd:
+                    draw_text_centered(buf, y, fit_text(dd, WIDTH - 6), self.INK)
+                    y += 7
+            y = self._draw_timeout_pips(buf, ev, y)
+            y = self._draw_last_play(buf, ev, y)
         else:
             draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 6),
                                self.INK_DIM)
             y += 7
 
-        # Records when the live-state rows leave room -- same "series,
-        # else records" fallback baseball's main row already established.
+        # Last play is the live story. Records/broadcast only fill the
+        # leftover row when there isn't one.
+        if ev["live"] and (ev.get("situation") or {}).get("last_play"):
+            return
         foot = ev.get("series") or ""
         if not foot:
             recs = [c.get("record") for c in ev["competitors"][:2] if c.get("record")]
@@ -11010,17 +12910,311 @@ class SportsEngine(Browsable, BigMomentSource):
 
         draw_divider(buf, 36)
         y = 40
+        sit = ev.get("situation") or {}
+        clutch = ev["live"] and self._board_is_clutch(ev)
+        if clutch:
+            draw_leverage_glow(buf, 2, y - 2, WIDTH - 2, y + 12,
+                               (255, 140, 40), self.scroll * 0.35)
         if ev["live"]:
             period, clock = ev.get("period"), ev.get("clock") or ""
             line = f"Q{period} {clock}".strip() if period else clock
+            if sit.get("bonus") is True:
+                line = f"{line} BONUS".strip() if line else "BONUS"
             if line:
                 draw_text_centered(buf, y, fit_text(line, WIDTH - 6), self.LIVE)
                 y += 7
+            y = self._draw_timeout_pips(buf, ev, y)
         else:
             draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 6),
                                self.INK_DIM)
             y += 7
 
+        foot = ev.get("series") or ""
+        if not foot:
+            recs = [c.get("record") for c in ev["competitors"][:2] if c.get("record")]
+            foot = " / ".join(recs) if len(recs) == 2 else ""
+        if foot and y <= HEIGHT - 5:
+            draw_text_centered(buf, y, fit_text(foot, WIDTH - 6), self.INK_DIM)
+            y += 7
+        bc = ev.get("broadcast")
+        if bc and y <= HEIGHT - 5:
+            draw_text_centered(buf, y, fit_text(bc, WIDTH - 6), self.INK_DIM)
+
+    @staticmethod
+    def _clock_seconds(clock):
+        """Parse ESPN displayClock ('1:04' or '64.0') to seconds, or None."""
+        if not clock:
+            return None
+        s = str(clock).strip()
+        try:
+            if ":" in s:
+                m, sec = s.split(":", 1)
+                return int(m) * 60 + float(sec)
+            return float(s)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _soccer_minute(clock):
+        """Regulation-ish minute from ESPN's soccer clock, or None.
+
+        Real forms already on the event: `87'`, `90'+4'`. Digits are
+        summed so stoppage is 90+4=94. First-half `45'+2'` is 47 and
+        correctly fails the 85'+ late-game test. Unparseable (`HT`,
+        `FT`) returns None -- no glow from a guessed minute.
+        """
+        if not clock:
+            return None
+        s = str(clock).replace("'", " ").replace("+", " ").strip()
+        nums = []
+        for part in s.split():
+            try:
+                nums.append(int(part))
+            except ValueError:
+                continue
+        return sum(nums) if nums else None
+
+    def _soccer_is_tight_late(self, ev):
+        """85th minute or later AND a one-goal (or level) game.
+
+        Minute comes from the real ESPN clock; scores from the real
+        competitor scores. Same honesty as basketball clutch: derived
+        only from fields already on the event, never from a guessed
+        'isClutch' flag ESPN does not send.
+        """
+        if not ev.get("live"):
+            return False
+        minute = self._soccer_minute(ev.get("clock") or "")
+        if minute is None or minute < 85:
+            return False
+        scores = []
+        for c in (ev.get("competitors") or [])[:2]:
+            try:
+                scores.append(int(c.get("score")))
+            except (TypeError, ValueError):
+                return False
+        return len(scores) == 2 and abs(scores[0] - scores[1]) <= 1
+
+    @staticmethod
+    def _last_goal_label(goal):
+        """Surname of the last real scorer, or None.
+
+        Own-goals / shootouts were already filtered in sports.py.
+        A missing scorer name is a missing line -- never parsed out
+        of free text.
+        """
+        if not isinstance(goal, dict):
+            return None
+        scorer = goal.get("scorer")
+        name = scorer.get("name") if isinstance(scorer, dict) else None
+        if not name:
+            return None
+        parts = str(name).split()
+        return parts[-1] if parts else None
+
+    def _mma_card_fight(self, ev):
+        """Match this header fight to mma.FEED's card, or None. Zero I/O."""
+        if ev.get("sport") != "mma":
+            return None
+        card = (mma.FEED.get() or {}).get("card")
+        if not card:
+            return None
+        names = set()
+        for c in ev.get("competitors") or []:
+            for k in ("full", "abbr"):
+                v = (c.get(k) or "").strip().upper()
+                if v:
+                    names.add(v)
+                    names.add(v.split()[-1])
+        if not names:
+            return None
+        for fight in card.get("fights") or []:
+            fnames = set()
+            for x in fight.get("fighters") or []:
+                for k in ("full", "name"):
+                    v = (x.get(k) or "").strip().upper()
+                    if v:
+                        fnames.add(v)
+                        fnames.add(v.split()[-1])
+            if names & fnames:
+                return fight
+        return None
+
+    def _mma_round_pair(self, ev):
+        """(current, total) for draw_round_ticks.
+
+        Prefers real fields: header `period`, summary `total_rounds`,
+        then mma.FEED's verified `format.regulation.periods`. If
+        scheduled length is still unknown, main-event (match 1 + MAIN)
+        is 5 and everything else is 3 -- the same convention
+        draw_round_ticks documents and mma.py observed on real cards.
+        A real period larger than that wins so a round is never hidden.
+        """
+        current = ev.get("period")
+        if not isinstance(current, int) or current < 1:
+            current = None
+        total = ev.get("total_rounds")
+        if not isinstance(total, int) or total < 1:
+            total = None
+        fight = self._mma_card_fight(ev)
+        if fight:
+            r = fight.get("rounds")
+            if total is None and isinstance(r, int) and 1 <= r <= 5:
+                total = r
+            if current is None:
+                p = fight.get("period") or fight.get("final_round")
+                if isinstance(p, int) and p >= 1:
+                    current = p
+        if total is None:
+            num, seg = ev.get("match_number"), (ev.get("card_segment") or "")
+            total = 5 if (num == 1 and str(seg).startswith("MAIN")) else 3
+        if current and current > total:
+            total = min(current, 5)
+        return current or 0, max(1, min(int(total), 5))
+
+    def _golf_round_pair(self, ev):
+        """(current, total) golf rounds from real fields only.
+
+        current is the event period. total is format.regulation.periods
+        when ESPN sent it, else grown to fit the real current round --
+        never a guessed 4-round Open.
+        """
+        current = ev.get("period")
+        if not isinstance(current, int) or current < 1:
+            current = None
+        total = ev.get("total_rounds")
+        if not isinstance(total, int) or total < 1:
+            total = current
+        if current and total and current > total:
+            total = current
+        if not total:
+            return 0, 0
+        return current or 0, max(1, min(int(total), 6))
+
+    def _tennis_sets_won(self, comps):
+        """Completed-set wins (a, b) from real set lists, or (None, None)."""
+        if len(comps) < 2:
+            return None, None
+        a, b = (comps[0].get("sets") or []), (comps[1].get("sets") or [])
+        n = min(len(a), len(b))
+        if n <= 0:
+            return None, None
+        wa = wb = 0
+        for i in range(n):
+            sa, sb = a[i], b[i]
+            done = i < n - 1 or bool(sa.get("winner") or sb.get("winner"))
+            if not done:
+                continue
+            try:
+                ga, gb = int(sa["games"]), int(sb["games"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if sa.get("winner") or ga > gb:
+                wa += 1
+            elif sb.get("winner") or gb > ga:
+                wb += 1
+        return wa, wb
+
+    def _tennis_is_deciding(self, ev):
+        """Live match in the set that can end it (1-1 of 3, 2-2 of 5)."""
+        if not ev.get("live"):
+            return False
+        best = ev.get("best_of")
+        if best not in (3, 5):
+            return False
+        wa, wb = self._tennis_sets_won(ev.get("competitors") or [])
+        if wa is None:
+            return False
+        need = best // 2
+        return wa == need and wb == need
+
+    def _draw_last_play(self, buf, ev, y):
+        """Last-play tape from a real ESPN lastPlay, or y unchanged."""
+        text = (ev.get("situation") or {}).get("last_play")
+        if not text or y > HEIGHT - 5:
+            return y
+        if text_w(text) <= WIDTH - 6:
+            draw_text_centered(buf, y, text, self.INK)
+        else:
+            draw_marquee(buf, y, text, self.INK, self.scroll)
+        return y + 7
+
+    def _draw_timeout_pips(self, buf, ev, y):
+        """Home/away timeout dots from real ESPN ints, or y unchanged."""
+        sit = ev.get("situation") or {}
+        ht, at = sit.get("home_timeouts"), sit.get("away_timeouts")
+        if not (isinstance(ht, int) and isinstance(at, int) and y <= HEIGHT - 6):
+            return y
+        draw_text3x5(buf, 4, y, "T" + ("." * min(ht, 3)), self.INK_DIM)
+        tag = "T" + ("." * min(at, 3))
+        draw_text3x5(buf, WIDTH - 4 - text_w(tag), y, tag, self.INK_DIM)
+        return y + 6
+
+    def _board_is_clutch(self, ev):
+        """Last period (or OT) + <=2:00 + one-possession game.
+
+        Derived from fields already on the event (period, clock, scores)
+        -- the same facts the clutch detector uses, so the MAIN board
+        can glow without a second data path. League convention: NBA
+        quarters (4), NCAAB halves (2). OT is period > that."""
+        period = ev.get("period")
+        if not isinstance(period, int):
+            return False
+        last = 2 if (ev.get("league") == "NCAAB") else 4
+        if period < last:
+            return False
+        secs = self._clock_seconds(ev.get("clock") or "")
+        if secs is None or secs > 120:
+            return False
+        scores = []
+        for c in (ev.get("competitors") or [])[:2]:
+            try:
+                scores.append(int(c.get("score")))
+            except (TypeError, ValueError):
+                return False
+        return len(scores) == 2 and abs(scores[0] - scores[1]) <= 5
+
+    def _render_hockey(self, buf, ev):
+        """NHL MAIN -- was generic. Period, clock, and a real strength
+        badge when ESPN sends one. Power-play glow uses a confirmed
+        bool only; no guessed PP from score+clock."""
+        accent = self._sport_accent(ev)
+        pos, total = self._league_position(ev)
+        draw_header(buf, ev["league_name"] or "HOCKEY", accent,
+                    right_tag=f"{pos}/{total}",
+                    stale=bool(self.data.get("age") and self.data["age"] > 300),
+                    icon=SPORT_ICONS.get(ev.get("sport")))
+        self._draw_league_rail(buf, ev)
+        self._draw_scoreline(buf, ev, 11, accent)
+
+        draw_divider(buf, 36)
+        y = 39
+        sit = ev.get("situation") or {}
+        pp = bool(sit.get("power_play"))
+        if ev["live"] and pp:
+            draw_leverage_glow(buf, 2, y - 1, WIDTH - 2, y + 16,
+                               (80, 160, 255), self.scroll * 0.3)
+        if ev["live"]:
+            period, clock = ev.get("period"), ev.get("clock") or ""
+            line = f"P{period} {clock}".strip() if period else clock
+            if line:
+                draw_text_centered(buf, y, fit_text(line, WIDTH - 6), self.LIVE)
+                y += 7
+            tag = sit.get("strength")
+            if pp and not tag:
+                tag = "PP"
+            if tag:
+                draw_text_centered(buf, y, fit_text(tag, WIDTH - 6),
+                                   (180, 210, 255))
+                y += 7
+            y = self._draw_last_play(buf, ev, y)
+        else:
+            draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 6),
+                               self.INK_DIM)
+            y += 7
+
+        if ev["live"] and sit.get("last_play"):
+            return
         foot = ev.get("series") or ""
         if not foot:
             recs = [c.get("record") for c in ev["competitors"][:2] if c.get("record")]
@@ -11043,6 +13237,7 @@ class SportsEngine(Browsable, BigMomentSource):
         "tennis": _render_tennis,
         "football": _render_football,
         "basketball": _render_basketball,
+        "hockey": _render_hockey,
     }
 
     # ---- per-sport EXPANDED-detail dispatch -------------------------------
@@ -11139,6 +13334,51 @@ class SportsEngine(Browsable, BigMomentSource):
                 pass
 
 
+    @staticmethod
+    def _play_sort_key(play):
+        """Chronological sort key for a real ESPN play id -- numeric
+        when the id is purely digits (the common real case), string
+        fallback otherwise. Real bug fixed here 2026-08-11: `max(...,
+        key=lambda h: h["id"])` picked the "newest" play by raw STRING
+        comparison, which is wrong the moment two real ids differ in
+        digit width (e.g. "...9" sorts after "...10" as a string)."""
+        pid = play["id"]
+        try:
+            return (0, int(pid))
+        except (TypeError, ValueError):
+            return (1, pid)
+
+    def _advance_seen_plays(self, seen, plays):
+        """Shared one-shot adopt-then-diff logic for all four
+        id-keyed big-moment detectors (home run/touchdown/goal/clutch).
+        Returns (newest_new_play_or_None, updated_seen_set).
+
+        Real bug fixed here 2026-08-11: the original per-detector code
+        unconditionally set `self._seen_X = ids` (every currently-known
+        id, including every OTHER real new play this same call didn't
+        fire for) the instant it computed `new_ids`. Detectors are
+        throttled to one fetch per ~20s (_detector_due); if two real
+        scoring plays landed in that same window, only the chronologically
+        newest ever fired -- and because the other new id was already
+        marked seen in the same breath, it could NEVER fire, a real event
+        silently and permanently lost rather than merely delayed.
+
+        Fixed by only adding the play actually reported as newest to the
+        seen set, leaving any other genuinely-new-but-unfired play id OUT
+        of it. Real plays only ever accumulate (ESPN's play-by-play list
+        never shrinks), so that other id stays in `new_ids` on the VERY
+        NEXT poll and fires then instead -- delayed by one throttle
+        interval, never dropped. First-ever read (seen is None) still
+        adopts everything currently present without firing, unchanged."""
+        ids = {p["id"] for p in plays}
+        if seen is None:
+            return None, ids                      # first read: adopt, don't replay
+        new_ids = ids - seen
+        if not new_ids:
+            return None, seen                      # nothing new; seen already correct
+        newest = max((p for p in plays if p["id"] in new_ids), key=self._play_sort_key)
+        return newest, seen | {newest["id"]}
+
     def _detect_mlb_home_run(self):
         """MLB home-run detector -- first real plug-in for BIG_MOMENT_DETECTORS.
 
@@ -11165,26 +13405,19 @@ class SportsEngine(Browsable, BigMomentSource):
         event_id = fg.get("event_id")
         if not event_id:
             return
-        if not self._detector_due("mlb_hr"):
+        bun = sports.FEED.get_summary(event_id)
+        if not bun:
             return
-        hrs = sports._fetch_home_run_plays("MLB", event_id)
-        ids = {h["id"] for h in hrs}
-        if self._seen_home_runs is None:
-            self._seen_home_runs = ids           # first read: adopt, don't replay
+        hrs = bun.get("home_runs") or []
+        newest, self._seen_home_runs = self._advance_seen_plays(self._seen_home_runs, hrs)
+        if newest is None:
             return
-        new_ids = ids - self._seen_home_runs
-        self._seen_home_runs = ids
-        if not new_ids:
-            return
-        # Only the most recent new one matters -- _set_big_moment is a
-        # one-slot queue anyway, so firing on more than one would just
-        # overwrite itself.
-        newest = max((h for h in hrs if h["id"] in new_ids), key=lambda h: h["id"])
         home, away = fg["home"], fg["away"]
         line1 = f"{away['abbr']} {away['score']}, {home['abbr']} {home['score']}"
         color = home.get("color") or away.get("color") or (255, 200, 40)
         self._set_big_moment("HOME RUN", line1, newest["text"], color,
-                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="baseball")
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="baseball",
+                             scorer=newest.get("scorer"))
 
     BIG_MOMENT_DETECTORS["mlb_hr"] = _detect_mlb_home_run
 
@@ -11222,26 +13455,19 @@ class SportsEngine(Browsable, BigMomentSource):
         event_id = fg.get("event_id")
         if not event_id:
             return
-        if not self._detector_due("nfl_touchdown"):
+        bun = sports.FEED.get_summary(event_id)
+        if not bun:
             return
-        tds = sports._fetch_touchdown_plays(league, event_id)
-        ids = {t["id"] for t in tds}
-        if self._seen_nfl_touchdowns is None:
-            self._seen_nfl_touchdowns = ids       # first read: adopt, don't replay
+        tds = bun.get("touchdowns") or []
+        newest, self._seen_nfl_touchdowns = self._advance_seen_plays(self._seen_nfl_touchdowns, tds)
+        if newest is None:
             return
-        new_ids = ids - self._seen_nfl_touchdowns
-        self._seen_nfl_touchdowns = ids
-        if not new_ids:
-            return
-        # Only the most recent new one matters -- _set_big_moment is a
-        # one-slot queue anyway, so firing on more than one would just
-        # overwrite itself.
-        newest = max((t for t in tds if t["id"] in new_ids), key=lambda t: t["id"])
         home, away = fg["home"], fg["away"]
         line1 = f"{away['abbr']} {away['score']}, {home['abbr']} {home['score']}"
         color = home.get("color") or away.get("color") or (255, 100, 40)
         self._set_big_moment("TOUCHDOWN", line1, newest["text"], color,
-                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="football")
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="football",
+                             scorer=newest.get("scorer"))
 
     BIG_MOMENT_DETECTORS["nfl_touchdown"] = _detect_nfl_touchdown
 
@@ -11274,26 +13500,19 @@ class SportsEngine(Browsable, BigMomentSource):
         event_id = fg.get("event_id")
         if not event_id:
             return
-        if not self._detector_due("nhl_goal"):
+        bun = sports.FEED.get_summary(event_id)
+        if not bun:
             return
-        goals = sports._fetch_goal_plays("NHL", event_id)
-        ids = {g["id"] for g in goals}
-        if self._seen_nhl_goals is None:
-            self._seen_nhl_goals = ids            # first read: adopt, don't replay
+        goals = bun.get("goals") or []
+        newest, self._seen_nhl_goals = self._advance_seen_plays(self._seen_nhl_goals, goals)
+        if newest is None:
             return
-        new_ids = ids - self._seen_nhl_goals
-        self._seen_nhl_goals = ids
-        if not new_ids:
-            return
-        # Only the most recent new one matters -- _set_big_moment is a
-        # one-slot queue anyway, so firing on more than one would just
-        # overwrite itself.
-        newest = max((g for g in goals if g["id"] in new_ids), key=lambda g: g["id"])
         home, away = fg["home"], fg["away"]
         line1 = f"{away['abbr']} {away['score']}, {home['abbr']} {home['score']}"
         color = home.get("color") or away.get("color") or (40, 160, 255)
         self._set_big_moment("GOAL", line1, newest["text"], color,
-                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="hockey")
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="hockey",
+                             scorer=newest.get("scorer"))
 
     BIG_MOMENT_DETECTORS["nhl_goal"] = _detect_nhl_goal
 
@@ -11343,21 +13562,13 @@ class SportsEngine(Browsable, BigMomentSource):
         event_id = fg.get("event_id")
         if not event_id:
             return
-        if not self._detector_due("basketball_clutch"):
+        bun = sports.FEED.get_summary(event_id)
+        if not bun:
             return
-        clutch = sports._fetch_clutch_plays(league, event_id)
-        ids = {c["id"] for c in clutch}
-        if self._seen_basketball_clutch is None:
-            self._seen_basketball_clutch = ids     # first read: adopt, don't replay
+        clutch = bun.get("clutch") or []
+        newest, self._seen_basketball_clutch = self._advance_seen_plays(self._seen_basketball_clutch, clutch)
+        if newest is None:
             return
-        new_ids = ids - self._seen_basketball_clutch
-        self._seen_basketball_clutch = ids
-        if not new_ids:
-            return
-        # Only the most recent new one matters -- _set_big_moment is a
-        # one-slot queue anyway, so firing on more than one would just
-        # overwrite itself.
-        newest = max((c for c in clutch if c["id"] in new_ids), key=lambda c: c["id"])
         home, away = fg["home"], fg["away"]
         line1 = f"{away['abbr']} {away['score']}, {home['abbr']} {home['score']}"
         # Neutral fallback distinct from every other sport's fallback
@@ -11370,7 +13581,8 @@ class SportsEngine(Browsable, BigMomentSource):
         # sport's fallback already in use here.
         color = home.get("color") or away.get("color") or (160, 60, 220)
         self._set_big_moment("CLUTCH", line1, newest["text"], color,
-                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="basketball")
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="basketball",
+                             scorer=newest.get("scorer"), shot_xy=newest.get("shot_xy"))
 
     BIG_MOMENT_DETECTORS["basketball_clutch"] = _detect_basketball_clutch_shot
 
@@ -11422,7 +13634,13 @@ class SportsEngine(Browsable, BigMomentSource):
         ev = next((e for e in self.universal if e["id"] in new_ids), None)
         if not ev:
             return
-        method = sports._fetch_mma_finish_method(ev.get("league") or "", ev.get("id"))
+        # ZERO I/O -- summary worker (usually empty: MMA summary 404s)
+        # then mma.FEED's already-verified scoreboard method.
+        method = (sports.FEED.get_summary(ev.get("id")) or {}).get("mma_method")
+        if not method:
+            fight = self._mma_card_fight(ev)
+            if fight:
+                method = fight.get("method")
         winner = next((c for c in (ev.get("competitors") or []) if c.get("winner")), None)
         name = (winner or {}).get("full") or (winner or {}).get("abbr") or "WINNER"
         kind = method or "RESULT"
@@ -11518,7 +13736,11 @@ class SportsEngine(Browsable, BigMomentSource):
         if show_bases and y <= 44:
             draw_diamond(buf, WIDTH - 22, y, ev.get("bases"))
             draw_outs(buf, WIDTH - 13, y + 4, ev.get("outs"))
-        extra = ev.get("class_label") or ev.get("series") or ev.get("venue") or ""
+        # Same owner-configured priority chain as _frame_universal_generic()'s
+        # own footer slot (layout.py, 2026-08-10 Tier-3 pilot) -- one config,
+        # both call sites, so the two views never disagree about priority.
+        _, extra = self._footer_pick(ev)
+        extra = extra or ""
         if extra and y <= 46:
             draw_text3x5(buf, 4, y, fit_text(extra, (WIDTH - 28) if show_bases else (WIDTH - 8)),
                          self.INK_DIM)
@@ -11532,14 +13754,161 @@ class SportsEngine(Browsable, BigMomentSource):
                                self.LIVE if ev["live"] else self.INK_DIM, x_min=3)
         return bytes(buf)
 
+    def _render_baseball_final_linescore(self, buf, ev, ls, accent):
+        """POST boxscore: per-inning runs + R/H/E. ZERO I/O.
+
+        `ls` is sports._mlb_line_score_from_payload() already stamped
+        onto the event. Missing innings stay missing -- an omitted
+        home 9th is a blank/X cell, never a fake 0. Last legal text
+        row is y=59.
+        """
+        tag = self._state_tag(ev)
+        head = ev.get("league_name") or ev.get("league") or "MLB"
+        if tag:
+            head = f"{head}  {tag}"
+        draw_text_centered(buf, 3, fit_text(head, WIDTH - 8),
+                           color_on_dark(accent), x_min=3)
+
+        comps = ev.get("competitors") or []
+
+        def _comp_for(side_key, side):
+            hit = next((c for c in comps if c.get("home_away") == side_key), None)
+            if hit:
+                return hit
+            abbr = (side or {}).get("abbr")
+            if abbr:
+                return next((c for c in comps if c.get("abbr") == abbr), None)
+            return None
+
+        away, home = ls.get("away") or {}, ls.get("home") or {}
+        sides = (("away", away, _comp_for("away", away)),
+                 ("home", home, _comp_for("home", home)))
+        n_cols = max(len(away.get("innings") or []),
+                     len(home.get("innings") or []))
+
+        def _runs_at(side, i):
+            inn = side.get("innings") or []
+            return inn[i] if i < len(inn) else None
+
+        def _cell_txt(side, i):
+            # ESPN omitted this inning for this side (home didn't bat)
+            # or sent "X": both are None. Draw X, never a fake 0.
+            v = _runs_at(side, i)
+            return str(v) if v is not None else "X"
+
+        def _cell_w(i):
+            return max(text_w(_cell_txt(away, i)), text_w(_cell_txt(home, i)))
+
+        y = 10
+        for _key, side, comp in sides:
+            if y > HEIGHT - 5:
+                break
+            bar = (comp or {}).get("color") or self.INK_DIM
+            won = bool((comp or {}).get("winner"))
+            name_col = self.WIN if won else self.HERO_INK
+            abbr = fit_text(side.get("abbr") or (comp or {}).get("abbr") or "", 16)
+            # 2px team rail spans both rows of this side (5 + 1 + 5).
+            for by in range(11):
+                for bx in (3, 4):
+                    put_px(buf, bx, y + by, bar)
+            draw_text3x5(buf, 6, y, abbr, name_col)
+
+            inn_x = 6 + (text_w(abbr) + 2 if abbr else 0)
+            avail = WIDTH - 2 - inn_x
+            # Prefer every inning when they fit (always for 9). Extras
+            # (F10+) stay if they fit; otherwise drop earliest so the
+            # last 9 -- the extras -- remain.
+            chosen = []
+            used = 0
+            for i in range(n_cols - 1, -1, -1):
+                w = _cell_w(i)
+                gap = 1 if chosen else 0
+                if used + gap + w > avail:
+                    break
+                chosen.append(i)
+                used += gap + w
+            chosen.reverse()
+
+            x = inn_x
+            for i in chosen:
+                txt = _cell_txt(side, i)
+                col = self.INK_DIM if txt == "X" else self.HERO_INK
+                draw_text3x5(buf, x, y, txt, col)
+                x += _cell_w(i) + 1
+
+            rhe_y = y + 6
+            if rhe_y <= HEIGHT - 5:
+                rx = inn_x if inn_x + 20 <= WIDTH - 2 else 6
+                bits = []
+                if side.get("runs") is not None:
+                    bits.append(("R", side["runs"], True))
+                if side.get("hits") is not None:
+                    bits.append(("H", side["hits"], False))
+                if side.get("errors") is not None:
+                    bits.append(("E", side["errors"], False))
+                # Measure, then slide left if the R/H/E line would clip.
+                need = 0
+                for li, (lab, val, _) in enumerate(bits):
+                    need += text_w(lab) + 4 + text_w(str(val))
+                    if li < len(bits) - 1:
+                        need += 4
+                if rx + need > WIDTH - 2:
+                    rx = 6
+                x = rx
+                for li, (lab, val, is_runs) in enumerate(bits):
+                    draw_text3x5(buf, x, rhe_y, lab, self.INK_DIM)
+                    x += text_w(lab) + 4
+                    vcol = self.WIN if (won and is_runs) else self.HERO_INK
+                    vs = str(val)
+                    draw_text3x5(buf, x, rhe_y, vs, vcol)
+                    x += text_w(vs) + (4 if li < len(bits) - 1 else 0)
+            y += 14
+
+        detail = ev.get("detail") or ""
+        if detail in ("FINAL", tag, head):
+            detail = ""
+        odds_line = self._footer_odds_text(ev)
+        foot_lines = [x for x in (detail, odds_line, ev.get("series"),
+                                  ev.get("venue"), ev.get("broadcast")) if x]
+        for line in foot_lines:
+            if y > HEIGHT - 5:
+                break
+            draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.INK_DIM, x_min=3)
+            y += 7
+
     def _render_baseball_detail(self, buf, ev):
-        """Baseball's EXPANDED view. The main row already shows inning /
-        diamond / outs / count -- the same size, just smaller. What this
-        view adds is room: both teams' full records, venue, series
-        status, and the SAME live-state glyphs drawn bigger and with
-        actual breathing space, rather than a wholly different set of
-        facts. Selecting a game you're already watching should feel like
-        zooming in, not switching to a different display.
+        """Baseball's EXPANDED view.
+
+        PRE games (and POST games with no line_score yet) keep the
+        original record/series/venue/broadcast layout unchanged.
+
+        POST games with a real ESPN line_score draw a compact boxscore
+        (per-inning runs + R/H/E) instead of the big abbr+record stack.
+
+        LIVE games get a genuinely different, hero-diamond layout
+        (2026-08-10, real owner ask: "the most visually pleasing baseball
+        board on the market... absolutely genius stuff... all live and
+        update live"). The compact main row already has a tiny 4-dot
+        diamond glyph (draw_diamond()) competing for space with a dozen
+        other elements; this view exists specifically to give the SAME
+        real live state (bases, outs, count) room to be the actual
+        subject, via draw_baseball_diamond_hero() -- a real infield
+        shape, not a bigger version of the same four dots.
+
+        Every stat drawn here is REAL, sourced from data this project
+        already fetches -- nothing new invented:
+          * RISP (runner in scoring position) -- a real, standard
+            broadcast term, derived from the same real onSecond/onThird
+            booleans already on `bases`, not a new field.
+          * Ball/strike PIPS (draw_count_pips) -- the real broadcast-
+            graphic convention for the same balls/strikes ints the main
+            row already showed as bare digits.
+          * Win probability -- shown ONLY when this event IS the pinned
+            favorite's own live game, because sports.py only ever
+            computes win_prob for that one game (see _fetch_win_prob()'s
+            own docstring on why it's scoped that way) -- showing it for
+            any other game on this screen would be presenting a number
+            that was never actually computed for it.
         """
         accent = self._sport_accent(ev)
         draw_event_frame(buf, 1.0 if ev["live"] else 0.35, accent, accent)
@@ -11548,76 +13917,143 @@ class SportsEngine(Browsable, BigMomentSource):
         head = ev["league_name"] or "MLB"
         if tag:
             head = f"{head}  {tag}"
-        draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
-                           self.LIVE if ev["live"] else color_on_dark(accent), x_min=3)
 
-        # Real budget, not guessed: two team blocks (17px each: 10px
-        # name/score + 1 gap + 5px record + 1 gap) leave room for the
-        # live-state row PLUS at least one footer line. The first version
-        # of this advanced the cursor by more than the live-state row
-        # actually draws (+12 when the real ink only reaches +6-7), which
-        # pushed y past the footer guard on EVERY live game -- series,
-        # venue and broadcast never appeared, not because anything
-        # overflowed, but because the cursor overshot its own content.
-        # render_audit's put_px instrumentation (added specifically to
-        # catch this CLASS of bug) found no clipped pixels here, which is
-        # what proved it was a cursor-accounting bug, not a real overflow.
         comps = ev["competitors"]
-        y = 11
-        for c in comps[:2]:
-            bar = c.get("color") or self.INK_DIM
-            for by in range(10):
-                for bx in (3, 4):
-                    put_px(buf, bx, y + by, bar)
-            sc = c.get("score")
-            sc_txt = "" if sc is None else str(sc)
-            col = self.WIN if c.get("winner") else self.HERO_INK
-            avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
-            draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
-            if sc_txt:
-                draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
-            y += 11
-            rec = c.get("record")
-            if rec:
-                draw_text3x5(buf, 8, y, rec, self.INK_DIM)
-            y += 6
 
-        y += 1
-        if ev["live"]:
-            detail = ev.get("detail") or ""
-            top = detail.startswith("TOP")
-            inning = ev.get("period")
-            x = 6
-            if inning:
-                draw_trend_arrow(buf, x, y + 2, top, self.LIVE)
-                x += 5
-                draw_text3x5(buf, x, y + 2, str(inning), self.LIVE)
-                x += text_w(str(inning)) + 6
-            draw_diamond(buf, x, y, ev.get("bases"))
-            x += 12
-            outs = ev.get("outs")
-            if outs is not None:
-                draw_outs(buf, x, y + 5, outs)
-            sit = ev.get("situation") or {}
-            b, k = sit.get("balls"), sit.get("strikes")
-            if isinstance(b, int) and isinstance(k, int):
-                cnt = f"{b}-{k}"
-                draw_text3x5(buf, WIDTH - 4 - text_w(cnt), y + 2, cnt, self.INK)
-            y += 7          # diamond's real extent is 5px + outs' 1px + a gap
-        else:
+        if not ev["live"]:
+            ls = ev.get("line_score") or (
+                sports.FEED.get_summary(ev.get("id")) or {}).get("line_score")
+            if ls and ev.get("state") == "post":
+                self._render_baseball_final_linescore(buf, ev, ls, accent)
+                return
+            draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
+                               color_on_dark(accent), x_min=3)
+            # Real budget, not guessed: two team blocks (17px each: 10px
+            # name/score + 1 gap + 5px record + 1 gap) leave room for a
+            # footer. The first version of this advanced the cursor by
+            # more than the content actually drew (+12 vs a real +6-7
+            # ink extent), pushing y past the footer guard on every live
+            # game -- caught by render_audit's put_px instrumentation
+            # (0 clipped pixels), which is what proved this was a
+            # cursor-accounting bug, not a real overflow.
+            y = 11
+            for c in comps[:2]:
+                bar = c.get("color") or self.INK_DIM
+                for by in range(10):
+                    for bx in (3, 4):
+                        put_px(buf, bx, y + by, bar)
+                sc = c.get("score")
+                sc_txt = "" if sc is None else str(sc)
+                col = self.WIN if c.get("winner") else self.HERO_INK
+                avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
+                draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
+                if sc_txt:
+                    draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
+                y += 11
+                rec = c.get("record")
+                if rec:
+                    draw_text3x5(buf, 8, y, rec, self.INK_DIM)
+                y += 6
+
+            y += 1
             draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8), self.INK_DIM)
             y += 8
 
-        # HEIGHT-5, not HEIGHT-6: a scale=1 glyph is 5px tall, so the true
-        # last valid start row is 59 (59+5=64). HEIGHT-6=58 rejected a
-        # perfectly legal y=59 -- caught by the same accounting review
-        # that found the cursor overshoot above.
-        foot_lines = [x for x in (ev.get("series"), ev.get("venue"), ev.get("broadcast")) if x]
-        for line in foot_lines:
-            if y > HEIGHT - 5:
-                break
-            draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.INK_DIM, x_min=3)
-            y += 7
+            # HEIGHT-5, not HEIGHT-6: a scale=1 glyph is 5px tall, so the
+            # true last valid start row is 59 (59+5=64).
+            #
+            # Odds restored 2026-08-11 (completeness review) -- this
+            # dedicated renderer's own hardcoded footer chain had
+            # silently dropped odds the moment baseball graduated from
+            # the generic fallback. Pre-game only (this whole branch
+            # already IS the not-live path), leads the same list.
+            odds_line = self._footer_odds_text(ev)
+            foot_lines = [x for x in (odds_line, ev.get("series"), ev.get("venue"), ev.get("broadcast")) if x]
+            for line in foot_lines:
+                if y > HEIGHT - 5:
+                    break
+                draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.INK_DIM, x_min=3)
+                y += 7
+            return
+
+        # ---- LIVE: scorebug chrome, then zone over diamond -----------
+        # One hierarchy: situation (who/score/inning/count) on top,
+        # the play (K-zone + diamond) as the subject, matchup beside
+        # it. Diamond is who is on base -- no second RISP sentence.
+        # Layout is stable with or without pitches so the screen
+        # does not jump when the first coord lands.
+        sit = ev.get("situation") or {}
+        bases = ev.get("bases")
+        loaded = bool(bases) and any(bases)
+        pulse = 0.75 + 0.25 * math.sin(self.scroll * 0.3) if loaded else 1.0
+        m = self._matchup.get(ev.get("id")) or {}
+        pitches = ev.get("atbat_pitches") or (
+            sports.FEED.get_summary(ev.get("id")) or {}).get("atbat_pitches") or []
+
+        detail = ev.get("detail") or ""
+        top = detail.startswith("TOP")
+        inning = ev.get("period")
+        half = "TOP" if top else "BOT"
+        if inning:
+            draw_text_centered(buf, 1, f"{half} {inning}", self.LIVE, x_min=3)
+        y = draw_scorebug_bars(buf, 7, comps, row_h=7)
+
+        y += 2
+        outs = ev.get("outs")
+        b, k = sit.get("balls"), sit.get("strikes")
+        if isinstance(b, int) and isinstance(k, int):
+            draw_count_pips(buf, WIDTH // 2, y, b, k)
+        if outs is not None:
+            draw_outs(buf, WIDTH - 12, y, outs)
+
+        zone_size, zone_m = 13, 3
+        zone_plot = zone_size + 2 * zone_m
+        zone_x, zone_y = WIDTH - 3 - zone_plot, 27
+        draw_mlb_kzone(buf, zone_x, zone_y, zone_size, pitches, margin=zone_m)
+        r, cx, cy = 5, zone_x + zone_plot // 2, 53
+        draw_baseball_diamond_hero(buf, cx, cy, r, bases, pulse=pulse)
+
+        col_w = zone_x - 5
+        y = 29
+        pit = m.get("pitcher") or {}
+        bat = m.get("batter") or {}
+        if pit.get("name"):
+            draw_text3x5(buf, 3, y, "P", self.INK_DIM)
+            draw_text3x5(buf, 9, y, fit_person(pit["name"], col_w - 6), self.INK)
+            y += 6
+            bits = [f"{pit['pitch_count']}P" if pit.get("pitch_count") else "",
+                    pit.get("era") or ""]
+            line = " ".join(b for b in bits if b)
+            if line:
+                draw_text3x5(buf, 9, y, fit_text(line, col_w - 6), self.LIVE)
+                y += 6
+        if bat.get("name"):
+            draw_text3x5(buf, 3, y, "AB", self.INK_DIM)
+            draw_text3x5(buf, 13, y, fit_person(bat["name"], col_w - 10), self.INK)
+            y += 6
+            bits = [bat.get("avg") or "", bat.get("today") or ""]
+            line = " ".join(b for b in bits if b)
+            if line:
+                draw_text3x5(buf, 9, y, fit_text(line, col_w - 6), self.LIVE)
+                y += 6
+        if pitches:
+            last = pitches[-1]
+            bits = []
+            if isinstance(last.get("n"), int):
+                bits.append(str(last["n"]))
+            if last.get("type"):
+                bits.append(last["type"])
+            if last.get("vel"):
+                bits.append(str(last["vel"]))
+            label = " ".join(bits)
+            if label and y <= 52:
+                draw_text3x5(buf, 3, y, fit_text(label, col_w), self.LIVE)
+
+        fav_game = self.data.get("favorite_game")
+        wp = self.data.get("win_prob")
+        if (fav_game and fav_game.get("event_id") == ev.get("event_id")
+                and isinstance(wp, (int, float))):
+            draw_text3x5(buf, 3, 59, f"WIN {int(round(wp * 100))}", self.INK_DIM)
 
     SPORT_DETAIL_RENDERERS["baseball"] = _render_baseball_detail
 
@@ -11637,45 +14073,75 @@ class SportsEngine(Browsable, BigMomentSource):
         head = ev["league_name"] or "SOCCER"
         if tag:
             head = f"{head}  {tag}"
-        draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
-                           self.LIVE if ev["live"] else color_on_dark(accent), x_min=3)
-
         comps = ev["competitors"]
-        y = 11
-        for c in comps[:2]:
-            bar = c.get("color") or self.INK_DIM
-            for by in range(10):
-                for bx in (3, 4):
-                    put_px(buf, bx, y + by, bar)
-            sc = c.get("score")
-            sc_txt = "" if sc is None else str(sc)
-            col = self.WIN if c.get("winner") else self.HERO_INK
-            avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
-            draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
-            if sc_txt:
-                draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
-            y += 11
-            rec = c.get("record")
-            if rec:
-                draw_text3x5(buf, 8, y, fit_text(rec, WIDTH - 12), self.INK_DIM)
-            y += 6
+        scorer = self._last_goal_label(ev.get("last_goal"))
 
-        y += 1
-        shootouts = [c.get("shootout") for c in comps[:2]]
-        if all(s is not None for s in shootouts):
-            draw_text_centered(buf, y, "PENALTIES", self.LIVE)
-            y += 7
-            pk = "-".join(str(s) for s in shootouts)
-            draw_text_centered(buf, y, pk, self.HERO_INK, scale=2)
-            y += 11
-        else:
+        if ev["live"]:
+            if self._soccer_is_tight_late(ev):
+                draw_leverage_glow(buf, 1, 1, WIDTH - 1, 6, (255, 200, 40),
+                                   self.scroll * 0.35)
+            draw_text_centered(buf, 1, fit_text(head, WIDTH - 8), self.LIVE, x_min=3)
+            y = draw_scorebug_bars(buf, 7, comps, row_h=8)
             clock = ev.get("clock") or ev.get("detail") or ""
-            if clock:
-                draw_text_centered(buf, y, fit_text(clock, WIDTH - 8),
-                                   self.LIVE if ev["live"] else self.INK_DIM)
+            if clock and y <= HEIGHT - 16:
+                draw_soccer_pitch_hero(buf, 3, y, WIDTH - 3, y + 16)
+                dim_hero_text_band(buf, 3, y + 3, WIDTH - 3, y + 10)
+                draw_text_centered(buf, y + 2, fit_text(clock, WIDTH - 8), self.LIVE)
+                if scorer:
+                    draw_text_centered(buf, y + 9, fit_person(scorer, WIDTH - 8),
+                                       (230, 230, 220), x_min=3)
+                y += 17
+            elif clock:
+                draw_text_centered(buf, y, fit_text(clock, WIDTH - 8), self.LIVE, x_min=3)
                 y += 7
+                if scorer and y <= HEIGHT - 5:
+                    draw_text_centered(buf, y, fit_person(scorer, WIDTH - 8),
+                                       self.INK, x_min=3)
+                    y += 7
+        else:
+            draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
+                               color_on_dark(accent), x_min=3)
+            y = 11
+            for c in comps[:2]:
+                bar = c.get("color") or self.INK_DIM
+                for by in range(10):
+                    for bx in (3, 4):
+                        put_px(buf, bx, y + by, bar)
+                sc = c.get("score")
+                sc_txt = "" if sc is None else str(sc)
+                col = self.WIN if c.get("winner") else self.HERO_INK
+                avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
+                draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
+                if sc_txt:
+                    draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
+                y += 11
+                rec = c.get("record")
+                if rec:
+                    draw_text3x5(buf, 8, y, fit_text(rec, WIDTH - 12), self.INK_DIM)
+                y += 6
 
-        foot_lines = [x for x in (ev.get("series"), ev.get("venue"),
+            y += 1
+            shootouts = [c.get("shootout") for c in comps[:2]]
+            if all(s is not None for s in shootouts):
+                draw_text_centered(buf, y, "PENALTIES", self.LIVE)
+                y += 7
+                pk = "-".join(str(s) for s in shootouts)
+                draw_text_centered(buf, y, pk, self.HERO_INK, scale=2)
+                y += 11
+            else:
+                clock = ev.get("clock") or ev.get("detail") or ""
+                if clock:
+                    draw_text_centered(buf, y, fit_text(clock, WIDTH - 8), self.INK_DIM)
+                    y += 7
+                if scorer and y <= HEIGHT - 5:
+                    draw_text_centered(buf, y, fit_person(scorer, WIDTH - 8),
+                                       self.INK, x_min=3)
+                    y += 7
+
+        # Odds restored 2026-08-11 (completeness review) -- see
+        # basketball's own detail renderer for the full note on why.
+        odds_line = self._footer_odds_text(ev)
+        foot_lines = [x for x in (odds_line, ev.get("series"), ev.get("venue"),
                                   ev.get("broadcast"), ev.get("note")) if x]
         for line in foot_lines:
             if y > HEIGHT - 5:
@@ -11684,6 +14150,163 @@ class SportsEngine(Browsable, BigMomentSource):
             y += 7
 
     SPORT_DETAIL_RENDERERS["soccer"] = _render_soccer_detail
+
+    def _render_hockey_detail(self, buf, ev):
+        """Hockey's EXPANDED view -- NEW 2026-08-11, direct owner ask
+        ("every sport needs the attention MLB has"). Hockey previously
+        had NO dedicated main or detail renderer at all -- it fell
+        through to `_frame_event_detail_generic()`'s worst-case-shared
+        layout, the exact gap this whole per-sport-renderer table exists
+        to close for every other sport already covered. Same shape as
+        basketball/soccer's own detail views: full records, a rink hero
+        with real period/clock on top while live, venue/broadcast/series.
+        No power-play/possession marker plotted -- `_situation()`'s own
+        docstring already states no NHL power-play field was ever
+        confirmed real; guessing one is exactly what this project's
+        "never invent" rule forbids, same reasoning the football turf
+        and basketball court heroes already follow for their own sports'
+        unconfirmed fields."""
+        accent = self._sport_accent(ev)
+        draw_event_frame(buf, 1.0 if ev["live"] else 0.35, accent, accent)
+
+        tag = self._state_tag(ev)
+        head = ev.get("league_name") or "HOCKEY"
+        if tag:
+            head = f"{head}  {tag}"
+        comps = ev["competitors"]
+        sit = ev.get("situation") or {}
+        if ev["live"]:
+            if sit.get("power_play"):
+                draw_leverage_glow(buf, 1, 1, WIDTH - 1, 6, (80, 160, 255),
+                                   self.scroll * 0.3)
+            draw_text_centered(buf, 1, fit_text(head, WIDTH - 8), self.LIVE, x_min=3)
+            y = draw_scorebug_bars(buf, 7, comps, row_h=8)
+            period, clock = ev.get("period"), ev.get("clock") or ""
+            line = f"P{period} {clock}".strip() if period else clock
+            st = sit.get("strength") or ("PP" if sit.get("power_play") else "")
+            if line and y <= HEIGHT - 16:
+                draw_hockey_rink_hero(buf, 3, y, WIDTH - 3, y + 14)
+                dim_hero_text_band(buf, 3, y + 2, WIDTH - 3, y + 12)
+                draw_text_centered(buf, y + 2, fit_text(line, WIDTH - 8),
+                                   self.LIVE, x_min=3)
+                if st:
+                    draw_text_centered(buf, y + 8, fit_text(st, WIDTH - 8),
+                                       (220, 230, 255), x_min=3)
+                y += 15
+            elif line:
+                draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.LIVE, x_min=3)
+                y += 7
+            y = self._draw_last_play(buf, ev, y)
+        else:
+            draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
+                               color_on_dark(accent), x_min=3)
+            y = 11
+            for c in comps[:2]:
+                bar = c.get("color") or self.INK_DIM
+                for by in range(10):
+                    for bx in (3, 4):
+                        put_px(buf, bx, y + by, bar)
+                sc = c.get("score")
+                sc_txt = "" if sc is None else str(sc)
+                col = self.WIN if c.get("winner") else self.HERO_INK
+                avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
+                draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
+                if sc_txt:
+                    draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
+                y += 11
+                rec = c.get("record")
+                if rec:
+                    draw_text3x5(buf, 8, y, fit_text(rec, WIDTH - 12), self.INK_DIM)
+                y += 6
+            y += 1
+            draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8),
+                               self.INK_DIM, x_min=3)
+            y += 7
+
+        odds_line = self._footer_odds_text(ev)
+        foot_lines = [x for x in (odds_line, ev.get("series"), ev.get("venue"),
+                                  ev.get("broadcast"), ev.get("note")) if x]
+        for line in foot_lines:
+            if y > HEIGHT - 5:
+                break
+            draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.INK_DIM, x_min=3)
+            y += 7
+
+    SPORT_DETAIL_RENDERERS["hockey"] = _render_hockey_detail
+
+    def _render_mma_detail(self, buf, ev):
+        """MMA's EXPANDED view -- NEW 2026-08-11, same owner ask as
+        hockey's new detail renderer above ("every sport needs the
+        attention MLB has"). MMA previously had a real MAIN renderer
+        (`_render_mma()`) but no dedicated detail view -- fell through
+        to the generic fallback. Adds real room the main row doesn't
+        have: full (not abbreviated) fighter names, venue/broadcast, and
+        an octagon-cage hero behind the VS matchup -- same honest-set-
+        dressing contract as every other hero this pass: real geometry,
+        zero invented octagon-position data."""
+        accent = self._sport_accent(ev)
+        draw_event_frame(buf, 1.0 if ev["live"] else 0.35, accent, accent)
+
+        seg = ev.get("card_segment") or ""
+        num = ev.get("match_number")
+        headline = ev.get("class_label") or ev.get("league_name") or "MMA"
+        draw_text_centered(buf, 5, fit_text(headline, WIDTH - 8), color_on_dark(accent), x_min=3)
+        tag = "MAIN EVENT" if (num == 1 and seg.startswith("MAIN")) else seg
+        if tag:
+            draw_text_centered(buf, 12, fit_text(tag, WIDTH - 8), self.INK_DIM, x_min=3)
+
+        comps = ev["competitors"][:2]
+        cx, cy, r = WIDTH // 2, 33, 15
+        draw_octagon_hero(buf, cx, cy, r)
+
+        y = cy - 9
+        for i, c in enumerate(comps):
+            won = c.get("winner")
+            col = self.WIN if won else ((255, 255, 255) if ev["state"] == "post" else self.HERO_INK)
+            name = c.get("full") or c.get("abbr") or ""
+            draw_text_centered(buf, y, fit_person(name, WIDTH - 10), col, x_min=3)
+            y += 6
+            rec = c.get("record")
+            if rec:
+                draw_text_centered(buf, y, fit_text(rec, WIDTH - 10), (220, 200, 200), x_min=3)
+            y += 6
+            if i == 0:
+                draw_text_centered(buf, y, "VS", (255, 255, 255))
+                y += 6
+
+        y = cy + r + 3
+        current, total = self._mma_round_pair(ev)
+        if ev["live"] or current or ev.get("total_rounds"):
+            if ev["live"]:
+                draw_leverage_glow(buf, 2, y - 1, WIDTH - 2, y + 6,
+                                   (255, 180, 40), self.scroll * 0.3)
+            draw_round_ticks(buf, WIDTH // 2, y, current, total,
+                             pulse=0.75 + 0.25 * math.sin(self.scroll * 0.3)
+                             if ev["live"] else 1.0)
+            y += 5
+        rnd, clk = ev.get("period"), ev.get("clock")
+        if ev["state"] == "post" and rnd and clk:
+            line = f"R{rnd}  {clk}"
+        elif ev["live"] and clk:
+            line = str(clk)
+        else:
+            line = ev.get("detail") or ""
+        if line and y <= HEIGHT - 5:
+            draw_text_centered(buf, y, fit_text(line, WIDTH - 8),
+                               self.LIVE if ev["live"] else self.INK_DIM, x_min=3)
+            y += 7
+
+        # Odds restored 2026-08-11 (completeness review) -- see
+        # basketball's own detail renderer for the full note on why.
+        odds_line = self._footer_odds_text(ev)
+        foot_lines = [x for x in (odds_line, ev.get("venue"), ev.get("broadcast")) if x]
+        for line in foot_lines:
+            if y > HEIGHT - 5:
+                break
+            draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.INK_DIM, x_min=3)
+            y += 7
+
+    SPORT_DETAIL_RENDERERS["mma"] = _render_mma_detail
 
     def _detect_soccer_goal(self):
         """GOAL big-moment for the pinned favorite's own LIVE soccer
@@ -11705,41 +14328,22 @@ class SportsEngine(Browsable, BigMomentSource):
             # in-progress seen-set so returning to a live game later (or
             # a different one) starts clean rather than stale.
             self._soccer_goal_event_id = None
-            self._soccer_goal_seen = set()
+            self._soccer_goal_seen = None
             return
 
         if fg["event_id"] != self._soccer_goal_event_id:
-            # The game being watched changed (a new pinned-favorite game
-            # went live, or the old one finished and a fresh one
-            # started). fetch_new_soccer_goals() itself does NOT adopt a
-            # baseline -- its own docstring says the CALLER must hand in
-            # a fresh empty set and is responsible for not replaying
-            # history. A plain `self._soccer_goal_seen = set()` here
-            # does the "fresh set" half but not the "don't replay" half:
-            # the very next call below would report every goal already
-            # scored before this game was opened as brand new (a real,
-            # confirmed misfire -- ambient landing on a favorite game
-            # already 2-0 would fire two GOAL celebrations for goals
-            # that happened minutes ago). Adopt the baseline first, same
-            # "don't replay" rule as GameDayEngine._seen_done and
-            # _detect_mlb_home_run's _seen_home_runs: call once to seed
-            # `seen` with whatever already scored, discard that result,
-            # and only report what's genuinely new after that.
+            # Game changed -- drop the seen set so the next cache read
+            # adopts (does not replay) whatever already scored.
             self._soccer_goal_event_id = fg["event_id"]
-            self._soccer_goal_seen = set()
-            sports.fetch_new_soccer_goals(fav["league"], fg["event_id"],
-                                           self._soccer_goal_seen)
-            self._detector_last_poll["soccer_goal"] = time.time()
-            return
+            self._soccer_goal_seen = None
 
-        if not self._detector_due("soccer_goal"):
+        bun = sports.FEED.get_summary(fg["event_id"])
+        if not bun:
             return
-
-        goals = sports.fetch_new_soccer_goals(fav["league"], fg["event_id"],
-                                               self._soccer_goal_seen)
-        if not goals:
+        newest, self._soccer_goal_seen = self._advance_seen_plays(
+            self._soccer_goal_seen, bun.get("soccer_goals") or [])
+        if newest is None:
             return
-        newest = goals[-1]
 
         home, away = fg["home"], fg["away"]
         fav_team = home if home.get("abbr") == fav["team_abbr"] else away
@@ -11747,7 +14351,8 @@ class SportsEngine(Browsable, BigMomentSource):
 
         line1 = f"{away.get('abbr') or ''} {away.get('score')} - {home.get('score')} {home.get('abbr') or ''}"
         self._set_big_moment("GOAL", line1, newest["text"] or newest["type"], color,
-                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="soccer")
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="soccer",
+                             scorer=newest.get("scorer"))
 
     BIG_MOMENT_DETECTORS["soccer_goal"] = _detect_soccer_goal
 
@@ -11773,6 +14378,13 @@ class SportsEngine(Browsable, BigMomentSource):
         if detail:
             draw_text_centered(buf, y, fit_text(detail, WIDTH - 8), self.INK_DIM, x_min=3)
             y += 7
+        current, total = self._golf_round_pair(ev)
+        if total and y <= HEIGHT - 10:
+            draw_round_ticks(buf, WIDTH // 2, y, current, total,
+                             on_col=(140, 230, 120),
+                             pulse=0.75 + 0.25 * math.sin(self.scroll * 0.3)
+                             if ev["live"] else 1.0)
+            y += 5
 
         comps = ev["competitors"]
         rows = min(6, max(1, (HEIGHT - 5 - y - 8) // 6))
@@ -11830,12 +14442,18 @@ class SportsEngine(Browsable, BigMomentSource):
         y += 1
 
         line = self._tennis_set_line(comps)
+        if self._tennis_is_deciding(ev):
+            draw_leverage_glow(buf, 2, y - 1, WIDTH - 2, y + 16,
+                               (230, 220, 90), self.scroll * 0.35)
         if line:
             draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.INK, x_min=3)
             y += 7
         elif ev["state"] == "pre":
             draw_text_centered(buf, y, "NOT STARTED", self.INK_DIM, x_min=3)
             y += 7
+        if any(c.get("sets") for c in comps) or ev.get("best_of") in (3, 5):
+            draw_tennis_set_pips(buf, y, comps, best_of=ev.get("best_of"))
+            y += 10
 
         foot_lines = [x for x in (ev.get("class_label"), ev.get("name"), ev.get("venue")) if x]
         for fline in foot_lines:
@@ -11870,45 +14488,82 @@ class SportsEngine(Browsable, BigMomentSource):
         head = ev.get("league_name") or "FOOTBALL"
         if tag:
             head = f"{head}  {tag}"
-        draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
-                           self.LIVE if ev["live"] else color_on_dark(accent), x_min=3)
-
         comps = ev["competitors"]
-        y = 11
-        for c in comps[:2]:
-            bar = c.get("color") or self.INK_DIM
-            for by in range(10):
-                for bx in (3, 4):
-                    put_px(buf, bx, y + by, bar)
-            sc = c.get("score")
-            sc_txt = "" if sc is None else str(sc)
-            col = self.WIN if c.get("winner") else self.HERO_INK
-            avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
-            draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
-            if sc_txt:
-                draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
-            y += 11
-            rec = c.get("record")
-            if rec:
-                draw_text3x5(buf, 8, y, fit_text(rec, WIDTH - 12), self.INK_DIM)
-            y += 6
 
-        y += 1
-        if ev["live"]:
-            period, clock = ev.get("period"), ev.get("clock") or ""
-            line = f"Q{period} {clock}".strip() if period else clock
-            if line:
-                draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.LIVE, x_min=3)
-                y += 7
-            dd = situation_line(ev)
-            if dd:
-                draw_text_centered(buf, y, fit_text(dd, WIDTH - 8), self.INK, x_min=3)
-                y += 7
-        else:
+        if not ev["live"]:
+            draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
+                               color_on_dark(accent), x_min=3)
+            y = 11
+            for c in comps[:2]:
+                bar = c.get("color") or self.INK_DIM
+                for by in range(10):
+                    for bx in (3, 4):
+                        put_px(buf, bx, y + by, bar)
+                sc = c.get("score")
+                sc_txt = "" if sc is None else str(sc)
+                col = self.WIN if c.get("winner") else self.HERO_INK
+                avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
+                draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
+                if sc_txt:
+                    draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
+                y += 11
+                rec = c.get("record")
+                if rec:
+                    draw_text3x5(buf, 8, y, fit_text(rec, WIDTH - 12), self.INK_DIM)
+                y += 6
+
+            y += 1
             draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8),
                                self.INK_DIM, x_min=3)
             y += 7
+            # Odds restored 2026-08-11 (completeness review) -- see
+            # basketball's own detail renderer for the full note on why.
+            odds_line = self._footer_odds_text(ev)
+            foot_lines = [x for x in (odds_line, ev.get("series"), ev.get("venue"),
+                                      ev.get("broadcast"), ev.get("note")) if x]
+            for line in foot_lines:
+                if y > HEIGHT - 5:
+                    break
+                draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.INK_DIM, x_min=3)
+                y += 7
+            return
 
+        # ---- LIVE: baseball's scorebug chrome, then the drive strip.
+        sit = ev.get("situation") or {}
+        if sit.get("is_redzone"):
+            draw_leverage_glow(buf, 1, 1, WIDTH - 1, 5, (255, 50, 40),
+                               self.scroll * 0.3)
+        draw_text_centered(buf, 1, fit_text(head, WIDTH - 8), self.LIVE, x_min=3)
+        y = draw_scorebug_bars(buf, 7, comps, row_h=8,
+                               possession=sit.get("possession"))
+
+        period, clock = ev.get("period"), ev.get("clock") or ""
+        line = f"Q{period} {clock}".strip() if period else clock
+        dd = situation_line(ev)
+        y += 1
+        if y <= HEIGHT - 16:
+            draw_football_drive_strip(
+                buf, 3, y, WIDTH - 3, y + 14,
+                yard_line=sit.get("yard_line"),
+                redzone=bool(sit.get("is_redzone")),
+                phase=self.scroll * 0.3)
+            if line:
+                draw_text_centered(buf, y + 1, fit_text(line, WIDTH - 8),
+                                   self.LIVE, x_min=3)
+            if dd:
+                draw_text_centered(buf, y + 8, fit_text(dd, WIDTH - 8),
+                                   FIELD_YARD_LINE, x_min=3)
+            y += 15
+        else:
+            if line:
+                draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.LIVE, x_min=3)
+                y += 7
+            if dd:
+                draw_text_centered(buf, y, fit_text(dd, WIDTH - 8), self.INK, x_min=3)
+                y += 7
+
+        y = self._draw_last_play(buf, ev, y)
+        y = self._draw_timeout_pips(buf, ev, y)
         foot_lines = [x for x in (ev.get("series"), ev.get("venue"),
                                   ev.get("broadcast"), ev.get("note")) if x]
         for line in foot_lines:
@@ -11935,42 +14590,63 @@ class SportsEngine(Browsable, BigMomentSource):
         head = ev.get("league_name") or "BASKETBALL"
         if tag:
             head = f"{head}  {tag}"
-        draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
-                           self.LIVE if ev["live"] else color_on_dark(accent), x_min=3)
-
         comps = ev["competitors"]
-        y = 11
-        for c in comps[:2]:
-            bar = c.get("color") or self.INK_DIM
-            for by in range(10):
-                for bx in (3, 4):
-                    put_px(buf, bx, y + by, bar)
-            sc = c.get("score")
-            sc_txt = "" if sc is None else str(sc)
-            col = self.WIN if c.get("winner") else self.HERO_INK
-            avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
-            draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
-            if sc_txt:
-                draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
-            y += 11
-            rec = c.get("record")
-            if rec:
-                draw_text3x5(buf, 8, y, fit_text(rec, WIDTH - 12), self.INK_DIM)
-            y += 6
-
-        y += 1
         if ev["live"]:
+            if self._board_is_clutch(ev):
+                draw_leverage_glow(buf, 1, 1, WIDTH - 1, 6, (255, 140, 40),
+                                   self.scroll * 0.35)
+            draw_text_centered(buf, 1, fit_text(head, WIDTH - 8), self.LIVE, x_min=3)
+            y = draw_scorebug_bars(buf, 7, comps, row_h=8)
             period, clock = ev.get("period"), ev.get("clock") or ""
             line = f"Q{period} {clock}".strip() if period else clock
-            if line:
+            if (ev.get("situation") or {}).get("bonus") is True:
+                line = f"{line} BONUS".strip() if line else "BONUS"
+            if line and y <= HEIGHT - 16:
+                draw_basketball_court_hero(buf, 3, y, WIDTH - 3, y + 14)
+                dim_hero_text_band(buf, 3, y + 2, WIDTH - 3, y + 12)
+                draw_text_centered(buf, y + 5, fit_text(line, WIDTH - 8),
+                                   self.LIVE, x_min=3)
+                y += 15
+            elif line:
                 draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.LIVE, x_min=3)
                 y += 7
+            y = self._draw_timeout_pips(buf, ev, y)
         else:
+            draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
+                               color_on_dark(accent), x_min=3)
+            y = 11
+            for c in comps[:2]:
+                bar = c.get("color") or self.INK_DIM
+                for by in range(10):
+                    for bx in (3, 4):
+                        put_px(buf, bx, y + by, bar)
+                sc = c.get("score")
+                sc_txt = "" if sc is None else str(sc)
+                col = self.WIN if c.get("winner") else self.HERO_INK
+                avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
+                draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
+                if sc_txt:
+                    draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
+                y += 11
+                rec = c.get("record")
+                if rec:
+                    draw_text3x5(buf, 8, y, fit_text(rec, WIDTH - 12), self.INK_DIM)
+                y += 6
+            y += 1
             draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8),
                                self.INK_DIM, x_min=3)
             y += 7
 
-        foot_lines = [x for x in (ev.get("series"), ev.get("venue"),
+        # Real bug fixed 2026-08-11 (completeness review): dedicated
+        # detail renderers built their own hardcoded footer chain and
+        # silently stopped showing odds the moment this sport graduated
+        # from the generic fallback -- the exact sports an owner is most
+        # likely to actually be viewing. Odds (pre-game only, same
+        # reasoning as everywhere else this field appears) now leads the
+        # same footer list, real data restored without collapsing the
+        # richer multi-line footer these dedicated renderers earned.
+        odds_line = self._footer_odds_text(ev)
+        foot_lines = [x for x in (odds_line, ev.get("series"), ev.get("venue"),
                                   ev.get("broadcast"), ev.get("note")) if x]
         for line in foot_lines:
             if y > HEIGHT - 5:
@@ -11979,6 +14655,48 @@ class SportsEngine(Browsable, BigMomentSource):
             y += 7
 
     SPORT_DETAIL_RENDERERS["basketball"] = _render_basketball_detail
+
+    def _frame_standings(self):
+        """Conference/division table. Header is league + group (AL, EAST).
+        Favorite is highlighted by league+abbr identity, with a 2px
+        team-color bar when ESPN sent a color."""
+        buf = blank()
+        fill(buf, self.BG)
+        league, group = self._sync_standings_cursor()
+        if not league or not group:
+            return self._frame_empty("STANDINGS", "NO TABLE")
+        gname = group.get("name") or ""
+        title = league if not gname or gname == league else f"{league} {gname}"
+        accent = self.LEAGUE_COLOR.get(league, self.INK)
+        draw_header(buf, title, accent)
+        rows = self._standings_window(league, group.get("rows") or [])
+        y = self.STAND_ROW0
+        for row in rows:
+            if y > 52:
+                break
+            is_fav = self._is_standings_favorite(league, row)
+            abbr = row.get("abbr") or ""
+            label = abbr if len(abbr) >= 3 else f"{abbr:<3}"
+            rec = self._standings_record(row)
+            line = f"{label} {rec}".rstrip() if rec else label.rstrip()
+            ink = self.HERO_INK if is_fav else self.INK
+            if is_fav:
+                bar = row.get("color")
+                if bar:
+                    for by in range(5):
+                        put_px(buf, 1, y + by, bar)
+                        put_px(buf, 2, y + by, bar)
+            draw_text3x5(buf, 4, y, fit_text(line, WIDTH - 8), ink)
+            gb = row.get("gb")
+            if gb:
+                gb = str(gb)
+                gx = WIDTH - 2 - text_w(gb)
+                left_end = 4 + text_w(line)
+                if gx >= left_end + 2:
+                    draw_text3x5(buf, gx, y, gb,
+                                 self.WIN if is_fav else self.INK_DIM)
+            y += self.STAND_STRIDE
+        return bytes(buf)
 
     def _frame_for_view(self):
         if self.detail is not None:
@@ -11999,6 +14717,8 @@ class SportsEngine(Browsable, BigMomentSource):
             return self._frame_golf_pinned()
         if panel == self.PANEL_TENNIS:
             return self._frame_tennis_pinned()
+        if panel == self.PANEL_STANDINGS:
+            return self._frame_standings()
         if panel == self.PANEL_EVENTS:
             return self._frame_universal()
         # No panel has data: fall back to whichever empty state is most
@@ -12071,9 +14791,24 @@ class NewsEngine(Browsable):
     same way the bottom tape of every other ticker mode already does,
     just bigger and as the primary content instead of a secondary strip.
 
-    Auto-advances through headlines on a fixed tick cadence (not "wait for
-    the scroll to finish"), matching every other mode's cycling behavior
-    so the pacing is predictable regardless of headline length.
+    Auto-advances through headlines once the spotlight tape has scrolled
+    the WHOLE headline through, plus a short pause -- NOT a fixed tick
+    cadence. A fixed cadence (this mode's original design, ~13s
+    regardless of length) was a real, confirmed bug, not restraint: at
+    the ORIGINAL scroll speed (0.5px/tick, 10px/sec) a real 100-char Fox
+    headline needed ~84s for the tape to pass it once, so a 13s fixed
+    dwell showed barely 15% of most real headlines before jumping to the
+    next one.
+
+    Fixing the dwell to actually wait for the scroll (first attempt,
+    2026-08-10) swung the OTHER way -- 60-90s per headline at that same
+    10px/sec speed, which reads as the ticker being frozen even though
+    it's technically correct. Real owner feedback: "feels off." The
+    actual fix needed BOTH pieces together, not either alone:
+    `SCROLL_SPEED` raised to 2.5px/tick (50px/sec, 5x faster) so a real
+    headline finishes its full pass in ~16-20s -- close to the ORIGINAL
+    mode's ~13s brisk pace, just now genuinely completing instead of
+    cutting off. See `_spotlight_dwell_ticks()`.
     """
 
     name = "news"
@@ -12086,7 +14821,20 @@ class NewsEngine(Browsable):
     STALE = (255, 170, 40)
     LOSE = (255, 70, 80)
 
-    SPOTLIGHT_TICKS = 260      # ~13s per headline before auto-advancing
+    # Must match draw_marquee's own pitch/gap for the spotlight tape
+    # (scale=2, called with gap="     " below) -- the dwell math and the
+    # actual drawn scroll distance have to agree, or the "wait for the
+    # scroll to finish" fix silently drifts out of sync with what's
+    # really on screen.
+    SPOTLIGHT_SCALE = 2
+    SPOTLIGHT_GAP = "     "
+    SCROLL_SPEED = 2.5         # px/tick (50px/sec) -- same constant `self.scroll` advances
+                               # by in tick(); tuned so a real 84-109 char headline finishes
+                               # its full scroll pass in ~16-20s, close to this mode's
+                               # original ~13s brisk cadence (was 0.5px/tick, 10px/sec --
+                               # correct but glacial, see the class docstring)
+    SPOTLIGHT_MIN_TICKS = 120  # ~6s floor -- even a one-word headline gets a readable beat
+    SPOTLIGHT_PAUSE_TICKS = 30 # ~1.5s hold after the tape completes one full pass
 
     def __init__(self):
         self.score = 0
@@ -12122,23 +14870,33 @@ class NewsEngine(Browsable):
     def auto(self):
         pass          # already self-cycling; ambient and manual look the same
 
+    def _spotlight_dwell_ticks(self, headline):
+        """Ticks to hold on this headline: exactly long enough for the
+        scale=2 spotlight tape to scroll the entire headline through
+        once (matching draw_marquee's own pitch = 4*scale px/char, plus
+        the trailing gap), plus a short pause once it completes."""
+        total_px = 4 * self.SPOTLIGHT_SCALE * (len(headline) + len(self.SPOTLIGHT_GAP))
+        return max(self.SPOTLIGHT_MIN_TICKS,
+                   int(total_px / self.SCROLL_SPEED) + self.SPOTLIGHT_PAUSE_TICKS)
+
     # ---- simulation --------------------------------------------------------
     def tick(self):
         self.ticks += 1
         self._scroll_tick()
         self.data = news.FEED.get()
-        n = len(self.data.get("headlines") or [])
+        heads = self.data.get("headlines") or []
+        n = len(heads)
         if n:
             self.cur %= n
-        self.scroll += 0.5
+        self.scroll += self.SCROLL_SPEED
         if self.cycling and n > 1 and self.browse.auto_ok:
             self.hold += 1
-            if self.hold >= self.SPOTLIGHT_TICKS:
+            needed = self._spotlight_dwell_ticks(heads[self.cur % n])
+            if self.hold >= needed:
                 self.hold = 0
                 self.cur = (self.cur + 1) % n
         self.score = n
 
-        heads = self.data.get("headlines") or []
         self.pulse.note(heads[0] if heads else None)   # newest headline arriving
 
         key = (self.cur, n)
@@ -12171,6 +14929,7 @@ class NewsEngine(Browsable):
 
         draw_header(buf, label, accent,
                     right_tag=f"{self.cur + 1}/{len(headlines)}", stale=stale)
+        draw_freshness_bar(buf, 9, self.data.get("age"), accent)
 
         # Spotlight: the current headline, big and scrolling. Headlines
         # run far longer than 64px even at scale=1, so there's no sensible
@@ -12178,7 +14937,8 @@ class NewsEngine(Browsable):
         # below runs the full set at a different rate so the two are
         # independent reads rather than a race.
         draw_marquee(buf, 18, headlines[self.cur % len(headlines)],
-                     self.pulse.mix(self.HEADLINE), self.scroll, scale=2, gap="     ")
+                     self.pulse.mix(self.HEADLINE), self.scroll,
+                     scale=self.SPOTLIGHT_SCALE, gap=self.SPOTLIGHT_GAP)
 
         draw_dots(buf, 34, len(headlines), self.cur, on=accent)
         draw_divider(buf, 38)
@@ -12228,19 +14988,57 @@ class WeatherEngine:
 
     VIEW_TICKS = 220
 
+    # THREE AXIS VIEWS + DETAIL. up/down walks main/hourly/radar.
+    # rotate on radar opens DETAIL of the selected track (same select
+    # language flights uses). Zone-only advisories have no point and
+    # live on DETAIL only.
+    VIEWS = ["main", "hourly", "radar"]
+    VIEW_DETAIL = "detail"
+
+    # Flights-class polar scope. Storms sit farther out than local
+    # ADS-B, so the rim is 80nm (not flights' 40). Same sqrt scale so
+    # nearby cells do not collapse into a centre blob.
+    SCOPE_RADIUS_NM = 80.0
+    SCOPE_RING_NM = (20, 40, 80)
+    WX_CX, WX_CY, WX_R = SCOPE_CX, 32, 26
+    SWEEP_DEG_PER_TICK = 3.0
+    SWEEP_COLOR = (40, 90, 160)
+
+    def _apply_skin(self):
+        """Same instance-attribute-shadowing idiom SportsEngine's own
+        _apply_skin() established (2026-08-10) -- Python attribute
+        lookup finds the instance override before the class default, so
+        every existing self.ACCENT/self.INK/self.INK_DIM/self.STALE read
+        elsewhere in this class picks up the active skin with zero
+        call-site changes. WeatherEngine leads with ACCENT as its
+        dominant chrome color (unlike SportsEngine, where INK/INK_DIM
+        carry more weight), so this reads `accent` too."""
+        skin = skins.get_active()
+        self.ACCENT = skin["accent"]
+        self.INK = skin["ink"]
+        self.INK_DIM = skin["ink_dim"]
+        self.STALE = skin["stale"]
+
     def __init__(self):
         self.score = 0
         self.reset()
 
     def reset(self):
+        self._apply_skin()
         self.data = {"conditions": None, "alerts": [], "place": "HOME",
-                    "configured": False, "age": None, "err": None}
+                    "configured": False, "hourly": [], "age": None, "err": None}
         self.cur_alert = 0
         self.hold = 0
         self.pulse = Pulse()
         self.cycling = True
         self.ticks = 0
         self.scroll = 0.0
+        self.view = "main"
+        self.hourly_i = 0        # scroll cursor into the hourly forecast view
+        self.radar_i = 0         # kept as a positional fallback for old drivers
+        self.sel_key = None      # identity of the selected weather track
+        self.sweep = 0.0
+        self._auto_detail = False
 
     # ---- input -----------------------------------------------------------
     def has_content(self):
@@ -12249,16 +15047,90 @@ class WeatherEngine:
         return bool(self.data.get("configured")) and bool(
             self.data.get("conditions") or self.data.get("alerts"))
 
+    def storm_key(self):
+        """Identity of the current storm set, or None. Ambient steals
+        when a NEW track appears -- first read adopts, same as music."""
+        ids = tuple(sorted(str(t.get("id")) for t in (self.data.get("tracks") or [])
+                           if t.get("id")))
+        return ids or None
+
+    def adopt_ambient_view(self):
+        """AUTO shows the live scope when there are tracks, else conditions."""
+        if self.data.get("tracks"):
+            if self.view not in ("radar", self.VIEW_DETAIL):
+                self.view = "radar"
+        elif self.view == "radar":
+            self.view = "main"
+
+    def _step_view(self, direction):
+        i = self.VIEWS.index(self.view)
+        self.view = self.VIEWS[(i + direction) % len(self.VIEWS)]
+
+    def _tracks(self):
+        return list(self.data.get("tracks") or [])
+
+    def _sel_track(self):
+        tracks = self._tracks()
+        if not tracks:
+            return None
+        if self.sel_key is not None:
+            hit = next((t for t in tracks if t.get("id") == self.sel_key), None)
+            if hit is not None:
+                return hit
+        return tracks[0]
+
+    def _step_track(self, direction):
+        tracks = self._tracks()
+        if not tracks:
+            return
+        keys = [t.get("id") for t in tracks]
+        cur = self.sel_key if self.sel_key in keys else keys[0]
+        i = keys.index(cur)
+        self.sel_key = keys[(i + direction) % len(keys)]
+        self.hold = 0
+
     def input(self, cmd):
         alerts = self.data.get("alerts") or []
-        if cmd == "left" and alerts:
+        if cmd == "up":
+            if self.view == self.VIEW_DETAIL:
+                self.view = "radar"
+            else:
+                self._step_view(-1)
+        elif cmd == "down":
+            if self.view == self.VIEW_DETAIL:
+                self.view = "radar"
+            else:
+                self._step_view(1)
+        elif cmd == "left" and self.view == "hourly":
+            hourly = self.data.get("hourly") or []
+            if hourly:
+                self.hourly_i = max(0, self.hourly_i - 1)
+        elif cmd == "right" and self.view == "hourly":
+            hourly = self.data.get("hourly") or []
+            if hourly:
+                self.hourly_i = min(max(0, len(hourly) - self.HOURLY_PAGE), self.hourly_i + 1)
+        elif cmd in ("left", "right") and self.view in ("radar", self.VIEW_DETAIL):
+            self._step_track(-1 if cmd == "left" else 1)
+            self._auto_detail = False
+        elif cmd == "left" and alerts:
             self.cur_alert = (self.cur_alert - 1) % len(alerts)
             self.hold = 0
         elif cmd == "right" and alerts:
             self.cur_alert = (self.cur_alert + 1) % len(alerts)
             self.hold = 0
-        elif cmd in ("rotate", "drop"):
-            self.cycling = not self.cycling
+        elif cmd == "rotate":
+            if self.view == "radar" and self._tracks():
+                self.view = self.VIEW_DETAIL
+                self._auto_detail = False
+            elif self.view == self.VIEW_DETAIL:
+                self.view = "radar"
+            else:
+                self.cycling = not self.cycling
+        elif cmd == "drop":
+            if self.view == self.VIEW_DETAIL:
+                self.view = "radar"
+            else:
+                self.cycling = not self.cycling
 
     def auto(self):
         pass
@@ -12266,22 +15138,35 @@ class WeatherEngine:
     # ---- simulation --------------------------------------------------------
     def tick(self):
         self.ticks += 1
+        self._apply_skin()      # cheap cached-mtime read; live-updates a skin change
         self.data = weather.FEED.get()
-        # Flash on the temperature actually changing. Rounded to whole
-        # degrees first: flashing on raw float jitter would fire constantly
-        # and mean nothing.
-        c = (self.data.get("conditions") or {}).get("temp_c")
-        self.pulse.note(round(c_to_f(c)) if isinstance(c, (int, float)) else None)
+        self.sweep = (self.sweep + self.SWEEP_DEG_PER_TICK) % 360.0
+        tracks = self._tracks()
+        ids = [t.get("id") for t in tracks]
+        if self.sel_key not in ids:
+            self.sel_key = ids[0] if ids else None
+        # Flash on a new track identity (a cell appearing), not on temp
+        # jitter -- a new storm arriving is the thing worth a pulse.
+        self.pulse.note(tuple(ids) if ids else (
+            round(c_to_f((self.data.get("conditions") or {}).get("temp_c")))
+            if isinstance((self.data.get("conditions") or {}).get("temp_c"), (int, float))
+            else None))
         self.scroll += 0.5
         alerts = self.data.get("alerts") or []
         if alerts:
             self.cur_alert %= len(alerts)
-            if self.cycling and len(alerts) > 1:
-                self.hold += 1
-                if self.hold >= self.VIEW_TICKS:
-                    self.hold = 0
-                    self.cur_alert = (self.cur_alert + 1) % len(alerts)
-        self.score = len(alerts)
+        if self.cycling and len(ids) > 1 and self.view in ("radar", self.VIEW_DETAIL):
+            self.hold += 1
+            if self.hold >= self.VIEW_TICKS:
+                self.hold = 0
+                self._step_track(1)
+                self._auto_detail = True
+        elif self.cycling and len(alerts) > 1 and self.view == "main":
+            self.hold += 1
+            if self.hold >= self.VIEW_TICKS:
+                self.hold = 0
+                self.cur_alert = (self.cur_alert + 1) % len(alerts)
+        self.score = len(tracks) or len(alerts)
 
     # ---- render --------------------------------------------------------
     @classmethod
@@ -12295,11 +15180,348 @@ class WeatherEngine:
                                 n_alerts=len(self.data.get("alerts") or []),
                                 cur_alert=self.cur_alert)
 
+    # ---- HOURLY FORECAST view (2026-08-10) ------------------------------
+    HOURLY_PAGE = 3      # real forecast hours shown at once -- lowered from 4
+                         # (2026-08-10) to give each hour two real text rows
+                         # (temp + feels-like/precip) instead of squeezing a
+                         # second fact onto a bare pixel bar.
+
+    def _frame_hourly(self):
+        """Real next-N-hours forecast (weather.py's `hourly` list -- NWS
+        gridpoint hourly periods: temp, a real "feels like" when NWS's
+        own real dewpoint/humidity/wind put it outside the ~50-80F band
+        where the actual temp already IS the feels-like number (see
+        weather._hourly_feels_like_f()'s own docstring), precip%, short
+        text, wind, already real Fahrenheit). Paged HOURLY_PAGE at a time
+        via left/right.
+
+        TWO TEXT ROWS per hour, not a bar chart -- real feedback on the
+        earlier radar-scope draft (2026-08-10, same session) was that
+        unlabeled pixel graphics read as noise on a screen this small;
+        plain readable numbers avoid repeating that mistake here."""
+        buf = blank()
+        fill(buf, self.BG)
+        hourly = self.data.get("hourly") or []
+        draw_header(buf, "HOURLY", self.ACCENT,
+                    right_tag=(f"+{self.hourly_i + 1}H" if hourly else None))
+        if self.data.get("configured") and hourly:
+            self._draw_weather_ambient(buf, self.data.get("conditions"))
+
+        if not self.data.get("configured"):
+            draw_text_centered(buf, 28, "SET LOCATION", self.INK)
+            draw_text_centered(buf, 38, "TO SEE FORECAST", self.INK_DIM)
+            return bytes(buf)
+        if not hourly:
+            draw_text_centered(buf, 28, "NO DATA" if self.data.get("err") else "LOADING",
+                               self.INK_DIM)
+            return bytes(buf)
+
+        page = hourly[self.hourly_i:self.hourly_i + self.HOURLY_PAGE]
+        row_h = (HEIGHT - 12) // max(1, len(page))
+        y = 12
+        for h in page:
+            hh = self._hour_label(h.get("start"))
+            temp = h.get("temp_f")
+            feels = h.get("feels_f")
+            pct = h.get("precip_pct")
+            tx = f"{hh or '--'}  {temp:.0f}F" if isinstance(temp, (int, float)) \
+                else f"{hh or '--'}  --F"
+            draw_text3x5(buf, 2, y, tx, (255, 235, 180))
+            # Second row: real feels-like when it's a genuinely different
+            # fact from the actual temp, real precip% alongside it when
+            # present -- plain text, never a pixel bar (see class note).
+            # "FL"/bare "%" match the main conditions view's own compact
+            # tags ("FL 83F") rather than a second, wordier convention --
+            # caught by render_audit.py as a real overflow at the fuller
+            # "FEELS 104  20% RAIN" wording (75px against a 62px budget)
+            # before shipping this shorter form.
+            sub_parts = []
+            # `temp or feels`, not `temp is not None`, was a real bug
+            # (2026-08-11 audit): a genuine 0F real temp is falsy, so
+            # `0 or feels` evaluated to `feels` and the comparison became
+            # `feels != feels` -- always False, silently suppressing the
+            # FL tag at exactly 0F even when the real computed wind
+            # chill genuinely differed. Every other "is this a real,
+            # different fact" check in this file already uses
+            # `is not None` for exactly this reason.
+            if isinstance(feels, (int, float)) and isinstance(temp, (int, float)) \
+                    and round(feels) != round(temp):
+                sub_parts.append(f"FL {feels:.0f}")
+            if isinstance(pct, (int, float)):
+                sub_parts.append(f"{pct:.0f}%")
+            if sub_parts:
+                draw_text3x5(buf, 2, y + 7, fit_text("  ".join(sub_parts), WIDTH - 4),
+                            self.INK_DIM)
+            y += row_h
+        if len(hourly) > self.HOURLY_PAGE:
+            draw_dots(buf, HEIGHT - 4,
+                     -(-len(hourly) // self.HOURLY_PAGE),
+                     self.hourly_i // self.HOURLY_PAGE, on=self.ACCENT)
+        return bytes(buf)
+
+    @staticmethod
+    def _hour_label(iso):
+        """"2026-08-10T17:00:00-04:00" -> "5P" -- real local hour from the
+        real ISO timestamp NWS returned, never a computed/guessed offset."""
+        if not iso:
+            return None
+        try:
+            t = time.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            return None
+        h = t.tm_hour % 12 or 12
+        return f"{h}{'A' if t.tm_hour < 12 else 'P'}"
+
+    # ---- STORM RADAR view -- REDESIGNED 2026-08-10 for legibility --------
+    # First draft reused the flight/satellite scope's full visual language
+    # (dotted rings, a warned-polygon outline, a separate crossing motion-
+    # projection line, a tiny abbreviated legend). Real owner feedback
+    # against that SAME scope language elsewhere in the project ("no idea
+    # what the icons mean", "too cluttered for a tiny screen") -- and this
+    # view would have inherited the identical problem, since it reused the
+    # identical primitives. Rebuilt from scratch around one rule: a
+    # stranger should be able to read it at a glance, no legend needed.
+    #
+    # ONE ring. ONE pointer (home to the storm's real bearing -- nothing
+    # else drawn on the circle, no polygon outline, no second crossing
+    # line for motion). Everything else is PLAIN TEXT: real distance in
+    # miles, real compass direction (reusing the same 8-point _compass()
+    # the conditions view's wind direction already uses -- one compass
+    # convention, not a second), and real motion described in words
+    # ("MOVING NE") instead of a second vector nobody could parse at a
+    # glance. This is a deliberate move away from the scope metaphor for
+    # weather specifically, not a smaller/dimmer copy of it.
+    def _scope_r_frac(self, dist_nm):
+        """Sqrt range scale, same finding as FlightEngine: linear 80nm
+        piles every nearby cell on the home pixel. Past the rim still
+        plots on the rim so a far cell is 'out there', not invented
+        closer."""
+        if not isinstance(dist_nm, (int, float)) or dist_nm < 0:
+            return None
+        if dist_nm > self.SCOPE_RADIUS_NM:
+            return 1.0
+        return math.sqrt(dist_nm / self.SCOPE_RADIUS_NM)
+
+    def _frame_radar(self):
+        """Flights-class live scope: every storm cell with a real
+        bearing/distance is a blip. Rings, coastline, sweep, home.
+        Selected cell is white + plus. Motion is a short tick in the
+        real NWS direction. Empty sky keeps the scope (CLEAR footer)."""
+        buf = blank()
+        fill(buf, self.BG)
+        tracks = self._tracks()
+        on_scope = [t for t in tracks if t.get("on_scope")]
+        sel = self._sel_track()
+        n = len(tracks)
+        draw_header(buf, "RADAR", self.pulse.mix(self.ACCENT),
+                    right_tag=(f"{n}" if n else None),
+                    stale=bool(self.data.get("age") and self.data["age"] > 900))
+
+        if not self.data.get("configured"):
+            draw_text_centered(buf, 30, "SET LOCATION", self.INK_DIM)
+            return bytes(buf)
+
+        cx, cy, r = self.WX_CX, self.WX_CY, self.WX_R
+        draw_scope_rings(buf, [math.sqrt(nm / self.SCOPE_RADIUS_NM)
+                               for nm in self.SCOPE_RING_NM],
+                         color=(20, 30, 44), cx=cx, cy=cy, radius=r)
+
+        lat, lon, _lbl = satellite.FEED.get_location()
+        if lat is not None and lon is not None:
+            pts = []
+            for clat, clon in flights.COASTLINE:
+                brg, nm = flights.bearing_distance(lat, lon, clat, clon)
+                frac = self._scope_r_frac(nm)
+                pts.append(scope_xy(brg, frac, cx=cx, cy=cy, radius=r)
+                           if frac is not None else None)
+            for a, b in zip(pts, pts[1:]):
+                if a is not None and b is not None:
+                    draw_line(buf, a[0], a[1], b[0], b[1], (18, 28, 40))
+
+        draw_scope_crosshair(buf, color=(22, 34, 50), cx=cx, cy=cy, radius=r)
+        draw_scope_sweep(buf, self.sweep, color=self.SWEEP_COLOR,
+                         cx=cx, cy=cy, radius=r)
+
+        for t in on_scope:
+            brg = t.get("bearing_deg")
+            frac = self._scope_r_frac(t.get("dist_nm"))
+            if frac is None or brg is None:
+                continue
+            x, y = scope_xy(brg, frac, cx=cx, cy=cy, radius=r)
+            is_sel = sel is not None and t.get("id") == sel.get("id")
+            col = self.SEVERITY_COLOR.get(t.get("severity"),
+                                          self.SEVERITY_COLOR["Unknown"])
+            glow = scope_glow(brg, self.sweep)
+            mark = (255, 255, 255) if is_sel else col
+            draw_scope_target(buf, x, y, mark, glow=glow, big=is_sel)
+            mdir = t.get("motion_dir_deg")
+            if is_sel and isinstance(mdir, (int, float)):
+                ax, ay = scope_xy(mdir, 1.0, cx=int(round(x)),
+                                  cy=int(round(y)), radius=3)
+                put_px(buf, int(round(ax)), int(round(ay)), mark)
+
+        draw_scope_home(buf, cx=cx, cy=cy)
+
+        if sel and sel.get("on_scope"):
+            dist = sel.get("dist_nm")
+            brg = sel.get("bearing_deg")
+            where = ""
+            if isinstance(dist, (int, float)):
+                where = f"{nm_to_mi(dist):.0f}MI"
+            compass = self._compass(brg)
+            if compass:
+                where = (where + " " + compass).strip()
+            ev = fit_text(sel.get("event") or "", WIDTH - 4)
+            if where:
+                draw_text_centered(buf, 54, fit_text(where, WIDTH - 4),
+                                   (255, 255, 255))
+            if ev:
+                draw_text_centered(buf, 59, ev, self.INK_DIM)
+        elif tracks:
+            ev = fit_text((sel or tracks[0]).get("event") or "ADVISORY",
+                          WIDTH - 4)
+            draw_text_centered(buf, 59, ev, self.INK_DIM)
+        else:
+            draw_text_centered(buf, 59, "CLEAR", (46, 50, 62))
+        return bytes(buf)
+
+    def _frame_detail(self):
+        """One selected track at flights-DETAIL depth. Hail / gust /
+        tornado / expires only when NWS sent them."""
+        buf = blank()
+        fill(buf, self.BG)
+        t = self._sel_track()
+        tracks = self._tracks()
+        stale = bool(self.data.get("age") and self.data["age"] > 900)
+        if not t:
+            draw_header(buf, "STORM", self.ACCENT, stale=stale)
+            draw_text_centered(buf, 28, "NO STORMS", self.INK_DIM)
+            draw_text_centered(buf, 36, "TRACKED", self.INK_DIM)
+            return bytes(buf)
+
+        col = self.SEVERITY_COLOR.get(t.get("severity"), self.ACCENT)
+        n = len(tracks)
+        tag = None
+        if n > 1:
+            keys = [x.get("id") for x in tracks]
+            try:
+                tag = f"{keys.index(t.get('id')) + 1}/{n}"
+            except ValueError:
+                tag = f"{n}"
+        draw_header(buf, fit_text(t.get("severity") or "STORM", 28),
+                    self.pulse.mix(col), right_tag=tag, stale=stale)
+
+        draw_text_centered(buf, 11, fit_text(t.get("event") or "", WIDTH - 4),
+                           (255, 255, 255))
+
+        y = 20
+        dist = t.get("dist_nm")
+        brg = t.get("bearing_deg")
+        if isinstance(dist, (int, float)):
+            line = f"{nm_to_mi(dist):.0f}MI"
+            compass = self._compass(brg)
+            if compass:
+                line = f"{line} {compass}"
+            draw_text_centered(buf, y, line, col)
+            y += 8
+
+        mdir = t.get("motion_dir_deg")
+        mspd = t.get("motion_speed_kt")
+        if isinstance(mdir, (int, float)):
+            move = f"MOVING {self._compass(mdir)}"
+            if isinstance(mspd, (int, float)):
+                move = f"{move} {kt_to_mph(mspd):.0f}MPH"
+            draw_text_centered(buf, y, fit_text(move, WIDTH - 4), self.INK)
+            y += 8
+
+        extras = []
+        hail = t.get("hail_in")
+        if isinstance(hail, (int, float)):
+            extras.append("HAIL " + f"{hail:.2f}".rstrip("0").rstrip(".") + "IN")
+        gust = t.get("gust_mph")
+        if isinstance(gust, (int, float)):
+            extras.append(f"GUST {gust:.0f}MPH")
+        if extras:
+            draw_text_centered(buf, y, fit_text("  ".join(extras), WIDTH - 4),
+                               (255, 200, 90))
+            y += 8
+        torn = t.get("tornado")
+        if torn:
+            draw_text_centered(buf, y, fit_text(torn, WIDTH - 4),
+                               self.SEVERITY_COLOR.get("Extreme", col))
+            y += 8
+
+        exp = t.get("expires")
+        if isinstance(exp, (int, float)):
+            remain = exp - time.time()
+            if remain > 0:
+                mins = int(remain // 60)
+                if mins >= 60:
+                    exp_txt = f"ENDS {mins // 60}H {mins % 60:02d}M"
+                else:
+                    exp_txt = f"ENDS {mins}M"
+                draw_text_centered(buf, y, exp_txt, self.INK_DIM)
+                y += 8
+
+        if y <= 50:
+            draw_divider(buf, y)
+            y += 4
+        head = t.get("headline") or t.get("area") or ""
+        if head and y <= HEIGHT - 6:
+            if text_w(head) > WIDTH - 4:
+                draw_marquee(buf, min(y, 54), head, self.INK_DIM, self.scroll)
+            else:
+                draw_text_centered(buf, min(y, 59), head, self.INK_DIM)
+        return bytes(buf)
+
+    # ---- weather-reactive ambient touch (2026-08-10) ---------------------
+    def _draw_weather_ambient(self, buf, cond):
+        """Cheap, REAL-data-gated ambient touch drawn behind the numbers
+        in the conditions view -- night stars when it's genuinely dark
+        (real sunrise/sunset), light rain streaks when the real NWS
+        conditions text says so. Never invents a condition: gated
+        strictly on real fields already on self.data, not a generic
+        "make it pretty" animation running regardless of what's actually
+        happening. Kept sparse (a fixed handful of points, not a
+        per-pixel sweep) -- same cost discipline every icon in this
+        project already follows."""
+        text = str((cond or {}).get("text") or "").upper()
+        raining = any(k in text for k in ("RAIN", "SHOWER", "STORM", "DRIZZLE"))
+        if raining:
+            # Deterministic falling streaks: the SET of columns is fixed
+            # (seeded off i, not randomized per frame, which would read
+            # as flicker/noise instead of falling rain), only the Y
+            # offset advances with ticks. Stay below the header rule.
+            y_min, span = 10, HEIGHT - 22
+            for i in range(9):
+                x = (i * 7 + 3) % WIDTH
+                y = y_min + (self.ticks * 2 + i * 11) % span
+                put_px(buf, x, y, (50, 78, 112))
+                put_px(buf, x, y + 1, (34, 54, 80))
+            return
+        now = time.time()
+        sr, ss = self.data.get("sunrise"), self.data.get("sunset")
+        is_night = (isinstance(sr, (int, float)) and isinstance(ss, (int, float))
+                   and not (sr <= now <= ss))
+        if is_night:
+            # Fixed real star positions (not randomized -- randomizing per
+            # frame would jitter, not twinkle), a slow tick-based flicker
+            # so it reads as alive without costing more than a handful of
+            # put_px calls.
+            for i, (sx, sy) in enumerate(self.NIGHT_STARS):
+                if (self.ticks // 20 + i) % 5 != 0:
+                    put_px(buf, sx, sy, (80, 90, 118))
+
+    NIGHT_STARS = ((5, 6), (13, 4), (22, 8), (34, 5), (44, 9),
+                  (52, 6), (59, 3), (9, 15), (48, 14), (28, 2))
+
     def _frame_conditions(self):
         buf = blank()
         fill(buf, self.BG)
         cond = self.data.get("conditions")
         stale = bool(self.data.get("age") and self.data["age"] > 3600)
+        if self.data.get("configured") and cond:
+            self._draw_weather_ambient(buf, cond)     # behind everything else
 
         if not self.data.get("configured"):
             draw_header(buf, "WEATHER", self.ACCENT)
@@ -12327,8 +15549,16 @@ class WeatherEngine:
         temp_c = cond.get("temp_c")
         fl_c = weather.feels_like_c(cond)
         fl_tag = None
+        # Hide FL when it rounds to the same °F as the hero temp --
+        # repeating 76F as FL 76F is noise, not a second fact.
         if fl_c is not None:
-            fl_tag = f"FL {c_to_f(fl_c):.0f}F"
+            fl_f = c_to_f(fl_c)
+            temp_f = c_to_f(temp_c) if isinstance(temp_c, (int, float)) else None
+            if temp_f is None or round(fl_f) != round(temp_f):
+                fl_tag = f"FL {fl_f:.0f}F"
+        n_tracks = len(self._tracks())
+        if fl_tag is None and n_tracks:
+            fl_tag = f"{n_tracks}" if n_tracks > 1 else "1"
         draw_header(buf, self.data.get("place", "WEATHER"), self.ACCENT,
                     right_tag=fl_tag, stale=stale)
 
@@ -12339,6 +15569,19 @@ class WeatherEngine:
                                self.pulse.mix((255, 235, 180)), scale=2)
         else:
             draw_text_centered(buf, 14, "--F", self.INK_DIM, scale=2)
+
+        # CONDITION ICON (2026-08-11, real owner ask: "fix weather to be
+        # more visually pleasing") -- this screen was almost entirely
+        # text before this; a real sun/cloud/rain/storm/snow/fog icon,
+        # derived only from NWS's own real condition text, is the one
+        # hero visual element every other broadcast weather display has
+        # that this one didn't. Sits in the left margin beside the
+        # centered temperature -- a 2-3 digit "88F" at scale=2 leaves
+        # real room there, confirmed by the same text-width math every
+        # other centered hero line in this project already uses.
+        icon_fn = weather_icon_for(cond.get("text"))
+        if icon_fn:
+            icon_fn(buf, 8, 13, scale=1)
 
         # Today's high/low, straight from the NWS forecast periods. This
         # is the context that makes the current number mean something --
@@ -12395,13 +15638,19 @@ class WeatherEngine:
         if sun:
             draw_text_centered(buf, 58, sun, (255, 200, 120))
         else:
-            draw_text_centered(buf, 58, "NO ALERTS", (60, 110, 70))
+            n = len(self._tracks())
+            if n:
+                label = "1 STORM" if n == 1 else f"{n} STORMS"
+                draw_text_centered(buf, 58, label, (255, 170, 80))
+            else:
+                draw_text_centered(buf, 58, "NO ALERTS", (60, 110, 70))
         return bytes(buf)
 
     AMBIENT_STYLE = "fade"          # atmospheric: weather dissolves in
 
     def ambient_weight(self):
-        return 3.0 if (self.data.get("alerts") or []) else 1.0
+        n = len(self.data.get("tracks") or self.data.get("alerts") or [])
+        return 3.0 if n else 1.0
 
 
     def _sun_line(self):
@@ -12428,6 +15677,12 @@ class WeatherEngine:
         return f"{label} {hh}:{time.strftime('%M', t)}{time.strftime('%p', t)[0]}"
 
     def frame(self):
+        if self.view == "hourly":
+            return self._frame_hourly()
+        if self.view == "radar":
+            return self._frame_radar()
+        if self.view == self.VIEW_DETAIL:
+            return self._frame_detail()
         alerts = self.data.get("alerts") or []
         if alerts:
             return self._frame_alert(alerts[self.cur_alert % len(alerts)])
@@ -12456,7 +15711,7 @@ class ClockEngine:
     """
 
     name = "clock"
-    tick_rate = 0.1          # 10Hz is plenty; only the colon blinks per second
+    tick_rate = 0.05         # analog second hand wants this; digital still only blinks on a real second
 
     BG = (0, 0, 0)
     ACCENT = (120, 200, 255)
@@ -12467,26 +15722,48 @@ class ClockEngine:
     SUN = (255, 170, 90)
     DIM = (70, 76, 92)
 
+    def _apply_skin(self):
+        """Same instance-shadowing idiom as SportsEngine/WeatherEngine's
+        own _apply_skin() (2026-08-10). ClockEngine leads with ACCENT
+        (the countdown/highlight color) and DIM (the muted secondary
+        text) as its two chrome colors -- TIME/DATE/TEMP/ISS/SUN stay
+        fixed, since those read as the real hero readouts (the time
+        itself, the real temperature) rather than decorative chrome, the
+        same "never recolor the real data, only the frame" line every
+        other skin application in this project draws."""
+        skin = skins.get_active()
+        self.ACCENT = skin["accent"]
+        self.DIM = skin["ink_dim"]
+
     def __init__(self):
         self.score = 0
         self.reset()
 
     def reset(self):
+        self._apply_skin()
         self.ticks = 0
-        self.show_seconds = False     # face button toggles a seconds readout
+        self.show_seconds = False     # digital-face only: face button toggles seconds
+        self.analog = True            # resting default -- the wall object, not a readout
         self.wx = {}
         self.sky = {}
 
     def has_content(self):
-        """Always true -- local time is always available. Present for
-        contract uniformity (AmbientEngine._available calls this
-        unguarded); see the note there about why clock is NOT in the
-        rotation."""
+        """Always true -- local time is always available."""
         return True
+
+    def ambient_weight(self):
+        # Short analog beat inside the world rotation -- the face is
+        # beautiful, but it must not eat a full 20s slot every lap.
+        return 0.65
 
     # ---- input -----------------------------------------------------------
     def input(self, cmd):
         if cmd in ("rotate", "drop"):
+            # Face button flips analog <-> digital. Seconds stay a digital
+            # extra (left/right unused here) so the analog face isn't
+            # fighting a third state.
+            self.analog = not self.analog
+        elif cmd in ("left", "right") and not self.analog:
             self.show_seconds = not self.show_seconds
 
     def auto(self):
@@ -12495,6 +15772,7 @@ class ClockEngine:
     # ---- simulation --------------------------------------------------------
     def tick(self):
         self.ticks += 1
+        self._apply_skin()      # cheap cached-mtime read; live-updates a skin change
         # Reads the shared feeds the same way every other engine does.
         # Cheap cached reads; also keeps them warm while resting, so
         # switching to weather or sky from here shows data immediately
@@ -12516,9 +15794,246 @@ class ClockEngine:
         sep = ":" if blink_on else " "
         return f"{h}{sep}{time.strftime('%M', t)}"
 
+    def _draw_ambient(self, buf, y_min=10, y_max=51):
+        """Same real-data-gated touch WeatherEngine's own
+        _draw_weather_ambient() established (2026-08-10 extension) --
+        night stars / light rain streaks, reused rather than duplicated:
+        this reads the exact same fields (`conditions.text`, `sunrise`,
+        `sunset`) off `self.wx` (weather.FEED.get(), already polled here
+        every tick to warm the feed) instead of WeatherEngine's own
+        `self.data`. The clock is the panel's RESTING state and is lit
+        far more often than the weather mode itself, so this is the one
+        place this touch reaches the most real screen-time -- and it
+        never invents a condition: absent real sunrise/sunset or
+        conditions text, nothing draws, same honest-degrade rule as
+        every other field on this screen.
+
+        y_min/y_max keep rain and stars off the header rule (y=0..8)
+        and the analog footer row. Analog used to draw rain through
+        the place name."""
+        cond = (self.wx or {}).get("conditions") or {}
+        text = str(cond.get("text") or "").upper()
+        raining = any(k in text for k in ("RAIN", "SHOWER", "STORM", "DRIZZLE"))
+        if raining:
+            span = max(1, y_max - y_min)
+            for i in range(9):
+                x = (i * 7 + 3) % WIDTH
+                y = y_min + (self.ticks * 2 + i * 11) % span
+                if y_min <= y <= y_max:
+                    put_px(buf, x, y, (50, 78, 112))
+                if y_min <= y + 1 <= y_max:
+                    put_px(buf, x, y + 1, (34, 54, 80))
+            return
+        sr, ss = (self.wx or {}).get("sunrise"), (self.wx or {}).get("sunset")
+        now = time.time()
+        is_night = (isinstance(sr, (int, float)) and isinstance(ss, (int, float))
+                   and not (sr <= now <= ss))
+        if is_night:
+            for i, (sx, sy) in enumerate(WeatherEngine.NIGHT_STARS):
+                if sy < y_min or sy > y_max:
+                    continue
+                if (self.ticks // 20 + i) % 5 != 0:
+                    put_px(buf, sx, sy, (60, 68, 92))    # dimmer than weather's own -- stays behind the hero clock, not competing with it
+
     def frame(self):
+        if self.analog:
+            return self._frame_analog()
+        return self._frame_digital()
+
+    # Analog face geometry. Header occupies y=0..8; footer glyph must
+    # start at or before y=59. cy=31 / r=20 puts the rim at y=11 and
+    # y=51, leaving a clean 3px gap under the header and a 5px footer
+    # row at y=54.
+    FACE_CX, FACE_CY, FACE_R = 32, 31, 20
+
+    def _weather_wash_color(self, now):
+        """A dim face fill from REAL NWS conditions text + real sunrise/
+        sunset. Returns None when there is no condition to paint -- never
+        a guessed mood. Colors stay well under hand/tick brightness so
+        the wash is atmosphere, not a second subject."""
+        cond = (self.wx or {}).get("conditions") or {}
+        text = str(cond.get("text") or "").upper()
+        if not text:
+            return None
+        sr, ss = (self.wx or {}).get("sunrise"), (self.wx or {}).get("sunset")
+        is_night = (isinstance(sr, (int, float)) and isinstance(ss, (int, float))
+                    and not (sr <= now <= ss))
+        if any(k in text for k in ("THUNDER", "STORM")):
+            return (32, 10, 48)
+        if any(k in text for k in ("RAIN", "SHOWER", "DRIZZLE")):
+            return (8, 18, 36)
+        if any(k in text for k in ("SNOW", "SLEET", "ICE")):
+            return (16, 22, 34)
+        if any(k in text for k in ("FOG", "HAZE", "MIST")):
+            return (18, 20, 16)
+        if any(k in text for k in ("CLOUD", "OVERCAST")):
+            return (14, 16, 22)
+        if any(k in text for k in ("CLEAR", "SUNNY", "FAIR")):
+            return (6, 8, 24) if is_night else (32, 18, 6)
+        return None
+
+    @staticmethod
+    def _tod_deg(unix_ts):
+        """Seconds-since-local-midnight -> degrees, 0 at 12 o'clock,
+        clockwise. Same polar convention as scope_xy() / the analog
+        hands, so the daylight pip sits where a 24-hour hand would."""
+        lt = time.localtime(unix_ts)
+        frac = (unix_ts % 1) if isinstance(unix_ts, float) else 0.0
+        sec = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec + frac
+        return (sec / 86400.0) * 360.0
+
+    @staticmethod
+    def _cw_between(deg, start, end):
+        return ((deg - start) % 360.0) <= ((end - start) % 360.0)
+
+    def _draw_daylight_ring(self, buf, cx, cy, radius, now):
+        """24-hour rim: warm arc while the sun is up, dim arc at night,
+        a pip at NOW. Sunrise/sunset are the real weather.FEED unix
+        times already used by _sun_line(); if either is missing the
+        ring is skipped rather than guessed."""
+        sr, ss = (self.wx or {}).get("sunrise"), (self.wx or {}).get("sunset")
+        if not isinstance(sr, (int, float)) or not isinstance(ss, (int, float)):
+            return
+        sr_deg = self._tod_deg(sr)
+        ss_deg = self._tod_deg(ss)
+        now_deg = self._tod_deg(now)
+        day = (255, 168, 56)
+        night = (18, 24, 48)
+        for i in range(72):
+            deg = i * 5.0
+            col = rim(day, 0.55) if self._cw_between(deg, sr_deg, ss_deg) else night
+            a = math.radians(deg)
+            put_px(buf, int(round(cx + radius * math.sin(a))),
+                   int(round(cy - radius * math.cos(a))), col)
+        a = math.radians(now_deg)
+        px = int(round(cx + radius * math.sin(a)))
+        py = int(round(cy - radius * math.cos(a)))
+        pip = day if self._cw_between(now_deg, sr_deg, ss_deg) else (150, 175, 255)
+        put_px(buf, px, py, pip)
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            put_px(buf, px + dx, py + dy, rim(pip, 0.55))
+
+    def _draw_hand(self, buf, cx, cy, deg, length, color, thick=False):
+        a = math.radians(deg)
+        x1 = cx + length * math.sin(a)
+        y1 = cy - length * math.cos(a)
+        draw_line(buf, cx, cy, x1, y1, color)
+        if thick:
+            # One-pixel parallel, perpendicular to the hand -- at this
+            # size a true 2px stroke is the difference between "hour
+            # hand" and "another thin line".
+            px, py = math.cos(a), math.sin(a)
+            draw_line(buf, cx + px, cy + py, x1 + px, y1 + py, color)
+
+    def _frame_analog(self):
         buf = blank()
         fill(buf, self.BG)
+        now = time.time()
+        t = time.localtime(now)
+        place = (self.wx or {}).get("place") or ""
+        draw_header(buf, place or "HENDERBURGH", self.ACCENT,
+                    right_tag=time.strftime("%p", t).upper())
+
+        cx, cy, r = self.FACE_CX, self.FACE_CY, self.FACE_R
+        wash = self._weather_wash_color(now)
+        if wash:
+            fill_disk(buf, cx, cy, r - 1, wash)
+        else:
+            # No condition to paint -- keep the old night-star / rain
+            # texture rather than a dead black disk.
+            self._draw_ambient(buf)
+
+        # Hour ticks. Cardinals are longer so 12/3/6/9 read without
+        # numerals (numerals at this radius collide with the hands).
+        for h in range(12):
+            deg = h * 30.0
+            a = math.radians(deg)
+            inner = r - (4 if h % 3 == 0 else 2)
+            col = rim(self.TIME, 0.55 if h % 3 == 0 else 0.32)
+            draw_line(buf,
+                      cx + inner * math.sin(a), cy - inner * math.cos(a),
+                      cx + (r - 1) * math.sin(a), cy - (r - 1) * math.cos(a),
+                      col)
+
+        self._draw_daylight_ring(buf, cx, cy, r, now)
+
+        # Hands from REAL wall-clock fractions, not tick counts -- a
+        # tick-derived second hand would drift against every other clock
+        # in the room, same trap the digital colon already avoids.
+        frac = now % 1.0
+        sec = t.tm_sec + frac
+        minute = t.tm_min + sec / 60.0
+        hour = (t.tm_hour % 12) + minute / 60.0
+        self._draw_hand(buf, cx, cy, hour * 30.0, r * 0.50, self.TIME, thick=True)
+        self._draw_hand(buf, cx, cy, minute * 6.0, r * 0.74, self.TIME, thick=True)
+        self._draw_hand(buf, cx, cy, sec * 6.0, r * 0.86, self.ACCENT, thick=False)
+        put_px(buf, cx, cy, self.TIME)
+        put_px(buf, cx, cy - 1, rim(self.TIME, 0.6))
+        put_px(buf, cx, cy + 1, rim(self.TIME, 0.6))
+
+        # One footer fact, not a stack -- the face is the subject.
+        # Imminent ISS outranks temp outranks date, same "the thing you
+        # might actually look up for" order the digital face used, just
+        # one line so it never crowds the rim.
+        footer, fcol = self._analog_footer(t, now)
+        if footer:
+            draw_text_centered(buf, 54, fit_text(footer, WIDTH - 4), fcol)
+        return bytes(buf)
+
+    ISS_HORIZON_S = 2 * 3600     # analog and digital share this window
+
+    def _iss_line(self):
+        """Shared analog/digital ISS readout. One horizon, both faces.
+
+        Order, never invented:
+          1. ISS NOW -- visible in sky_now, or inside a predicted
+             visible-pass window (rise already happened, duration
+             not elapsed). The old analog footer required secs > 0
+             and so went silent for the entire actual pass.
+          2. Countdown -- next rise within ISS_HORIZON_S (2h).
+             Digital used to show any future pass (days out);
+             analog cut at 2h. One rule now.
+        Returns (label, color) or (None, None).
+        """
+        import datetime as _dt
+        utc = _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
+        iss_now = next((o for o in (self.sky.get("sky_now") or [])
+                        if o.get("is_iss") and o.get("visible")), None)
+        if iss_now:
+            return "ISS NOW", self.ISS
+        iss = next((p for p in (self.sky.get("passes") or []) if p.get("is_iss")), None)
+        if not iss:
+            return None, None
+        try:
+            secs = (iss["rise"] - utc).total_seconds()
+        except (TypeError, KeyError):
+            return None, None
+        dur = iss.get("duration_s") or 0
+        try:
+            dur = float(dur)
+        except (TypeError, ValueError):
+            dur = 0.0
+        if -dur <= secs <= 0:
+            return "ISS NOW", self.ISS
+        if 0 < secs <= self.ISS_HORIZON_S:
+            return f"ISS {SatelliteEngine._fmt_countdown(secs)}", self.ISS
+        return None, None
+
+    def _analog_footer(self, t, now):
+        iss_label, iss_col = self._iss_line()
+        if iss_label:
+            return iss_label, iss_col
+        cond = (self.wx or {}).get("conditions")
+        temp_c = cond.get("temp_c") if cond else None
+        date = f"{time.strftime('%a', t)} {t.tm_mday}".upper()
+        if isinstance(temp_c, (int, float)):
+            return f"{date} {c_to_f(temp_c):.0f}F", self.TEMP
+        return date, self.DATE
+
+    def _frame_digital(self):
+        buf = blank()
+        fill(buf, self.BG)
+        self._draw_ambient(buf)
         t = time.localtime()
 
         # Blink on a real half-second boundary from the clock itself, not
@@ -12564,20 +16079,11 @@ class ClockEngine:
             draw_text_centered(buf, y, "--F", self.DIM)
             y += 9
 
-        # --- next ISS pass (only if the ISS is actually in the unified
-        # sky-pass list -- retired satellite.py's own polluxlabs pass
-        # predictor once skypass.py's SGP4 predictions were validated to
-        # agree with it; this is the ISS entry from that ONE list now,
-        # picked by NORAD id, same as SatelliteEngine's telemetry slot) --
-        import datetime as _dt
-        now = _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
-        iss = next((p for p in (self.sky.get("passes") or []) if p.get("is_iss")), None)
-        if iss:
-            secs = (iss["rise"] - now).total_seconds()
-            if secs > 0:
-                label = f"ISS {SatelliteEngine._fmt_countdown(secs)}"
-                draw_text_centered(buf, y, fit_text(label, WIDTH - 4), self.ISS)
-                y += 8
+        # --- ISS (same horizon as the analog footer: NOW, or <= 2h) ---
+        iss_label, iss_col = self._iss_line()
+        if iss_label:
+            draw_text_centered(buf, y, fit_text(iss_label, WIDTH - 4), iss_col)
+            y += 8
 
         # --- next sun event, reusing the weather feed (no new source) ---
         # A clock that also tells you how much daylight is left is doing
@@ -12757,6 +16263,77 @@ class BlogEngine(Browsable):
         return bytes(buf)
 
 
+class OwnerNoteEngine:
+    """OWNER NOTE -- a persistent, owner-authored message (ownernote.py).
+
+    Deliberately styled after `BlogEngine`'s own calm, no-scroll,
+    Vestaboard-style presentation -- same "this earns almost no
+    attention on purpose" design goal -- but simpler: one static note,
+    no rotation, no pulse (there is no "new post arriving" moment to
+    flash on; the owner sets it and it just sits there until changed).
+
+    No I/O in tick() -- ownernote.py has no FEED/poller (see its own
+    module docstring for why: this is local config the owner PUSHES via
+    the control panel, not something to poll), so tick() reads the
+    config directly, matching dnd.py's own "just read the config
+    file" simplicity for a similarly tiny, locally-owned setting.
+    """
+
+    name = "ownernote"
+    tick_rate = 1.0          # no animation at all -- re-reading once a second is plenty
+
+    BG = (0, 0, 0)
+    ACCENT = (255, 214, 110)
+    BODY = (225, 228, 238)
+    INK_DIM = (70, 76, 92)
+    BODY_LINES = 6
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.data = ownernote.load_config()
+
+    def has_content(self):
+        return bool(self.data.get("text"))
+
+    def input(self, cmd):
+        pass          # nothing to browse -- one static note
+
+    def auto(self):
+        pass
+
+    def tick(self):
+        self.data = ownernote.load_config()
+        self.score = 1 if self.data.get("text") else 0
+
+    AMBIENT_STYLE = "fade"
+
+    def ambient_weight(self):
+        return 0.8    # same quiet weighting as the guestbook it's modeled on
+
+    def frame(self):
+        buf = blank()
+        fill(buf, self.BG)
+        text = self.data.get("text")
+
+        if not text:
+            draw_header(buf, "NOTE", self.ACCENT)
+            draw_text_centered(buf, 26, "NO NOTE SET", self.INK_DIM)
+            draw_text_centered(buf, 34, "YET", self.INK_DIM)
+            return bytes(buf)
+
+        draw_header(buf, "NOTE", self.ACCENT)
+        lines = wrap_text(text, WIDTH - 6, self.BODY_LINES)
+        total_h = len(lines) * 8
+        y = max(14, (HEIGHT - total_h) // 2 + 4)
+        for ln in lines:
+            draw_text_centered(buf, y, ln, self.BODY)
+            y += 8
+        return bytes(buf)
+
+
 class EventsLogEngine(Browsable):
     """"RECENT EVENTS" -- what just happened: planes that entered the
     configured window, big sports moments, and Home Assistant
@@ -12818,6 +16395,9 @@ class EventsLogEngine(Browsable):
     def has_content(self):
         return bool(self.entries)
 
+    def ambient_weight(self):
+        return 1.2 if self.has_content() else 0.5
+
     def _step(self, direction):
         pages = max(1, -(-len(self.entries) // self.ROWS_PER_PAGE))
         self.page = (self.page + direction) % pages
@@ -12842,7 +16422,9 @@ class EventsLogEngine(Browsable):
         n = len(self.entries)
         pages = max(1, -(-n // self.ROWS_PER_PAGE))
         tag = f"{self.page + 1}/{pages}" if n else None
-        draw_header(buf, "RECENT EVENTS", self.ACCENT, right_tag=tag)
+        # "EVENTS" not "RECENT EVENTS": 13 chars + a page tag overflows
+        # the 64px header (fit_text dropped EVENTS and left RECENT).
+        draw_header(buf, "EVENTS", self.ACCENT, right_tag=tag)
         draw_divider(buf, 9)
 
         if not n:
@@ -12876,67 +16458,108 @@ class EventsLogEngine(Browsable):
 
 
 class AmbientEngine(Browsable):
-    """Master rotation: flights -> ISS -> weather -> sports -> news, on a
-    loop, skipping anything that has nothing to show right now.
+    """Director, not a playlist. Four channels, one glass.
 
-    Composition, not reimplementation: this owns real instances of the
-    other engines and delegates tick()/frame()/input() to whichever is
-    current. Every sub-mode therefore looks and behaves in the rotation
-    exactly as it does on its own, and a fix to any of them lands here for
-    free. Nothing about their rendering is duplicated.
+    AUTO is a SHOW: sky, then what's happening, then one page, then
+    rest. A live favorite locks sports DETAIL. A new storm or a new
+    song takes the glass. Clock is the empty-state fallback and a
+    daytime-quiet breath -- not a slot every lap.
+    WORLD -- every glance mode, including the analog clock.
+    ARCADE -- self-playing games as living art.
+    MIX -- the owner's own shortlist (ambient_config.json).
 
-    CLOCK IS DELIBERATELY NOT IN SEQUENCE. Clock is the panel's *resting*
-    state (what is on when nothing has been chosen); ambient is an active
-    choice to watch live data cycle. Putting clock in the rotation would
-    also break the rotation's own contract: has_content() is always true
-    for a clock, so it could never be skipped and would consume a full
-    dwell slot of every lap, displacing the data you actually selected
-    this mode to see. It IS used as ambient's empty-state fallback, since
-    a clock beats a "no data" screen.
+    Up/down changes channel (blackout, not a header stamp).
+    Left/right steps the act. Rotate holds the scene (a pip says so).
 
-    All five sub-engines are ticked every tick, not just the visible one.
-    That is deliberate and load-bearing: each engine's tick() is what
-    calls its FEED.get(), and a feed whose get() stops being called goes
-    idle and stops polling (IDLE_STOP). Ticking only the visible one would
-    mean every mode had cold, empty data at the moment it came up -- and
-    has_content() would then skip it, so the rotation would collapse to
-    whichever mode happened to be warm. Ticking is cheap (cached reads,
-    no I/O on this thread); only the current engine's frame() is drawn.
+    Composition: owns real sub-engines and delegates. A fix to sports
+    DETAIL lands here for free. Sub-engines are ticked every tick so
+    feeds stay warm (IDLE_STOP).
     """
 
     name = "ambient"
     tick_rate = 0.05
+    VERTICAL_BROWSE = True       # up/down = channel, left/right = slot
 
     BG = (0, 0, 0)
     INK = (150, 160, 185)
     INK_DIM = (70, 76, 92)
+    ACCENT = (176, 96, 255)
 
-    # Order is deliberate: the two "look up, something is happening right
-    # now" modes lead, then weather, then the two reading-heavy tickers.
-    SEQUENCE = ("flights", "satellite", "weather", "sports", "news", "blog")
+    CHANNELS = ambient.CHANNELS
+    CHANNEL_LABEL = {
+        "auto": "AUTO", "world": "WORLD", "arcade": "ARCADE", "mix": "MIX",
+    }
+
+    # Every glance / data mode that is honest to put on a wall.
+    # WORLD walks this whole list. AUTO walks ACTS, not this tour.
+    # Takeovers (gameday / planewatch / notify) stay out -- they seize
+    # the panel, they do not take a turn.
+    SEQUENCE = (
+        "flights", "satellite", "weather", "sports", "nowplaying",
+        "followflight", "departures", "ticker", "news", "events",
+        "blog", "ownernote", "clock",
+    )
+    # AUTO acts -- look up, then what's happening, then the board,
+    # then one page of reading. Rest is night gallery / quiet clock.
+    ACT_SKY = ("flights", "satellite", "weather")
+    ACT_PLAY = ("sports", "nowplaying", "followflight")
+    ACT_BOARD = ("departures", "ticker")
+    ACT_PAGE = ("news", "events", "blog", "ownernote")
+    # Night / quiet-world rest faces -- the calm generative ones.
+    GALLERY = ("life", "tunnel", "tron", "powder")
+    # Every native game that can drive itself. Visually the arcade.
+    ARCADE = (
+        "life", "tunnel", "tron", "powder", "snake", "pong", "breakout",
+        "chase", "flappy", "invaders", "dodge", "tetris", "2048", "brawler",
+    )
+    MIX_EXTRA = ()
+    NIGHT_GALLERY_START = 2
+    NIGHT_GALLERY_END = 7
+    CHANNEL_FLASH_TICKS = 0      # ident is a blackout, not a stamped header
 
     DWELL_TICKS = 400        # ~20s per mode at this tick rate
     DWELL_MIN = 200          # ~10s -- floor, so nothing flashes past
     DWELL_MAX = 900          # ~45s -- ceiling, so nothing hogs the rotation
-    TRANSITION_TICKS = 8     # ~0.4s slide between sub-modes at this tick rate
+    TRANSITION_TICKS = 8     # WORLD/MIX/ARCADE slide
+    AUTO_TRANSITION_TICKS = 16   # ~0.8s fade through black -- a stage cut
     RECHECK_TICKS = 60       # ~3s before giving up on an all-empty rotation
+
+    # STICKY RECALL (2026-08-10, robbydyer/sports' own "stickyDelay"
+    # precedent): a live favorite game buried elsewhere in the rotation
+    # gets pulled back to the front periodically, not just a longer dwell
+    # when its turn naturally comes up (FAVORITE_AMBIENT_BOOST above).
+    # ~3 minutes -- long enough that the rest of the rotation still gets
+    # real airtime between recalls, short enough that you never go too
+    # long without a check-in on the one game you actually asked to
+    # follow.
+    STICKY_RECALL_TICKS = 3600     # ~3min at this tick rate
 
     def __init__(self):
         self.score = 0
-        self.engines = {n: ENGINES[n]() for n in self.SEQUENCE}
-        # Not part of SEQUENCE -- see the class docstring for why clock is
-        # excluded from the rotation but used as the empty-state fallback.
+        names = []
+        for group in (self.SEQUENCE, self.ARCADE, self.MIX_EXTRA):
+            for n in group:
+                if n not in names:
+                    names.append(n)
+        self.engines = {n: ENGINES[n]() for n in names if n in ENGINES}
+        # Dedicated fallback instance -- if clock is already in SEQUENCE
+        # we still keep one that is never mid-rotation, so an all-empty
+        # world still has a clean analog face.
         self._fallback = ClockEngine()
         self.reset()
 
     def reset(self):
         for e in self.engines.values():
             e.reset()
+        cfg = ambient.load_config()
+        self.channel = cfg["channel"] if cfg["channel"] in self.CHANNELS else "auto"
+        self._mix = [n for n in (cfg.get("mix") or []) if n in self.engines]
         self.idx = 0
         self.hold = 0
         self.ticks = 0
         self.cycling = True
-        self._trans_from = None
+        # First light -- resolve out of black, not a hard cut onto a card.
+        self._trans_from = transitions.BLACK
         self._trans_i = 0
         # BIG-MOMENT CELEBRATION state. Lives here, not on any sub-engine,
         # because the interrupt is an AMBIENT behaviour -- manual browsing
@@ -12945,11 +16568,134 @@ class AmbientEngine(Browsable):
         # for the shared contract every sport plugs into.
         self._celebration = None
         self._celebration_t = 0
+        self._sticky_recall_hold = 0     # ticks since sports was last shown while a favorite is live
+        self._music_key = None           # last nowplaying track identity, for the steal
+        self._storm_key = None           # last weather-track set, for the steal
+        self._page_slot = 0              # which ACT_PAGE name this AUTO lap shows
+        self._channel_flash = 0
         self._init_scroll()
 
     @property
     def current(self):
-        return self.engines[self.SEQUENCE[self.idx]]
+        slots = self._slot_names()
+        if not slots:
+            return self._fallback
+        return self.engines[slots[self.idx % len(slots)]]
+
+    def _night_gallery_open(self):
+        h = time.localtime().tm_hour
+        return self.NIGHT_GALLERY_START <= h < self.NIGHT_GALLERY_END
+
+    def _world_quiet(self):
+        """True when AUTO has nothing in the world worth a dwell --
+        no live sports, no planes, no visible pass, no named track.
+        Gallery then becomes the rest face instead of a clock loop."""
+        sports_eng = self.engines.get("sports")
+        if sports_eng is not None and (
+                sports_eng.favorite_live()
+                or any(ev.get("live") or ev.get("state") == "in"
+                       for ev in (getattr(sports_eng, "universal", None) or []))):
+            return False
+        fl = self.engines.get("flights")
+        if fl is not None and fl.has_content():
+            return False
+        sat = self.engines.get("satellite")
+        if sat is not None and sat.has_content():
+            return False
+        np = self.engines.get("nowplaying")
+        if np is not None and np.has_content():
+            return False
+        wx = self.engines.get("weather")
+        if wx is not None and (wx.data.get("tracks") or wx.data.get("alerts")):
+            return False
+        ff = self.engines.get("followflight")
+        if ff is not None and ff.has_content():
+            return False
+        return True
+
+    def _slot_names(self):
+        """Live rotation for the current channel. idx indexes THIS list."""
+        ch = self.channel
+        if ch == "arcade":
+            return [n for n in self.ARCADE if n in self.engines]
+        if ch == "mix":
+            return [n for n in self._mix if n in self.engines]
+        if ch == "world":
+            return list(self.SEQUENCE)
+        # AUTO -- acts, not a museum tour. Clock is a quiet-day breath
+        # or the empty fallback, never a 13th equal sibling.
+        names = []
+        for group in (self.ACT_SKY, self.ACT_PLAY, self.ACT_BOARD):
+            names.extend(n for n in group if n in self.engines)
+        page = self._auto_page_name()
+        if page and page not in names:
+            names.append(page)
+        night = self._night_gallery_open()
+        quiet = self._world_quiet()
+        if night:
+            names.extend(n for n in self.GALLERY if n not in names)
+        elif quiet and "clock" in self.engines and "clock" not in names:
+            names.append("clock")
+        return names
+
+    def _auto_page_name(self):
+        """One reading mode per AUTO lap, whichever still has content."""
+        pages = [n for n in self.ACT_PAGE
+                 if n in self.engines and self.engines[n].has_content()]
+        if not pages:
+            return None
+        return pages[self._page_slot % len(pages)]
+
+    def set_channel(self, name, persist=True):
+        """Switch channel. Resets the slot cursor, flashes the ident,
+        does not reset sub-engines (feeds stay warm)."""
+        ch = str(name or "").strip().lower()
+        if ch not in self.CHANNELS or ch == self.channel:
+            if ch in self.CHANNELS:
+                self.channel = ch
+            return self.channel
+        self.channel = ch
+        self.idx = 0
+        self.hold = 0
+        self._channel_flash = 0
+        self._trans_from = transitions.BLACK
+        self._trans_i = 0
+        if persist:
+            try:
+                ambient.save_config(channel=ch)
+            except (OSError, ValueError):
+                pass
+        return self.channel
+
+    def apply_config(self, channel=None, mix=None):
+        """Live-apply a config POST without reconstructing engines."""
+        if mix is not None:
+            self._mix = [n for n in mix if n in self.engines]
+        if channel is not None:
+            self.set_channel(channel, persist=False)
+        return self.channel_state()
+
+    def channel_state(self):
+        # _slot_names() walks every engine in the current channel (AUTO
+        # additionally checks has_content() per ACT_PAGE engine and
+        # queries night/quiet state) -- computed once here rather than
+        # the three times the original one-liner called it, since this
+        # is polled by the control panel's own status card, not just a
+        # one-shot read.
+        slots = self._slot_names()
+        return {
+            "channel": self.channel,
+            "channels": list(self.CHANNELS),
+            "mix": list(self._mix),
+            "mixable": [n for n in (list(self.SEQUENCE) + list(self.GALLERY)
+                                    + list(self.MIX_EXTRA))
+                        if n in self.engines],
+            "showing": slots[self.idx % len(slots)] if slots else None,
+        }
+
+    def _step_v(self, direction):
+        i = self.CHANNELS.index(self.channel)
+        self.set_channel(self.CHANNELS[(i + direction) % len(self.CHANNELS)])
 
     def _dwell_for(self, eng):
         """Dwell weighted by how much is actually going on in that mode
@@ -12966,9 +16712,34 @@ class AmbientEngine(Browsable):
         w = max(0.5, min(3.0, w))
         return int(clamp(self.DWELL_TICKS * w, self.DWELL_MIN, self.DWELL_MAX))
 
+    def _slot_ready(self, name):
+        """AUTO uses ambient_ready() when a mode has one (sports: a
+        game, not the year-round table). Other channels use has_content."""
+        e = self.engines.get(name)
+        if e is None:
+            return False
+        if self.channel == "auto":
+            ready = getattr(e, "ambient_ready", None)
+            if callable(ready):
+                try:
+                    return bool(ready())
+                except Exception:              # noqa: BLE001
+                    return False
+        return e.has_content()
+
     def _available(self):
-        return [i for i, n in enumerate(self.SEQUENCE)
-                if self.engines[n].has_content()]
+        return [i for i, n in enumerate(self._slot_names())
+                if self._slot_ready(n)]
+
+    def _transition_ticks(self):
+        return self.AUTO_TRANSITION_TICKS if self.channel == "auto" else self.TRANSITION_TICKS
+
+    def _transition_style(self):
+        # AUTO cuts through black -- one house motion, like a stage.
+        # Other channels keep each mode's own entrance.
+        if self.channel == "auto":
+            return "fade"
+        return getattr(self.current, "AMBIENT_STYLE", transitions.DEFAULT_STYLE)
 
     def _advance(self, step=1):
         avail = self._available()
@@ -12986,12 +16757,38 @@ class AmbientEngine(Browsable):
         # Move to the next available index in rotation order, wrapping --
         # not just "next in avail", so manual stepping stays predictable
         # when availability changes between presses.
-        n = len(self.SEQUENCE)
+        slots = self._slot_names()
+        leaving = slots[self.idx % len(slots)] if slots else None
+        if leaving in self.ACT_PAGE:
+            self._page_slot += 1
+        n = len(slots)
         for k in range(1, n + 1):
             cand = (self.idx + step * k) % n
             if cand in avail:
                 self.idx = cand
+                landed = slots[cand]
+                if landed in self.GALLERY:
+                    try:
+                        self.engines[landed].reset()
+                    except Exception:          # noqa: BLE001
+                        pass
                 return
+
+    def _jump_to(self, name):
+        """Force the rotation onto a specific sub-mode NOW, bypassing the
+        normal wrap-order stepping in _advance(). Used only by the sticky-
+        recall check in tick(). Mirrors _advance()'s own transition
+        capture so the jump slides in exactly like a normal step, not a
+        hard cut."""
+        try:
+            self._trans_from = self._render_current()
+            self._trans_i = 0
+        except Exception:                      # noqa: BLE001 - never break rotation
+            self._trans_from = None
+        slots = self._slot_names()
+        if name in slots:
+            self.idx = slots.index(name)
+        self.hold = 0
 
     # ---- input -----------------------------------------------------------
     def _step(self, direction):
@@ -13011,14 +16808,31 @@ class AmbientEngine(Browsable):
             self.current.input(cmd)     # anything else belongs to the sub-mode
 
     def auto(self):
-        pass          # already self-cycling; ambient and manual look the same
+        # Arcade only calls auto() on *-demo modes, so night-gallery
+        # games would freeze unless tick() also steers the current
+        # sub-engine. Data engines' auto() is a no-op.
+        try:
+            self.current.auto()
+        except Exception:                      # noqa: BLE001 - never break rotation
+            pass
 
     # ---- simulation --------------------------------------------------------
     def tick(self):
         self.ticks += 1
         self._scroll_tick()
-        for e in self.engines.values():
-            e.tick()                   # keeps every feed warm; see class docstring
+        if self._channel_flash > 0:
+            self._channel_flash -= 1
+        # Feeds stay warm always. Arcade/gallery games tick when their
+        # channel is live (or AUTO pulled them in) so a 2am rest face
+        # is actually moving when it arrives.
+        wanted = set(self.SEQUENCE) | set(self._slot_names())
+        for n, e in self.engines.items():
+            if n in wanted:
+                e.tick()
+        try:
+            self.current.auto()
+        except Exception:                      # noqa: BLE001
+            pass
 
         # BIG-MOMENT CELEBRATION. Checked every tick regardless of which
         # sub-mode is currently showing -- a home run should interrupt the
@@ -13084,10 +16898,104 @@ class AmbientEngine(Browsable):
             self._celebration_t -= 1
             if self._celebration_t <= 0:
                 self._celebration = None
+                # Linger on the mode that just had the moment -- without
+                # this, a walk-off that fired at the end of a sports dwell
+                # would advance the instant the celebration ended.
+                self.hold = 0
 
         avail = self._available()
         if not avail:
+            self._sticky_recall_hold = 0
             return                     # nothing anywhere yet; the frame() shows why
+
+        slots = self._slot_names()
+        sports_idx = slots.index("sports") if "sports" in slots else -1
+        showing_sports = self.idx == sports_idx
+        sports_eng = self.engines.get("sports")
+
+        # LIVE DETAIL -- the whole point of this overhaul. When sports
+        # is on screen and a game is live, open the in-depth card
+        # (K-zone, diamond, hockey MAIN, football strip), not the
+        # ticker row every other board ships.
+        live_locked = False
+        if sports_eng is not None and sports_idx >= 0:
+            fav_live = sports_eng.favorite_live()
+            if showing_sports:
+                sports_eng.adopt_live_detail(prefer_favorite=True)
+            # AUTO: a live favorite OWNS the glass. Jump now, stay there,
+            # do not let a song or a 20s dwell pull you off the pitch.
+            if (self.channel == "auto" and fav_live
+                    and self.cycling and self._celebration_t <= 0
+                    and self.browse.auto_ok and sports_idx in avail):
+                if not showing_sports:
+                    self._jump_to("sports")
+                    avail = self._available()
+                    showing_sports = True
+                    sports_eng.adopt_live_detail(prefer_favorite=True)
+                live_locked = True
+            elif (self.cycling and self._celebration_t <= 0
+                  and self.browse.auto_ok and not showing_sports
+                  and sports_idx in avail and fav_live):
+                # WORLD/MIX: sticky recall still pulls a live favorite
+                # back, just not as a lock.
+                self._sticky_recall_hold += 1
+                if self._sticky_recall_hold >= self.STICKY_RECALL_TICKS:
+                    self._sticky_recall_hold = 0
+                    self._jump_to("sports")
+                    avail = self._available()
+                    showing_sports = True
+                    sports_eng.adopt_live_detail(prefer_favorite=True)
+            else:
+                self._sticky_recall_hold = 0
+        else:
+            self._sticky_recall_hold = 0
+
+        showing = slots[self.idx % len(slots)] if slots else None
+        wx_eng = self.engines.get("weather")
+        if wx_eng is not None and showing == "weather":
+            try:
+                wx_eng.adopt_ambient_view()
+            except Exception:                  # noqa: BLE001
+                pass
+        sat_eng = self.engines.get("satellite")
+        if (sat_eng is not None and showing == "satellite"
+                and any(o.get("visible")
+                        for o in ((getattr(sat_eng, "sky", None) or {}).get("sky_now") or []))):
+            sat_eng.view = sat_eng.VIEW_SCOPE
+
+        # MUSIC STEAL -- new scrobble jumps to nowplaying, except when
+        # AUTO has locked a live favorite (the game is the subject).
+        np_eng = self.engines.get("nowplaying")
+        np_idx = slots.index("nowplaying") if "nowplaying" in slots else -1
+        new_key = np_eng.track_key() if np_eng is not None else None
+        if (not live_locked and new_key and new_key != self._music_key
+                and self.cycling and self._celebration_t <= 0
+                and self.browse.auto_ok and not dnd.is_enabled()
+                and np_idx >= 0 and np_idx in avail
+                and self.idx != np_idx):
+            self._jump_to("nowplaying")
+            avail = self._available()
+        self._music_key = new_key
+
+        # STORM STEAL -- a new cell appearing is the weather equivalent
+        # of a new song. First read adopts. Live favorite still wins.
+        wx_idx = slots.index("weather") if "weather" in slots else -1
+        new_storms = wx_eng.storm_key() if wx_eng is not None else None
+        if self._storm_key is None:
+            self._storm_key = new_storms
+        elif (not live_locked and new_storms
+              and set(new_storms) - set(self._storm_key or ())
+              and self.cycling and self._celebration_t <= 0
+              and self.browse.auto_ok and not dnd.is_enabled()
+              and wx_idx >= 0 and wx_idx in avail
+              and self.idx != wx_idx):
+            self._jump_to("weather")
+            avail = self._available()
+            try:
+                wx_eng.adopt_ambient_view()
+            except Exception:                  # noqa: BLE001
+                pass
+        self._storm_key = new_storms
 
         if self.idx not in avail:
             # Whatever we were showing just went empty (last plane left the
@@ -13096,10 +17004,10 @@ class AmbientEngine(Browsable):
             self._advance(1)
             self.hold = 0
 
-        # Dwell timing PAUSES during a celebration -- it is a full-panel
-        # interrupt, not a sub-mode taking its normal turn, so it must not
-        # eat into whatever mode's dwell was in progress when it fired.
-        if self._celebration_t <= 0 and self.cycling and len(avail) > 1 and self.browse.auto_ok:
+        # Dwell pauses during a celebration AND during a live-favorite
+        # lock -- that card is the reason ambient exists tonight.
+        if (not live_locked and self._celebration_t <= 0 and self.cycling
+                and len(avail) > 1 and self.browse.auto_ok):
             self.hold += 1
             if self.hold >= self._dwell_for(self.current):
                 self.hold = 0
@@ -13124,16 +17032,21 @@ class AmbientEngine(Browsable):
             self._fallback.tick()
             return self._fallback.frame()
         frame = self._render_current()
-        if self._trans_from and self._trans_i < self.TRANSITION_TICKS:
+        hold = self._transition_ticks()
+        if self._trans_from and self._trans_i < hold:
             self._trans_i += 1
-            p = self._trans_i / float(self.TRANSITION_TICKS)
-            # Each mode enters with its OWN transition style, so you know
-            # what kind of thing arrived before you have read a word --
-            # built on the shared system, not a second one.
-            style = getattr(self.current, "AMBIENT_STYLE", transitions.DEFAULT_STYLE)
-            frame = transitions.blend(self._trans_from, frame, p, style)
-            if self._trans_i >= self.TRANSITION_TICKS:
+            p = self._trans_i / float(hold)
+            frame = transitions.blend(self._trans_from, frame, p,
+                                      self._transition_style())
+            if self._trans_i >= hold:
                 self._trans_from = None
+        # Rotate holds the scene. A 2px pip is the only chrome -- the
+        # AUTO header used to stamp over the card for 1.4s.
+        if not self.cycling:
+            buf = bytearray(frame)
+            put_px(buf, 1, 62, self.ACCENT)
+            put_px(buf, 2, 62, rim(self.ACCENT, 0.45))
+            frame = bytes(buf)
         return frame
 
     def _render_current(self):
@@ -13319,6 +17232,7 @@ class MenuEngine:
         ("followflight", "FOLLOW", (255, 200, 90)),
         ("departures", "BOARD", (120, 200, 255)),
         ("nowplaying", "MUSIC", (255, 90, 200)),
+        ("ownernote", "NOTE",   (255, 214, 110)),
         ("sports",   "SPORTS",   (255, 140, 40)),
         ("news",     "NEWS",     (255, 226, 60)),
         ("weather",  "WEATHER",  (90, 190, 255)),
@@ -13598,6 +17512,16 @@ class MenuEngine:
                 put_px(buf, x0 + 2, y0 + yy, c)
             put_px(buf, x0 + 3, y0 + 1, c)
             put_px(buf, x0 + 3, y0 + 2, c)
+        elif gid == "ownernote":
+            # A folded note/card corner -- a small rectangle with a
+            # dog-eared top-right corner, plus two short "lines of text"
+            # inside. Distinct from sports' scoreboard block and blog's
+            # (unused-in-menu) speech shape.
+            block(1, 1, 7, 8, c)
+            block(6, 1, 2, 2, (0, 0, 0))
+            for xx in range(2, 6):
+                put_px(buf, x0 + xx, y0 + 4, c)
+                put_px(buf, x0 + xx, y0 + 6, c)
         elif gid == "sports":
             # A scoreboard: a frame with a divider and two blocky "score"
             # marks -- reads as "live score" distinct from the ticker's
@@ -13810,6 +17734,9 @@ class TunnelEngine:
     name = "tunnel"
     tick_rate = 0.045
 
+    def has_content(self):
+        return True          # generative; night gallery / ambient rest face
+
     BG = (0, 0, 0)
     WALL = (60, 40, 160)
     WALL_DIM = (35, 20, 100)
@@ -13952,6 +17879,9 @@ class PowderEngine:
     """
     name = "powder"
     tick_rate = 0.05
+
+    def has_content(self):
+        return True          # generative; night gallery / ambient rest face
 
     BG = (0, 0, 0)
     VOID = 0
@@ -14229,6 +18159,9 @@ class BrawlerEngine:
     """
     name = "brawler"
     tick_rate = 0.033
+
+    def has_content(self):
+        return True          # generative; arcade ambient channel
 
     BG = (0, 0, 0)
     LEDGE = (55, 70, 165)
@@ -14684,6 +18617,9 @@ class ChaseEngine:
     """
     name = "chase"
     tick_rate = 0.045
+
+    def has_content(self):
+        return True          # generative; arcade ambient channel
 
     BG = (0, 0, 0)
     CELL = 3
@@ -16111,6 +20047,10 @@ ENGINES = {
     # visualizer off the panel's own mic (see NowPlayingEngine's own
     # docstring for why the mic alone can't do this).
     "nowplaying": NowPlayingEngine,
+    # OWNER NOTE (2026-08-09) -- a persistent, owner-authored message,
+    # distinct from the ephemeral HA notify banner and the read-only
+    # public guestbook (see OwnerNoteEngine's own docstring).
+    "ownernote": OwnerNoteEngine,
     "sports": SportsEngine,
     "news": NewsEngine,
     "weather": WeatherEngine,

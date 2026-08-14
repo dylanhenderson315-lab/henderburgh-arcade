@@ -383,6 +383,37 @@ const GAMES = {
     actions:[{cmd:'rotate',label:'ERASE',glyph:'⌫'},
              {cmd:'hold',label:'MATERIAL',glyph:'◆'},
              {cmd:'drop',label:'CLEAR',glyph:'⟲'}]},
+  sports:   {name:'SPORTS',    color:'#ff8c28', dpad:true,
+    actions:[{cmd:'rotate',label:'DETAIL',glyph:'◉'},{cmd:'drop',label:'BACK',glyph:'↩'}],
+    note:'Left/right walks games. Up/down walks leagues. DETAIL opens the in-depth card. BACK leaves it.'},
+  weather:  {name:'WEATHER',   color:'#5abeff', dpad:true,
+    actions:[{cmd:'rotate',label:'DETAIL',glyph:'◉'},{cmd:'drop',label:'BACK',glyph:'↩'}],
+    note:'Up/down: conditions, hourly, radar. On radar, DETAIL is the selected storm. Left/right walks tracks.'},
+  clock:    {name:'CLOCK',     color:'#78c8ff', axis:'horizontal',
+    actions:[{cmd:'rotate',label:'FACE',glyph:'⟳'}],
+    note:'FACE flips analog and digital. On digital, left/right toggles seconds.'},
+  ambient:  {name:'AMBIENT',   color:'#b060ff', dpad:true,
+    actions:[{cmd:'rotate',label:'HOLD',glyph:'⏸'}],
+    note:'Up/down changes channel (AUTO, WORLD, ARCADE, MIX). Left/right steps. HOLD pauses the cycle.'},
+  news:     {name:'NEWS',      color:'#e8c23a', axis:'horizontal',
+    actions:[{cmd:'rotate',label:'HOLD',glyph:'⏸'}],
+    note:'Left/right walks headlines. HOLD parks the tape.'},
+  blog:     {name:'BLOG',      color:'#b060ff', axis:'horizontal',
+    actions:[{cmd:'rotate',label:'HOLD',glyph:'⏸'}],
+    note:'Left/right walks posts. HOLD parks the cycle.'},
+  events:   {name:'EVENTS',    color:'#ffbe5a', axis:'horizontal',
+    note:'Left/right pages the log.'},
+  nowplaying: {name:'MUSIC',   color:'#ff5ac8',
+    note:'Now playing — no browse. Open the control panel to set Last.fm.'},
+  ownernote: {name:'NOTE',     color:'#ffd66e',
+    note:'The owner note. Edit it from the control panel.'},
+  followflight: {name:'FOLLOW', color:'#ffc85a',
+    note:'One followed flight. Set the callsign from the control panel.'},
+  departures: {name:'BOARD',   color:'#78c8ff', axis:'horizontal',
+    note:'Left/right pages live departures and arrivals.'},
+  gameday:  {name:'GAME DAY',  color:'#eb2d41', axis:'horizontal',
+    actions:[{cmd:'rotate',label:'SELECT',glyph:'◉'}],
+    note:'Game Day takeover. Left/right browses the card. Power or MENU leaves it.'},
 };
 
 let curMode = null, curBase = null, isDemo = false, panelOn = false;
@@ -409,7 +440,7 @@ function schemeFor(base, cartInput){
   if (base === 'boot') return BOOT_SCHEME;
   if (base === 'menu') return MENU_SCHEME;
   if (base.startsWith('tic:')) return cartScheme(base, cartInput);
-  return GAMES[base] || null;
+  return GAMES[base] || {name: (base || '').toUpperCase(), color:'#e6342c'};
 }
 function applyTheme(scheme){
   document.documentElement.style.setProperty('--tc', (scheme && scheme.color) || '#e6342c');
@@ -759,6 +790,8 @@ function buildControls(base, scheme, demo){
     $('note').textContent = 'This one runs itself — tap RESEED for something new, or go ⌂ MENU for another game.';
   } else if (demo){
     $('note').textContent = 'Watching the built-in AI. Any control takes over instantly.';
+  } else if (scheme.note){
+    $('note').textContent = scheme.note;
   }
 
   buildDpad(scheme);

@@ -81,9 +81,11 @@ def _get_json(url):
 
 
 def load_config():
-    """{"api_key": str|None, "user": str|None}. Both empty is the honest
-    default (nothing configured yet), never a guessed account."""
-    cfg = {"api_key": None, "user": None}
+    """{"api_key": str|None, "user": str|None, "mic_only": bool}. Both
+    Last.fm fields empty is the honest default (nothing configured yet),
+    never a guessed account. `mic_only` defaults False -- see
+    save_config()'s docstring for what it means."""
+    cfg = {"api_key": None, "user": None, "mic_only": False}
     if not CONFIG_PATH.exists():
         return cfg
     try:
@@ -92,12 +94,13 @@ def load_config():
             for k in ("api_key", "user"):
                 v = raw.get(k)
                 cfg[k] = str(v).strip() or None if v else None
+            cfg["mic_only"] = bool(raw.get("mic_only"))
     except (json.JSONDecodeError, OSError, AttributeError, TypeError):
         pass          # keep honest defaults; never crash a render over a bad file
     return cfg
 
 
-def save_config(api_key, user, clear_key=False):
+def save_config(api_key, user, clear_key=False, mic_only=None):
     """Read-modify-write, preserving any key this function doesn't own --
     built in from the start per the 2026-08-09 lesson about save_*()
     functions that construct a fresh dict instead.
@@ -111,7 +114,18 @@ def save_config(api_key, user, clear_key=False):
     exact destructive-overwrite bug class this project has hit twice
     before with `location_config.json`, caught here before it could
     happen a third time. Pass `clear_key=True` for the one real case
-    that DOES mean "remove it" (an explicit unpin)."""
+    that DOES mean "remove it" (an explicit unpin).
+
+    `mic_only` follows the SAME omitted-preserves convention:
+    `mic_only=None` (the default) leaves whatever was already saved
+    untouched, same as `api_key=None` -- a save that only changes the
+    username must not silently reset the mic-only toggle any more than
+    it should silently wipe the key. Pass an explicit `True`/`False` to
+    actually change it. This flag lets the panel show the real FFT
+    equalizer bars (audio_sync.py's own mic-derived data, see this
+    module's own docstring on why the mic alone can't identify a
+    track) on its own, with no Last.fm account required -- for anyone
+    who wants a plain visualizer instead of track/artist/album text."""
     data = {}
     if CONFIG_PATH.exists():
         try:
@@ -125,8 +139,13 @@ def save_config(api_key, user, clear_key=False):
     # else: api_key omitted/falsy and not an explicit clear -- keep
     # whatever was already saved, don't touch the "api_key" key at all.
     data["user"] = (str(user).strip() or None) if user else None
+    if mic_only is not None:
+        data["mic_only"] = bool(mic_only)
+    # else: mic_only omitted -- preserve whatever was already saved
+    # (defaults to False via .get() below on a first-ever save).
     CONFIG_PATH.write_text(json.dumps(data, indent=2))
-    return {"api_key": data.get("api_key"), "user": data["user"]}
+    return {"api_key": data.get("api_key"), "user": data["user"],
+            "mic_only": bool(data.get("mic_only"))}
 
 
 def _parse_now_playing(data):
@@ -176,6 +195,7 @@ class NowPlayingFeed:
         self._lock = threading.Lock()
         cfg = load_config()
         self._api_key, self._user = cfg["api_key"], cfg["user"]
+        self._mic_only = cfg["mic_only"]
         self._track = None
         self._updated = 0.0
         self._last_try = 0.0
@@ -186,12 +206,14 @@ class NowPlayingFeed:
 
     def get_config(self):
         with self._lock:
-            return {"api_key": self._api_key, "user": self._user}
+            return {"api_key": self._api_key, "user": self._user,
+                    "mic_only": self._mic_only}
 
-    def set_config(self, api_key, user, clear_key=False):
-        cfg = save_config(api_key, user, clear_key=clear_key)
+    def set_config(self, api_key, user, clear_key=False, mic_only=None):
+        cfg = save_config(api_key, user, clear_key=clear_key, mic_only=mic_only)
         with self._lock:
             self._api_key, self._user = cfg["api_key"], cfg["user"]
+            self._mic_only = cfg["mic_only"]
             # A new account's track is a different real fact -- never show
             # the previous account's last track against the new one.
             self._track = None
@@ -211,11 +233,13 @@ class NowPlayingFeed:
         with self._lock:
             self._last_read = now
             configured = bool(self._api_key and self._user)
+            mic_only = self._mic_only
             track = dict(self._track) if self._track else None
             updated, err = self._updated, self._err
         self._ensure_thread()
         return {
             "configured": configured,
+            "mic_only": mic_only,
             "playing": (track is not None) if configured else None,
             "track": track,
             "age": (now - updated) if updated else None,
@@ -251,6 +275,7 @@ class NowPlayingFeed:
                 self._api_key, self._user = cfg["api_key"], cfg["user"]
                 self._track = None
                 self._updated = 0.0
+            self._mic_only = cfg["mic_only"]
 
     def _refresh_once(self):
         now = time.time()

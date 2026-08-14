@@ -76,7 +76,7 @@ import notify
 # own message row falls back to draw_marquee() when the wrapped text
 # doesn't fit three lines (see NotifyEngine.frame()).
 MARQUEE_OK = {"news", "ticker", "sports", "gameday", "ambient", "flights", "notify",
-              "nowplaying"}
+              "nowplaying", "weather"}
 
 # followflight's route line is fit_text()-truncated, never marqueed --
 # it has no continuous scroll of its own, so it does NOT join this set.
@@ -247,6 +247,29 @@ def drive_planewatch(audit):
         if len(batch) > 1:
             eng.idx = 1
             _snap(audit, eng, "planewatch variant %d idx 1" % i, frames, collisions)
+
+    # HANGAR "STORY FACT" branch (2026-08-10) -- none of the three
+    # variants above have a registration that matches a real Hangar
+    # entry, so the "FIRST SIGHTING"/"SEEN NX" text this screen now
+    # leads with (replacing the old raw dist+alt row) had ZERO real
+    # coverage from the sweep above: every variant fell through to the
+    # distance-fallback branch instead. Monkeypatches engines.hangar.LOG.get()
+    # (never the real hangar_log.jsonl file) to exercise both real
+    # sub-branches directly.
+    _real_hangar_get = engines.hangar.LOG.get
+    try:
+        engines.hangar.LOG.get = lambda: [{"reg": "N182UA", "times_seen": 1}]
+        eng = engines.PlaneWatchEngine.__new__(engines.PlaneWatchEngine)
+        eng.batch = variants[0]
+        eng.idx = 0
+        eng.ticks = 20
+        eng.launch = None
+        _snap(audit, eng, "planewatch first-sighting story", frames, collisions)
+
+        engines.hangar.LOG.get = lambda: [{"reg": "N182UA", "times_seen": 47}]
+        _snap(audit, eng, "planewatch seen-47x story", frames, collisions)
+    finally:
+        engines.hangar.LOG.get = _real_hangar_get
     return frames[0], collisions
 
 
@@ -354,6 +377,8 @@ def drive_followflight(audit):
          "route": None, "age": None, "airborne": None, "err": None},
         {"configured": True, "callsign": "UAL123", "aircraft": None,
          "route": None, "age": 12.0, "airborne": False, "err": None},
+        {"configured": True, "callsign": "UAL123", "aircraft": None,
+         "route": None, "age": None, "airborne": None, "err": "HTTPError"},
         {"configured": True, "callsign": "DAL1362", "aircraft": {
             "ident": "DAL1362", "hex": "A1B2C3", "reg": "N182DN", "type": "B739",
             "callsign": "DAL1362", "category": "A3", "alt_ft": 35000,
@@ -417,22 +442,30 @@ def drive_nowplaying(audit):
     honestly unconfigured in this environment (no real Last.fm key) --
     the generic drive() loop would only ever cover the NO LAST.FM
     ACCOUNT SET state. Sets `.data` directly, same technique every other
-    custom driver here uses. Four variants: not configured, configured
+    custom driver here uses. Six variants: not configured, configured
     but honestly nothing playing (with a real-shaped API error message,
-    to exercise that text row too), a short track/artist/album, and a
+    to exercise that text row too), a short track/artist/album, a
     deliberately long track name to force the marquee-vs-centered branch
-    (text_w(name) > WIDTH-4)."""
+    (text_w(name) > WIDTH-4), and two mic-only-equalizer variants (the
+    real audio_sync.FEED is whatever this environment's actual mic state
+    is -- typically stale here with no real WLED packets arriving -- so
+    both mic_only+configured and mic_only+unconfigured are covered to
+    exercise the header/mode dispatch regardless of which audio branch
+    happens to fire)."""
     frames = [0]
     collisions = []
     variants = [
-        {"configured": False, "playing": None, "track": None, "age": None, "err": None},
-        {"configured": True, "playing": False, "track": None, "age": 5.0,
+        {"configured": False, "mic_only": False, "playing": None, "track": None, "age": None, "err": None},
+        {"configured": True, "mic_only": False, "playing": False, "track": None, "age": 5.0,
          "err": "INVALID API KEY - YOU MUST BE GRANTED A VALID KEY"},
-        {"configured": True, "playing": True, "age": 2.0, "err": None,
+        {"configured": True, "mic_only": False, "playing": True, "age": 2.0, "err": None,
          "track": {"track": "HOPPIPOLLA", "artist": "SIGUR ROS", "album": "TAKK..."}},
-        {"configured": True, "playing": True, "age": 2.0, "err": None,
+        {"configured": True, "mic_only": False, "playing": True, "age": 2.0, "err": None,
          "track": {"track": "A REALLY VERY EXTREMELY LONG SONG TITLE THAT WONT FIT",
                    "artist": "SOME ARTIST WITH A LONG NAME TOO", "album": None}},
+        {"configured": False, "mic_only": True, "playing": None, "track": None, "age": None, "err": None},
+        {"configured": True, "mic_only": True, "playing": True, "age": 2.0, "err": None,
+         "track": {"track": "HOPPIPOLLA", "artist": "SIGUR ROS", "album": "TAKK..."}},
     ]
     for i, data in enumerate(variants):
         eng = engines.NowPlayingEngine.__new__(engines.NowPlayingEngine)
@@ -556,6 +589,22 @@ def drive(mode, audit, ticks=60, settle=0.25):
         if hasattr(eng, "panels") and eng.panels:
             eng.panel_i = v % len(eng.panels)
             snap("panel %d" % v)
+
+    # STRING-VALUED view lists (WeatherEngine's VIEWS = ["main", "hourly",
+    # "radar"], 2026-08-10) -- a SECOND view-id convention this tool did
+    # not know about until now, added after the int-sweep above already
+    # missed it: `eng.view = v` (an int, from the loop right above) was
+    # silently a no-op for a string-compared `self.view`, so the new
+    # hourly/radar views got ZERO real coverage from a "clean" audit run.
+    # Same class of gap this tool's own history already names (VIEW_*
+    # count used to be a hardcoded 4) -- generalized here instead of
+    # special-cased to weather, so any future string-VIEWS engine is
+    # covered automatically too.
+    views = getattr(type(eng), "VIEWS", None)
+    if isinstance(views, (list, tuple)):
+        for v in views:
+            eng.view = v
+            snap("view %r" % (v,))
 
     return frames, collisions
 

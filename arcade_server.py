@@ -52,10 +52,14 @@ import weather
 import blog
 import brightness
 import dnd
+import skins
+import layout
 import notify
 import nowplaying
+import ownernote
 import paneltext
 import transitions
+import ambient
 
 PORT = 7333
 HERE = Path(__file__).parent
@@ -99,6 +103,20 @@ RESUME_GAME = "boot"                # "Turn On" always plays the boot curtain, t
 # middle of that range -- no measured data drove the exact number, same
 # kind of reasoned default as brightness.py's own DEFAULTS.
 NOTIFY_BANNER_SECONDS = 9.0
+
+# SEVERE-WEATHER BANNER TIMING (2026-08-10) -- owner-specified after the
+# banner (demoted from a full takeover earlier the same session) still
+# sat on screen continuously for a real alert's whole duration: "should
+# happen for like 15 seconds every 5 minutes or something for as long
+# as it is [active]." A real severe alert can run an hour or more, and a
+# permanent bottom band for that whole time is still "stuck", just a
+# smaller stuck. Periodic pop-up keeps it genuinely noticeable (appears
+# on its own schedule, not just when you happen to already be looking)
+# without occupying the panel the entire time. Wall-clock-phase gated
+# (`time.time() % INTERVAL < SHOW`), not a tick counter, so it stays in
+# sync across mode switches/restarts without extra persisted state.
+SEVERE_BANNER_INTERVAL_S = 300.0   # once every 5 minutes
+SEVERE_BANNER_SHOW_S = 15.0        # visible for 15 seconds each time
 FRAME_BYTES = WIDTH * HEIGHT * 3
 CAST_TIMEOUT = 5.0                 # s without a phone frame -> report cast idle
 VIDEOS_DIR = HERE / "videos"
@@ -174,6 +192,15 @@ class Arcade:
         # {title, message, color, expires (wall-clock time.time())}.
         self._notify_banner = None
         self._notify_scroll = 0.0        # marquee offset for an overflowing banner message
+        self._severe_scroll = 0.0        # marquee offset for an overflowing severe-alert banner
+        self._severe_active = False      # whether the severe banner is VISIBLE this tick --
+                                          # only the night-dimming exemption still needs this
+                                          # (see its own comment below); the transition-skip
+                                          # exemption a full-screen takeover needed no longer
+                                          # applies now that this is a small bottom banner.
+        self._severe_visible_last = False  # was the banner visible last tick -- detects the
+                                            # moment a new periodic show-window begins, so the
+                                            # pulse/scroll can restart clean (see _severe_alert_frame)
         self.running = True
         # Warm the effects list cache
         try:
@@ -223,17 +250,30 @@ class Arcade:
         self._wled(restore)
 
     # ---- control ----------------------------------------------------------
+    def _known_mode(self, mode):
+        # off/on/background/mirror/video/cast are special (no ENGINES entry).
+        # tic: carts and any ENGINES key (including "snake-demo") are known.
+        # Anything else must not be assigned to self.mode — /api/state would
+        # then report a mode the panel is not actually drawing.
+        return (
+            mode in ("off", "on", "background", "mirror", "video", "cast")
+            or mode.startswith("tic:")
+            or mode.split("-")[0] in engines.ENGINES
+        )
+
     def set_mode(self, mode):
+        if mode == "on":
+            # Power-on always plays the boot curtain into the menu, like
+            # a real console -- it never jumps straight back into
+            # whatever was last running. last_game only feeds the menu's
+            # cursor position (see MenuEngine._select below); it must
+            # never drive what "on" itself resolves to, or a stray mode
+            # (mirror/video/cast) picked up as last_game would silently
+            # skip the boot sequence on the next power-on.
+            mode = RESUME_GAME
+        if not self._known_mode(mode):
+            return False
         with self.lock:
-            if mode == "on":
-                # Power-on always plays the boot curtain into the menu, like
-                # a real console -- it never jumps straight back into
-                # whatever was last running. last_game only feeds the menu's
-                # cursor position (see MenuEngine._select below); it must
-                # never drive what "on" itself resolves to, or a stray mode
-                # (mirror/video/cast) picked up as last_game would silently
-                # skip the boot sequence on the next power-on.
-                mode = RESUME_GAME
             was_off = self.mode == "off"
             prev = self.mode
             prev_frame = self.latest if prev != "off" else None
@@ -315,6 +355,7 @@ class Arcade:
             backgrounds.stop_live_peek()
             with self.lock:
                 self._bg_capture_needed = False
+        return True
 
     def trigger_notify(self, priority, title, message):
         """Home Assistant notification pass-through (task #8). `title`/
@@ -697,6 +738,8 @@ class Arcade:
                 "bg_speed": self.bg_speed,
                 "stats": dict(self.stats),
                 "frame": bytes(self.latest),
+                "ambient": (self.engine.channel_state()
+                            if getattr(self.engine, "channel_state", None) else None),
             }
 
     # ---- render/stream loop ----------------------------------------------
@@ -776,37 +819,87 @@ class Arcade:
             time.sleep(0.2)
             return None
 
-    def _severe_alert_frame(self):
-        """Full-screen alert if NWS has an Extreme/Severe alert active for
-        the configured location, else None.
+    def _severe_alert_frame(self, frame):
+        """Composite a bottom-third severe-alert banner over `frame` if
+        NWS has an Extreme/Severe alert active for the configured
+        location, else return `frame` unchanged.
+
+        DEMOTED from a full-screen takeover to a banner, then further
+        demoted to a PERIODIC banner (both 2026-08-10, both real owner
+        feedback the first time this actually fired live on a genuine,
+        hours-long Severe Thunderstorm Warning). First pass: a full
+        takeover with no cycling locked the ENTIRE panel to one static
+        screen for the alert's whole real duration -- "stuck", per the
+        owner's own words. Demoted to a permanent bottom banner instead
+        -- still effectively "stuck" for the same real duration, just a
+        smaller stuck. Second pass, owner-specified explicitly: show for
+        `SEVERE_BANNER_SHOW_S` (15s) every `SEVERE_BANNER_INTERVAL_S`
+        (5min), for as long as the real alert stays active -- genuinely
+        noticeable on its own schedule without occupying the panel the
+        whole time. Gated on wall-clock phase (`time.time() %
+        INTERVAL_S < SHOW_S`), not a tick counter, so the schedule can't
+        drift and needs no persisted state across restarts.
+
+        See engines.draw_severe_alert_banner()'s own docstring for the
+        banner's own visual reasoning and what's deliberately NOT
+        reproduced here (the storm mini-scope stays exclusive to weather
+        mode's own dedicated alert view, which still shows the original
+        full-screen draw_alert_frame() for someone actually looking at
+        weather).
 
         Reading weather.FEED here on every render tick is what keeps this
         working from any mode -- and it deliberately keeps weather's feed
         thread alive continuously (its IDLE_STOP never elapses), because a
-        takeover that only knows about alerts while you're already looking
+        banner that only knows about alerts while you're already looking
         at the weather mode would be pointless. That costs one observation
-        call per 10 min and one alerts call per 2 min, always.
+        call per 10 min and one alerts call per 2 min, always -- unchanged
+        by the periodic-display gating, which only affects DRAWING, not
+        polling.
 
         Clears itself with no extra bookkeeping: when NWS stops listing the
-        alert, the list empties and this returns None again on the very
-        next tick.
+        alert, the list empties and this returns `frame` unchanged again on
+        the very next tick -- same "no extra bookkeeping to clear it" shape
+        as `_notify_banner_frame()`.
         """
+        if frame is None:
+            return frame
         try:
             data = weather.FEED.get()
         except Exception:                       # noqa: BLE001 - never kill the loop
-            return None
+            self._severe_active = False
+            self._severe_visible_last = False
+            return frame
         severe = [a for a in (data.get("alerts") or [])
                   if a.get("severity") in engines.GLOBAL_ALERT_SEVERITIES]
         if not severe:
             self._alert_ticks = 0
-            return None
-        self._alert_ticks = getattr(self, "_alert_ticks", 0) + 1
+            self._severe_active = False
+            self._severe_visible_last = False
+            return frame
+
+        visible = (time.time() % SEVERE_BANNER_INTERVAL_S) < SEVERE_BANNER_SHOW_S
+        if not visible:
+            self._severe_active = False
+            self._severe_visible_last = False
+            return frame
+        if not self._severe_visible_last:
+            # Just entered a new visible window -- restart the pulse and
+            # marquee scroll clean, rather than resuming mid-scroll from
+            # wherever they were ~5 minutes ago when the banner last
+            # disappeared (which would read as a broken/stale scroll on
+            # reappearance rather than a fresh pop-up).
+            self._alert_ticks = 0
+            self._severe_scroll = 0.0
+        self._severe_visible_last = True
+        self._severe_active = True
+        self._alert_ticks += 1
+        self._severe_scroll += 1.6
         # Rotate through multiple severe alerts rather than pinning the
         # first one, same dwell feel as the weather mode's own cycling.
         idx = (self._alert_ticks // 220) % len(severe)
-        return engines.draw_alert_frame(
-            severe[idx], self._alert_ticks, place=data.get("place", ""),
-            n_alerts=len(severe), cur_alert=idx)
+        return engines.draw_severe_alert_banner(
+            frame, severe[idx], self._alert_ticks, place=data.get("place", ""),
+            n_alerts=len(severe), cur_alert=idx, scroll=self._severe_scroll)
 
     def _loop(self):
         last_tick = time.time()
@@ -982,26 +1075,33 @@ class Arcade:
                 if frame is not None and mode != "notify":
                     frame = self._notify_banner_frame(frame)
 
-                # GLOBAL SEVERE-WEATHER TAKEOVER. Applied last, after every
-                # other composite, so it covers whatever was about to be
-                # shown -- a game, a video, a mirror, any mode. Only
+                # GLOBAL SEVERE-WEATHER BANNER (demoted from a full-screen
+                # takeover 2026-08-10 -- see _severe_alert_frame()'s own
+                # docstring). Applied last, after every other composite
+                # including the notify banner, so it covers the SAME
+                # bottom-20px footprint if both are somehow active at once
+                # -- severe weather still wins that shared strip outright,
+                # matching the takeover's own original priority, just
+                # without blacking out everything above it. Only
                 # Extreme/Severe qualify (see engines.GLOBAL_ALERT_SEVERITIES):
                 # a routine advisory interrupting a game would train someone
                 # to ignore the panel exactly when it finally matters.
                 # Skipped in weather mode, which is already showing alerts
                 # itself and cycles through ALL of them, not just severe.
-                alert_frame = self._severe_alert_frame() if mode != "weather" else None
-                if alert_frame is not None:
-                    frame = alert_frame
+                if frame is not None and mode != "weather":
+                    frame = self._severe_alert_frame(frame)
 
                 # MODE TRANSITION. Applied to the composed frame so it works
                 # for every mode uniformly -- games included -- and needs no
                 # cooperation from any engine.
                 #
-                # A severe-alert takeover is deliberately NOT transitioned:
-                # it is an interrupt, and sliding it in gently would soften
-                # exactly the moment that is supposed to feel abrupt.
-                if frame is not None and alert_frame is None and self._trans_from:
+                # Severe weather no longer skips this (2026-08-10): now that
+                # it's a small bottom banner rather than a full-screen
+                # takeover, the mode underneath transitions exactly like it
+                # would without an alert active -- the banner rides along on
+                # top, same as the (already-untransition-exempted) notify
+                # banner already does. No special case needed.
+                if frame is not None and self._trans_from:
                     if self._trans_i < TRANSITION_FRAMES:
                         p = (self._trans_i + 1) / float(TRANSITION_FRAMES)
                         style = self._trans_style or transitions.DEFAULT_STYLE
@@ -1020,15 +1120,17 @@ class Arcade:
                 # be sent, so it covers every mode uniformly -- a game at
                 # 3am dims exactly like the clock does.
                 #
-                # SEVERE ALERTS ARE EXEMPT, deliberately: the entire point
-                # of the global takeover is to grab attention, and a
-                # tornado warning quietly dimmed to 28% at 3am would defeat
-                # it at precisely the hour it matters most.
+                # SEVERE ALERTS ARE STILL EXEMPT, deliberately, even as a
+                # banner now rather than a full takeover: a tornado warning
+                # quietly dimmed to 28% at 3am would defeat the entire point
+                # of surfacing it at precisely the hour it matters most.
+                # Tracked via self._severe_active (set by
+                # _severe_alert_frame() above), not by comparing frames.
                 #
                 # self.latest is dimmed too, so the web preview and phone
                 # remote show what the panel actually looks like rather
                 # than a bright frame the panel never displayed.
-                if frame is not None and alert_frame is None:
+                if frame is not None and not self._severe_active:
                     level = brightness.level_now()
                     if level < 0.999:
                         frame = brightness.apply(frame, level)
@@ -1139,8 +1241,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json(s)
         elif path == "/api/ticker/symbols":
             crypto, stocks = market.FEED.get_symbols()
+            # known_crypto/known_stocks now carry {sym, name} pairs
+            # (2026-08-10 expansion), not bare symbols -- the control
+            # panel's quick-add dropdown needs a real recognizable name,
+            # not just a raw ticker, same reason the crypto list existed
+            # at all. known_stocks is a real reference list only (Yahoo
+            # accepts ANY ticker directly, confirmed in market.py's own
+            # KNOWN_STOCKS docstring) -- typing a symbol not in this list
+            # still works exactly as before.
             self._json({"crypto": crypto, "stocks": stocks,
-                        "known_crypto": sorted(market.SYMBOL_TO_COINGECKO_ID)})
+                        "known_crypto": market.list_known_crypto(),
+                        "known_stocks": market.list_known_stocks()})
         elif path == "/api/satellite/location":
             lat, lon, label = satellite.FEED.get_location()
             self._json({"lat": lat, "lon": lon, "label": label,
@@ -1206,7 +1317,11 @@ class Handler(BaseHTTPRequestHandler):
                                            "event": (u.get("tennis_event") or {}).get("name")}
                                           if u.get("tennis_pinned") else None),
                         "favorite_teams": favorite_teams,
-                        "favorite_teams_filter": favorite_teams_filter})
+                        "favorite_teams_filter": favorite_teams_filter,
+                        # ESPN poll posture -- "personal" (this house)
+                        # or "off" (no ESPN). There is no commercial
+                        # mode; see sports.py HONEST POSTURE.
+                        "espn_use": sports.FEED.get_espn_use()})
         elif path == "/api/gameday/config":
             cfg = gameday.load_config()
             cfg["targets"] = list(gameday.TARGETS)
@@ -1236,6 +1351,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"favorite_aircraft": flights.load_favorite_aircraft()})
         elif path == "/api/dnd":
             self._json(dnd.load_config())
+        elif path == "/api/skins":
+            cfg = skins.load_config()
+            self._json({"skin": cfg["skin"], "options": skins.list_skins()})
+        elif path == "/api/layout":
+            self._json({"footer_priority": layout.get_footer_priority(),
+                        "fields": list(layout.FOOTER_FIELDS)})
         elif path == "/api/nowplaying":
             # Status + config in one GET, same shape as /api/flights/follow
             # above -- config (whether an account is set) and real live
@@ -1244,8 +1365,26 @@ class Handler(BaseHTTPRequestHandler):
             s = nowplaying.FEED.get()
             cfg = nowplaying.FEED.get_config()
             self._json({"configured": s["configured"], "user": cfg["user"],
-                        "has_key": bool(cfg["api_key"]), "playing": s["playing"],
+                        "has_key": bool(cfg["api_key"]), "mic_only": cfg["mic_only"],
+                        "playing": s["playing"],
                         "track": s["track"], "age": s["age"], "err": s["err"]})
+        elif path == "/api/note":
+            self._json(ownernote.load_config())
+        elif path == "/api/ambient":
+            cfg = ambient.load_config()
+            live = None
+            eng = ARCADE.engine
+            if getattr(eng, "channel_state", None):
+                live = eng.channel_state()
+            self._json({
+                "channel": (live or cfg)["channel"] if live else cfg["channel"],
+                "channels": list(ambient.CHANNELS),
+                "mix": (live or cfg).get("mix") or cfg["mix"],
+                "mixable": (live or {}).get("mixable") or list(
+                    engines.AmbientEngine.SEQUENCE + engines.AmbientEngine.GALLERY
+                    + engines.AmbientEngine.MIX_EXTRA),
+                "showing": (live or {}).get("showing"),
+            })
         elif path == "/api/events":
             # Read-only peek at events_log.py's recent-events log for the
             # control panel's status overview -- confirmed genuinely
@@ -1357,8 +1496,10 @@ class Handler(BaseHTTPRequestHandler):
             body = self.rfile.read(n) if n else b""
 
         if len(parts) == 3 and parts[:2] == ["api", "mode"]:
-            ARCADE.set_mode(unquote(parts[2]))
-            self._json({"ok": True})
+            if ARCADE.set_mode(unquote(parts[2])):
+                self._json({"ok": True})
+            else:
+                self._json({"ok": False, "error": "unknown mode"}, 400)
         elif len(parts) == 3 and parts[:2] == ["api", "input"]:
             ARCADE.send_input(parts[2])
             self._json({"ok": True})
@@ -1535,6 +1676,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "golf_player": name})
             except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/sports/espn_use":
+            # ESPN poll posture -- isolated key, same shape as
+            # /api/sports/golf_player. Only "personal" (this house may
+            # poll ESPN) or "off" (no ESPN HTTP). "commercial" is not a
+            # mode: we do not have a license.
+            try:
+                j = json.loads(body or b"{}")
+                raw = j.get("espn_use")
+                if raw not in (sports.ESPN_USE_PERSONAL, sports.ESPN_USE_OFF):
+                    self._json({"ok": False,
+                                "error": "espn_use must be personal or off"}, 400)
+                    return
+                value = sports.FEED.set_espn_use(raw)
+                self._json({"ok": True, "espn_use": value})
+            except (ValueError, AttributeError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/sports/tennis_player":
             try:
                 j = json.loads(body or b"{}")
@@ -1604,6 +1761,28 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, **dnd.save_config(bool(j.get("enabled")))})
             except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/skins":
+            # {"skin": "midnight"} -- local, config-driven UI theme.
+            # SportsEngine reads skins.get_active() every tick (cheap,
+            # cached on file mtime), so this applies live, no mode
+            # restart needed. See skins.py's own module docstring for
+            # why this is a local theme system, not a remote plugin
+            # loader.
+            try:
+                j = json.loads(body or b"{}")
+                self._json({"ok": True, **skins.save_config(j.get("skin"))})
+            except (ValueError, AttributeError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/layout":
+            # {"footer_priority": ["odds","class_label","series","venue"]}
+            # -- Tier-3 layout pilot (2026-08-10). Must contain exactly
+            # the same 4 real fields, any order -- layout.save_config()
+            # itself validates and raises ValueError otherwise.
+            try:
+                j = json.loads(body or b"{}")
+                self._json({"ok": True, **layout.save_config(j.get("footer_priority") or [])})
+            except (ValueError, AttributeError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/nowplaying":
             # {"api_key": "...", "user": "..."} -- a real Last.fm API key
             # is a real credential (same category as notify_config.json's
@@ -1612,9 +1791,37 @@ class Handler(BaseHTTPRequestHandler):
             # existing token-handling care.
             try:
                 j = json.loads(body or b"{}")
+                mic_only = j.get("mic_only")
                 cfg = nowplaying.FEED.set_config(
-                    j.get("api_key"), j.get("user"), clear_key=bool(j.get("clear_key")))
-                self._json({"ok": True, "user": cfg["user"], "has_key": bool(cfg["api_key"])})
+                    j.get("api_key"), j.get("user"), clear_key=bool(j.get("clear_key")),
+                    mic_only=(bool(mic_only) if mic_only is not None else None))
+                self._json({"ok": True, "user": cfg["user"], "has_key": bool(cfg["api_key"]),
+                            "mic_only": cfg["mic_only"]})
+            except (ValueError, AttributeError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/ambient":
+            try:
+                j = json.loads(body or b"{}")
+                saved = ambient.save_config(channel=j.get("channel"),
+                                            mix=j.get("mix"))
+                eng = ARCADE.engine
+                if getattr(eng, "apply_config", None):
+                    live = eng.apply_config(channel=saved["channel"],
+                                            mix=saved["mix"])
+                    self._json({"ok": True, **live})
+                else:
+                    self._json({"ok": True, **saved})
+            except (ValueError, AttributeError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/note":
+            # {"text": "..."} -- the owner's own persistent message
+            # (ownernote.py). An empty/omitted text clears the note, the
+            # one real "remove it" path -- folded through panel_text()
+            # inside save_config() itself, not here, since the owner's
+            # text is the whole boundary this endpoint exists to guard.
+            try:
+                j = json.loads(body or b"{}")
+                self._json({"ok": True, **ownernote.save_config(j.get("text"))})
             except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/gameday/config":

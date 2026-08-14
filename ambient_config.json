@@ -1,0 +1,19 @@
+{
+  "channel": "auto",
+  "mix": [
+    "flights",
+    "satellite",
+    "weather",
+    "sports",
+    "nowplaying",
+    "followflight",
+    "departures",
+    "ticker",
+    "news",
+    "events",
+    "blog",
+    "ownernote",
+    "clock",
+    "tron"
+  ]
+}

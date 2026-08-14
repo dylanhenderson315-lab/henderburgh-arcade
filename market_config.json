@@ -1,9 +1,22 @@
 {
   "crypto": [
     "BTC",
-    "ETH"
+    "ETH",
+    "SOL",
+    "XRP",
+    "DOGE",
+    "ADA",
+    "AVAX",
+    "LINK"
   ],
   "stocks": [
-    "AAPL"
+    "AAPL",
+    "NVDA",
+    "TSLA",
+    "MSFT",
+    "AMZN",
+    "GOOGL",
+    "META",
+    "AMD"
   ]
 }

@@ -3251,6 +3251,1463 @@ real key is added, per this project's own "ship correct, flag honestly"
 precedent (NHL goal detector, MMA finish detector, the flight-path map's
 own real-traffic gap just above).
 
+## Full review of everything built this session: odds silently broke on 6 sports, hockey contrast bug, court palette mismatch (2026-08-11)
+
+Direct owner ask: "let's look at all implementations created, let's make everything better." Two parallel read-only review passes (visual/design consistency across all six hero treatments + skins + weather icons + ticker; completeness/consistency across odds, layout pilot, player badges, shot court, racing, skins, and the six new sport renderers) -- same "find real, defensible issues, say so honestly if something checks out clean" instruction as the earlier logic audits, applied to design quality and feature completeness instead of correctness.
+
+**Real bug found and fixed: odds silently stopped rendering on the six sports that got dedicated hero renderers this session -- exactly the sports most likely to actually be viewed.** `sports._parse_odds()`/`_footer_odds_text()` were only ever wired into the two GENERIC fallback renderers (`_frame_universal_generic()`, `_frame_event_detail_generic()`). Every one of the six new dedicated detail renderers (baseball/football/basketball/hockey/soccer/MMA) built its own hardcoded `series > venue > broadcast > note` footer chain and never called the odds helper at all -- so the moment a sport graduated from the generic fallback to its own hero treatment, the owner-requested odds feature quietly vanished for it. Only golf/tennis/racing (never given a dedicated renderer) still showed odds. Fixed by prepending `self._footer_odds_text(ev)` to all six dedicated renderers' existing footer-line lists (pre-game only, same as everywhere else this field appears) -- real data restored without collapsing the richer multi-line footer these renderers earned down to `_footer_pick()`'s single-winner design (a different, deliberately-not-adopted fix -- see below).
+
+**Real contrast bug found and fixed: the hockey rink hero's ice color and the default skin's LIVE yellow sat at nearly identical real luminance** (`RINK_ICE` ≈221 vs `LIVE` ≈220) -- on real LED hardware the period/clock text would read as a near-invisible smear, the opposite of every other hero backdrop (all five others sit in a dark luminance-25-to-90 band specifically so light ink pops). This wasn't skin-specific -- every skin's `live` color is bright, so the bug reproduced under all of them -- confirming the fix belonged in `RINK_ICE` itself, not a per-skin special case. Darkened to `(130, 155, 185)`, restoring both real contrast and visual consistency with the other five hero backdrops.
+
+**Real palette inconsistency found and fixed: the celebration's NBA mini shot-court and the basketball detail view's own court hero used two completely unrelated palettes** for the "same" court (cool gray-blue vs. warm hardwood) -- a user would see two visually unrelated courts moments apart for the same sport. Fixed by having `draw_mini_court()` reuse `draw_basketball_court_hero()`'s own `COURT_WOOD`/`COURT_WOOD_LINE` palette (dimmed for its smaller scale) instead of a second, bespoke one.
+
+**Real gaps found, deliberately NOT fixed this pass, documented instead of silently dropped:**
+- **The Tier-3 layout-priority pilot (`layout.py`) genuinely only controls 2 of 9 sports' footer content** (the same two generic-fallback renderers odds had the same problem in) -- the six dedicated renderers' footer order is still hardcoded, not config-driven, contradicting the pilot's own stated "one config, both views agree" intent. NOT unified this pass: `_footer_pick()`'s whole design picks ONE winning field for a single-line slot, while the six dedicated renderers deliberately show MULTIPLE stacked footer lines -- forcing them through the single-winner design would be a real architecture change and a real feature reduction (fewer facts shown), not a small fix. Worth a real design discussion before touching it, not a quiet fix bundled into this pass.
+- **Hockey has a dedicated DETAIL renderer but still no dedicated MAIN renderer** -- `SPORT_RENDERERS` has no `"hockey"` key, so hockey's live/main ticker view still falls through to the generic fallback while its detail view (reached by pressing select) is fully custom. Real, but the practical impact is narrow (the main ticker row already shows real data via the generic renderer; only the promoted-screen treatment is missing) and building a from-scratch main renderer is real, if modest, new scope -- flagged rather than rushed into this review pass.
+
+**Weather icons, skin scope, player-badge scope, shot-court scope, racing's fallback safety, and the four consistent hero-geometry conventions were all checked and confirmed genuinely correct** -- no changes needed, not a lack of looking.
+
+**Verified**: `render_audit.py`/`fold_audit.py` both clean throughout. A direct synthetic render confirmed odds ("LAL -3.5") now genuinely appears on basketball's dedicated detail view where it was previously silently absent. The hockey rink re-rendered post-fix shows clearly legible period/clock text against the darkened ice. Real service restart, confirmed healthy (`err: None`) after every change.
+
+## Real bug: a NOAA test tsunami warning displayed as a genuine Extreme alert; weather gets a condition icon (2026-08-11)
+
+**The bug, confirmed against real live data, not hypothetical.** The
+owner reported real confusion seeing a tsunami warning for a Myrtle
+Beach-area device. The actual live payload (`GET /api/weather/current`)
+showed the real cause: NWS's National Tsunami Warning Center periodically
+issues a genuine, scheduled **"TEST TSUNAMI WARNING"** covering
+essentially the entire US coastline at once (which is why its area list
+legitimately includes Horry County alongside dozens of other coastal
+zones from Texas to Maine) -- `weather._fetch_alerts()` had no check
+anywhere for whether NWS flagged a product as a test, so it rendered
+with the same `severity: "Extreme"` weight as a real warning, with
+nothing on screen indicating it was a drill. This could have driven the
+global severe-weather takeover too, since that reads from the same
+alerts list.
+
+**Fixed with two independent, redundant checks** (a false NEGATIVE here
+-- silently dropping a REAL tsunami warning -- would be far worse than a
+false positive, so this deliberately doesn't rely on one signal alone):
+1. NWS's own real CAP `status` field (Actual/Exercise/System/Test/Draft,
+   part of the Common Alerting Protocol NWS alerts implement) -- skip
+   anything present and not `"Actual"`.
+2. A literal `"TEST "` prefix on the real event or headline text
+   (confirmed present on the exact product that exposed this bug) --
+   catches a real product that for any reason didn't carry a trustworthy
+   `status` field.
+
+Both checks live in `weather._fetch_alerts()`, upstream of every
+consumer (`WeatherEngine`'s own alert view, the storm radar mini-scope,
+and `arcade_server._severe_alert_frame()`'s global takeover) -- fixing
+it once at the I/O boundary fixed all three for free, same "fold once at
+the boundary" discipline this project already applies to text folding.
+
+**Weather condition icon, real owner ask ("fix weather to be more
+visually pleasing").** The main conditions view was almost entirely
+text -- no real broadcast weather display is missing a sun/cloud/rain
+icon, and this one was. New `weather_icon_for(text)` maps NWS's own real
+condition text (case-insensitive substring match: THUNDER/STORM,
+SNOW/SLEET/ICE, RAIN/SHOWER/DRIZZLE, FOG/HAZE/MIST, CLOUD/OVERCAST,
+CLEAR/SUNNY/FAIR, checked in that priority order so a real "THUNDER"
+mention can't fall through to the generic rain icon) to one of six new
+geometric icon functions (`draw_weather_icon_sun/cloud/rain/storm/
+snow/fog`) -- same put_px-offset convention every sport icon in this
+project already uses, no bitmap assets. Unmatched real text (NWS has
+dozens of real phrasings) draws no icon at all rather than guessing one,
+the same honest-degrade contract every other derived-from-text signal
+here follows. Placed in the left margin beside the centered "88F" hero
+temperature -- confirmed via real text-width math that a 2-3 digit
+temperature at scale=2 leaves genuine room there without needing to move
+anything else on an already-audited layout.
+
+**Verified**: `weather._fetch_alerts()` re-run directly against the real
+live zone query (SCC051/SCZ054) after the fix -- the test tsunami is
+gone, only the real Heat Advisory remains. `render_audit.py`/
+`fold_audit.py` both clean. Four synthetic icon renders (sun/cloud/rain/
+thunderstorm) confirmed distinct and legible via PNG. Real service
+restart, confirmed healthy, and confirmed LIVE against the actual
+running service's own `/api/weather/current` response (not just the
+offline test) that the test alert no longer appears.
+
+## Real pitch count + batting average: the boxscore, not `situation` (2026-08-11)
+
+**The bug, and it is a bad one: a feature was reported as "added" twice
+and rendered literally nothing on every real game.** Pitch count, batter,
+on-deck and pitcher were all added to `sports._situation()` across two
+earlier passes this same day, each shipped with an honest-sounding "read
+defensively, unverified against a live payload" caveat. The owner then
+looked at the real panel and correctly asked where any of it was. Answer:
+nowhere, on every single live game, because **every one of those key
+paths was wrong**. The "honest degrade" contract (absent means absent)
+turned a wrong guess into a silent no-op, which is exactly the failure
+mode that made it look like nothing had been built. **A defensive read of
+a key nobody has ever confirmed is not a feature; it is a comment.**
+
+**What the real live payload actually contains, confirmed 2026-08-11
+against a real in-progress MLB game (CLE @ DET, event 401816481) — do not
+re-derive these from memory:**
+
+- **There is NO game-total `pitchCount` on `situation`, at any nesting.**
+  The only `pitchCount` anywhere in the summary endpoint is
+  `plays[].pitchCount = {balls, strikes}` — the count WITHIN one at-bat,
+  not pitches thrown. Both previously-guessed keys
+  (`situation.pitcher.pitchCount`, a flat `situation.pitchCount`) are
+  fiction.
+- **There is NO `onDeck` field.** The literal string appears **zero**
+  times in the entire real response. ESPN does not publish it here.
+  Deriving one from bat order would be guessing — a pinch hitter or
+  substitution breaks that arithmetic exactly when it matters — so
+  on-deck is **deliberately not shown**, and that is a real finding, not
+  a gap to quietly fill later.
+- **There is NO `battingAverage` key** either (0 occurrences).
+- **`situation.batter`/`situation.pitcher` nest the name one level deeper
+  than the old code read it**: the real path is
+  `situation.batter.athlete.shortName` ("M. CLARK"), not
+  `situation.batter.shortName`. This alone made the names `None` on every
+  real game.
+- **The two endpoints disagree on this shape, genuinely**: the
+  **scoreboard**'s `situation.pitcher` carries a full nested `athlete`
+  object; the **summary**'s carries only `{"playerId": N}`. Both are real
+  and both must be handled.
+
+**Where the real numbers actually live: `boxscore.players[].statistics[]`,
+which carries a `labels` list naming the columns and a parallel per-athlete
+`stats` list.**
+
+| block | real labels | what matters |
+|---|---|---|
+| batting | `H-AB, AB, R, H, RBI, HR, BB, K, #P, AVG, OBP, SLG` | **`AVG` is the real batting average**; `H-AB` is today's line |
+| pitching | `IP, H, R, ER, BB, K, HR, PC-ST, ERA, PC` | **`PC` is the real PITCH COUNT**; `PC-ST` is thrown-strikes |
+
+Real confirmed rows: `S. Kwan -> ['1-3','3','1','1','0','0','1','0','19',
+'.266','.365','.329']`, `T. Bibee -> ['6.0','5','4','4','0','4','0',
+'81-56','3.94','81']`.
+
+`sports._boxscore_stats()` zips `labels` to `stats` **by position, never
+by hardcoded index**, so a column ESPN adds or reorders cannot silently
+shift every value one slot over and produce confidently wrong numbers.
+Athletes are joined to the live `situation` by real athlete id
+(`playerId` -> `boxscore` `athlete.id`).
+
+`sports.fetch_baseball_matchup(league, event_id)` is the one entry point.
+`SportsEngine._refresh_matchup()` calls it for **the one game currently
+expanded**, only while genuinely live, throttled through the existing
+`_detector_due()` gate at `WINPROB_REFRESH` (20s) — the same narrow
+per-game scope and cadence every other summary fetch here already uses.
+Closing the detail view stops the fetch. Results are keyed by event id
+and pruned to that one game, so a stale game's pitcher can never leak
+onto another game's card.
+
+**Two more real bugs found and fixed in the same pass:**
+
+1. **`_disambiguate_colors()` was never wired into the universal header
+   path** — only into `_parse_event()` (per-league). But the universal
+   path is what the ticker and *every expanded detail view* actually
+   render from, so a real CLE @ DET game drew two solid team bars in
+   visually identical navy, defeating the entire point of colour-coding.
+   The measurement that justified that function (5 of 19 real games too
+   close to tell apart) applied here just as much; it simply was not
+   called. Now fixed — CLE navy vs DET orange, via ESPN's own real
+   `alternateColor`, never an invented colour.
+2. **`fit_text` chewed player names down to a bare initial** — "T. BIBEE"
+   -> "T.", "Z. MCKINSTRY" -> "Z.". This is the *exact* bug
+   `fit_person()` was written for in this same file ("T. POSTARNAKOVA"
+   -> "T.", see its docstring) and it was reintroduced anyway. Names now
+   use `fit_person()`, so a long name degrades to its **surname**, never
+   to an initial.
+
+**Layout**: the diamond moved right and shrank (r=5), the reclaimed left
+column carries the real matchup (name on its own row so it stays legible,
+numbers beneath), team bars went 9px -> 8px to buy the two rows this
+needed, and ball/strike pips moved up onto the inning/outs strip. **The
+diamond itself was stripped to a plain outlined shape with lit base
+squares** — direct owner instruction ("JUST THE BASES AND LIT UP WHEN
+SOMEONE IS ON IT, DONT MAKE GRASS AND STUFF"), removing round 2's grass
+fill, dirt infield, basepath edge and mound dot. When the matchup fetch
+hasn't landed yet (first moments after opening a game, or ESPN
+unreachable), the diamond **recentres and grows to r=8** rather than
+leaving a dead column — an honest "less data, same screen" degrade.
+
+**Verified**: real stats confirmed rendering on the real live game
+(96P, 3.93 ERA, .286 AVG, 1-3 today, full surname "MCGONIGLE"),
+`render_audit.py sports` clean (0 failed, 133 frames), full sweep and
+`fold_audit.py` clean, both the with-matchup and no-matchup layouts
+rendered and visually reviewed, real service restarted and driven through
+`sports` mode live (`err: None`, `loop_errors: 0`, 864 lit px), panel
+restored to `ambient`.
+
+**Standing lesson worth more than the feature**: this project's
+"ship correct, flag honestly" precedent is sound, but it was being used
+to ship *unconfirmed key names* as though flagging them made them
+harmless. It doesn't — it makes a dead feature that looks alive in the
+code and in this file. If the network is reachable, **confirm the key
+against a real payload before writing the renderer**; if it isn't, say
+the feature is blocked, not built.
+
+## MMA gets an octagon hero + detail renderer; hero-treatment sweep judged complete (2026-08-11)
+
+Direct follow-up on "keep innovating": MMA had a real MAIN renderer
+(`_render_mma()`) but, like hockey before this pass, no dedicated
+DETAIL renderer at all -- fell through to the generic fallback. New
+`draw_octagon_hero()` (eight points on a circle, cage-red outline, dark
+mat fill -- geometric only, no real promotion's cage branding) backs a
+new `_render_mma_detail()`: full (not abbreviated) fighter names,
+records, weight class, card position, and venue/broadcast, same honest
+set-dressing contract every other hero this session established.
+
+**Deliberately stopped here, not a partial job**: golf and tennis were
+considered and left alone on purpose -- both are inherently RANKED-LIST
+sports (a leaderboard, a bracket position), not a single-live-state
+matchup the way baseball/football/basketball/hockey/soccer/MMA all are.
+A hero band would eat real leaderboard rows for a shape that doesn't fit
+the "one backdrop behind one live fact" pattern the other six use.
+Racing's own detail view is the same generic leaderboard path golf
+already uses, for the same real reason (a race is fundamentally a
+ranked list of drivers, not a two-side matchup) -- also left alone.
+That's six of nine real per-sport detail renderers now hero-backed
+(baseball/football/basketball/hockey/soccer/MMA); the remaining three
+(golf/tennis/racing) keep their existing, already-real leaderboard
+treatment because that's the honest right shape for what they actually
+are, not an oversight.
+
+**Verified**: `render_audit.py sports` clean (0 failed, same pre-existing
+tennis-name truncation warnings). Synthetic octagon render (Jon Jones vs
+Stipe Miocic, real UFC-shaped data) confirmed legible via PNG -- weight
+class, card position, both names/records, VS, and venue/broadcast all
+present with no text collision. Full project sweep and `fold_audit.py`
+both clean. Real service restart, confirmed healthy (`err: None`).
+
+## Full logic audit + real bug fixes + hero treatment for every sport (2026-08-11, owner away)
+
+Direct owner ask: "look at logic of everything. do a full audit and fix things... if you think of anything or anything seems like a no brainer, make sure you create and implement." Four parallel read-only audit passes (flights/PlaneWatch, sports/SportsEngine, weather/satellite/skypass, arcade_server/market/shared-infra), each instructed to find REAL bugs only, not style nits, and to say so honestly if nothing was found. All four came back with concrete, real findings -- none manufactured.
+
+**Real bugs found and fixed:**
+
+1. **Flights: two big-moment detectors silently excluded aircraft with no broadcast callsign.** `_detect_emergency_squawk()`/`_detect_airship()` keyed their one-shot seen-sets on bare `ac["ident"]` and REQUIRED a truthy ident just to be included in the set at all -- a real aircraft broadcasting hex but no callsign (the exact case `_sel_key()`'s hex-preferred fallback exists for) would never be checked for MAYDAY/airship status, not just risk a rare callsign-collision misfire. Fixed: both now key on `self._sel_key(ac)` (hex preferred), matching every other identity-tracking spot in this project; display text degrades to hex when ident is genuinely absent instead of a raw `ac["ident"]` KeyError.
+
+2. **Weather: feels-like tag silently suppressed at exactly 0F.** `WeatherEngine._frame_hourly()`'s comparison used `temp or feels` instead of `temp is not None` -- a real 0F temp is falsy in Python, so `0 or feels` evaluated to `feels`, making the comparison always `feels != feels` (False), hiding a genuinely different real wind-chill number. Fixed to the `is not None` idiom every other "is this a real different fact" check in this file already uses.
+
+3. **Sports: two real scoring plays landing in the same ~20s poll window could permanently lose one of them.** All four id-keyed big-moment detectors (`mlb_hr`/`nfl_touchdown`/`nhl_goal`/`basketball_clutch`) picked "newest" by raw STRING comparison of ESPN's play id (wrong the moment two ids differ in digit width, e.g. "9" sorting after "10"), AND unconditionally marked every currently-known id as seen the same tick a new one was found -- so a second real scoring play in the same throttle window was fired for never, and marked seen anyway, silently gone forever. New shared `_advance_seen_plays()`/`_play_sort_key()` fixes both: numeric-aware chronological sort, and only the play actually reported as newest gets added to the seen set -- any other genuinely-new-but-unfired play stays eligible and fires on the very next poll instead of being lost. Verified against the exact reproduction scenario by hand (see the direct interpreter session in this session's own history): the previously-lost play now correctly fires one throttle interval later.
+
+4. **Ticker: the "0.35 brightness floor" on the price bar was dead code for real near-zero moves.** `int(sqrt(frac) * half)` rounds straight to 0 for any move under ~0.0153%, so the bar drew zero pixels before the color floor ever had anything to apply to -- genuinely reachable by this session's own stablecoin additions (USDT/USDC/DAI routinely sit at 0.00-0.01% 24h change). Fixed with `max(1, n)` whenever `frac > 0`.
+
+**No-brainers found and implemented:**
+- `market.py`'s `list_known_crypto()` rendered ZRX's real CoinGecko id "0x" as "0X" via blind `.title()`-casing -- added a one-entry display-name override.
+- CVX/DASH real symbol collisions between the crypto and stock tables (Convex Finance vs. Chevron, Dash vs. DoorDash) were confirmed as a real but narrow edge case (only triggers if an owner deliberately adds the same symbol to both watchlists) -- documented, not fixed structurally; a visual crypto/stock marker would need threading a new field through the whole feed/render pipeline for a two-symbol collision, judged not worth the risk this pass.
+
+**Everything else the four audits checked came back clean** -- dead-reckoning/trail math, selection-identity handling, the ISS comet trail's fill/clear logic, unit conversions, the Rothfusz heat-index/wind-chill formulas, cache-on-mtime races in every small config module, the `/api/notify` HMAC auth, `layout.py`/`skins.py`'s validation, and the render loop's panel-lockup-sensitive path were all hand-traced and found correct. Full findings from all four audits are in this session's own record; only the confirmed real bugs are summarized here.
+
+## Real-time follow-up fixes, same session: menu axis bug + baseball diamond legibility + hero treatment for every team sport
+
+Three more direct owner reports/asks, addressed in the same pass:
+
+**Flight selection menu's input axis was backwards.** Real, confirmed bug: `_frame_menu()` renders as a VERTICAL stacked list, but LEFT/RIGHT (a horizontal gesture) moved the cursor, while UP/DOWN did something else entirely (jumped straight to THE HANGAR, abandoning the open menu). Fixed: left/right now no-ops while the menu is open; up/down moves the cursor. Verified directly against a real engine instance -- `input('left')` no longer touches `menu_idx`, `input('down')`/`input('up')` do.
+
+**Baseball diamond, round 2 -- reverted toward cartoon, not realism.** Round 1 (earlier this session) added a mown-stripe grass texture and a 5-point home-plate pentagon for visual depth; real owner feedback: "too realistic when cartoon version is better... supposed to see who is on base" at a glance. Fixed: flat solid grass (texture was fighting legibility, not adding it), a plain bright home-plate square, and -- the real fix -- occupied bases now draw BIGGER (a filled 3x3 block) not just brighter than empty ones, since size is what actually reads instantly across a room, matching the same "important = bigger AND brighter" hierarchy language the flight radar scope already uses.
+
+**Every remaining team sport got the same hero treatment baseball/football already had**, direct owner ask ("every sport needs the attention MLB has... when you hit enter it's supposed to be a visually jaw-dropping experience on each sport"): `draw_basketball_court_hero()` (hardwood + center circle) wired into `_render_basketball_detail()`; `draw_soccer_pitch_hero()` (pitch + halfway line/center circle) wired into `_render_soccer_detail()`; `draw_hockey_rink_hero()` (ice + real blue lines/red line) backs a BRAND NEW `_render_hockey_detail()` -- hockey previously had NO dedicated renderer at all, main or detail, the exact gap this whole per-sport table exists to close. All three follow the same honest-set-dressing contract football's turf established: real backdrop shape, real period/quarter/clock text on top, zero invented possession/bonus/power-play markers (no confirmed ESPN field for any of those, stated in each function's own docstring).
+
+**Real MLB pitch count added**, direct owner ask ("score bugs even feature that"): `sports._situation()` now reads `situation.pitcher.pitchCount` (falling back to a flatter `situation.pitchCount`) defensively, shown as "P47" sharing the same row as the existing ball/strike count pips. Honestly flagged, same as every other field added without live verification this session: this sandbox cannot reach ESPN to confirm either key name is real for this specific endpoint -- ships correct-if-present, silently absent otherwise, never a guessed number.
+
+**F1/NASCAR confirmed structurally correct, not newly built**: re-checked `has_content()`/`_build_panels()`/the universal ticker dispatch for any sport-specific filtering that could exclude racing -- found none. Racing already flows through the exact same generic leaderboard path every individual-competitor sport uses; the only reason it might not appear live is ESPN's real universal feed not tagging an event `sport: "racing"` this session (unverifiable, network-blocked sandbox), not a gap in this project's own code.
+
+**Wider GitHub research pass** (explicit ask: "look at tons of them") surfaced two new real, verified repos beyond the prior two research passes -- `feram18/f1-led-leaderboard` (dedicated per-data-type screens: standings/qualifying/podium/track-map, a real precedent for a future F1 hero screen) and `bcariddi/prem-led-scoreboard` (a folder-keyed random-gif celebration pool). The gif-pool idea was explicitly considered and rejected: it depends on shipping external image assets, which conflicts with this project's own standing "no shipped image/logo library, geometric icons only" rule (the same reasoning behind every sprite/icon in this codebase being hand-drawn primitives, never an asset file).
+
+**Verified**: `render_audit.py`/`fold_audit.py` both clean throughout every fix (0 modes failed, 0 feeds not folding). The two logic-bug fixes (sports id-collision, weather falsy-zero) were verified with direct interpreter reproductions of the exact failure scenario, not just re-running the audit tools. All three new hero backdrops (basketball/hockey/soccer) rendered to PNG and visually confirmed distinct and legible. Real service restart + health check after every change (`err: None`, `loop_errors: 0` throughout).
+
+## Big autonomous build pass: ticker expansion, dynamic visuals everywhere, Tier 1-3 scorebug ideas (2026-08-10, owner away)
+
+A large, explicitly front-loaded-with-questions session -- the owner
+asked for tier 1/2/3 scorebug ideas, "more dynamic visuals... a no-
+brainer... very pleasant", and a much bigger ticker, then stepped away
+and asked everything be built unsupervised. Every open decision was
+resolved via AskUserQuestion BEFORE this pass started (ticker scope,
+which Tier 2/3 items, which modes get dynamic-visual depth, autonomy
+ground rules) so nothing below required a judgment call that hadn't
+already been made explicit.
+
+**Ticker expansion** (`market.py`). `SYMBOL_TO_COINGECKO_ID` grew 24 ->
+120 real coins -- confirmed by reading `_fetch_crypto()` FIRST that
+CoinGecko's `/simple/price` batches every id into ONE request regardless
+of list size, so this adds zero new requests/minute, not a scaling
+concern. New `KNOWN_STOCKS` (110 real tickers + company names) is a
+DIFFERENT kind of table -- Yahoo's chart endpoint already accepted any
+real symbol directly (no cap ever existed there), so this is purely a
+reference list for the control panel's new quick-add dropdowns, not a
+capability gate. `DEFAULT_CRYPTO`/`DEFAULT_STOCKS` both grew from 3 to 8
+seeded symbols. **Honest gap**: this sandbox can't reach CoinGecko this
+session, so the ~90 newly-added ids are from CoinGecko's well-established
+public naming convention, not individually re-confirmed -- a wrong id
+fails gracefully (that one coin just never populates, never a wrong
+price), so this is a low-risk, not a fabricated-number, failure mode.
+Control panel (`arcade.html`) gained quick-add `<select>` dropdowns for
+both crypto and stocks, wired to the expanded `/api/ticker/symbols`
+response (`known_crypto`/`known_stocks`, now `{sym, name}` pairs).
+
+**Ticker price-strength visuals** (`engines.py`, `TickerEngine`). The
+existing sqrt-scaled magnitude bar now ALSO scales brightness with the
+same real `pct` magnitude (floored at 0.35 so a near-zero move stays a
+visible quiet bar, not an invisible one) -- length said "how far",
+brightness now also says "how much". The bottom scrolling tape, previously
+flat neutral gray regardless of content, now tints toward UP/DOWN based
+on the real aggregate mood of the currently-loaded rows (more real
+gainers than losers, or vice versa) -- a real derived signal, not an
+invented per-row color (draw_marquee only takes one color for the whole
+string, so per-symbol tinting would need a real per-glyph marquee
+rewrite, out of scope for a visual-polish pass).
+
+**Satellite dome comet trail** (`SatelliteEngine`). ISS-only, deliberately:
+this project already measured whole-catalogue apparent motion at
+~0.13px/sec (dominated by slow high-altitude satellites), so a trail on
+every object would be motionless noise. The ISS's real ~7.66km/s orbital
+velocity makes it the one object that visibly crosses the dome over a
+few real seconds during a close pass. `self._iss_trail` (deque, maxlen
+12) samples the real dome position every tick the ISS is above the
+horizon, cleared the instant it drops out of `sky_now` entirely so a
+trail never survives to imply an ended pass.
+
+**News freshness bar** (`NewsEngine` only, deliberately NOT `BlogEngine`
+-- that engine's own docstring explicitly says it's "the quietest mode
+in the project... should not earn attention", and a glow bar would
+contradict that stated design intent, so it was skipped there on
+inspection, not forgotten). New module-level `draw_freshness_bar()`
+complements (doesn't replace) the existing binary stale-dot: real
+`age`-scaled length AND brightness, floored so it never fully vanishes
+(empty would misread as "no data" instead of "old data").
+
+**Football hero turf** (`_render_football_detail`). Same "give the hero
+visual real depth" treatment baseball's diamond got, with an honest
+constraint stated up front: ESPN's down/distance NUMERIC subfields
+(yard line, down, distance) were never confirmed live by this project --
+only the pre-formatted `downDistanceText` string has been verified --
+so `draw_football_field_hero()` deliberately does NOT plot a ball
+position at a specific yard line (that would be inventing precision this
+project doesn't have). It's honest set-dressing: a real mown-turf stripe
+backdrop with the REAL down/distance text on top, nothing invented. A
+real vertical-budget bug (the exact same class baseball's diamond hit)
+was caught before shipping: the first draft's live-game team-block
+spacing never left the turf enough room to draw at all; fixed by giving
+football's live path the same compact/full-layout split baseball's
+detail view already established.
+
+**Player-highlight-after-key-play** (`sports.py` + `draw_celebration()`).
+New `sports._play_scorer(p)` extracts real jersey/position/name from a
+scoring play's `participants` field -- reused, not a new endpoint, on
+the SAME summary payload the home-run/touchdown/goal/clutch detectors
+already fetch. Wired into all five detectors (`mlb_hr`, `nfl_touchdown`,
+`nhl_goal`, `basketball_clutch`, `soccer_goal`) via a new `scorer` param
+on `_set_big_moment()`. `draw_celebration()` draws it as a small
+`#JERSEY POSITION` badge at the very bottom of the screen, clear of the
+centered text plate -- deliberately NEVER a photo (unrecognizable at
+64x64), matching the scope-narrowing the owner explicitly agreed to.
+**Honest gap**: `participants[].athlete.jersey/position` shape is from
+common public ESPN-API documentation, not confirmed against this
+project's own live payload (network-blocked sandbox) -- verify the first
+session a real scoring play fires with this code live.
+
+**F1 + NASCAR racing support** (`engines.py`). A real scope-reduction
+discovery: `_header_event()`'s existing `leaderboard = len(athletes) > 2`
+path (built for golf) is ALREADY sport-agnostic -- any individual-
+competitor sport with 3+ athletes renders through the same generic
+leaderboard code with zero new renderer needed. `SPORT_ACCENT["racing"]`
+already existed in the codebase (unused until now); added
+`draw_icon_racing()` (a generic checkered-flag glyph, geometric-only, no
+real series marks) and registered `SPORT_ICONS["racing"]`. No new
+per-league polling, no pinned-driver mechanism (deliberately out of
+scope this pass, unlike golf/tennis's dedicated pinned-player systems) --
+this only makes whatever the universal feed already surfaces for racing
+render with a proper icon/color instead of falling through unstyled.
+**Honest gap**: never confirmed live that ESPN's universal header
+actually tags F1/NASCAR events with `sport: "racing"` (network-blocked
+sandbox) -- verify the next session real racing events are checked.
+
+**NBA mini shot-location court** (`sports.py` + `draw_celebration()`).
+Deliberately reuses `_fetch_clutch_plays()`'s own already-fetched summary
+payload (`play.coordinate.x/y`, a real field documented across multiple
+independent public ESPN-API tools) rather than adding stats.nba.com as a
+brand-new external dependency with its own header/rate-limit quirks this
+project has no existing relationship with -- keeps this consistent with
+the project's "own I/O module per feed" architecture instead of
+introducing a second sports-data source. New `draw_mini_court()` (a
+plain rectangle + hoop tick + one dot, geometric-only) draws in the
+celebration's top-right corner, clear of the text plate and the player
+badge. **Honest gap, most significant one this pass**: the real
+coordinate SYSTEM (origin corner, full vs half-court feet) is assumed
+from common public convention, not confirmed -- the dot is clamped into
+range rather than trusted raw, but its exact on-court accuracy is
+unverified until a real clutch shot fires with this code live.
+
+**Tier 3: config-driven layout-priority pilot** (`layout.py`, new).
+Scoped down explicitly from the research reference
+(jackbmccarthy/OpenScoreboard's GrapesJS drag-and-drop web-canvas editor)
+after confirming with the owner that a general drag-and-drop position
+editor doesn't fit this project's fixed, hand-audited 64x64 renderers
+(would reopen every collision/overflow bug `render_audit.py` already
+found and fixed on these exact screens). What ships instead, matching
+the real spirit of the ask: `SportsEngine`'s one hardcoded footer-field
+priority chain (odds > class_label > series > venue, in
+`_frame_universal_generic()`/`_frame_event_detail_generic()`) is now a
+real config-driven ORDER (`layout_config.json`, same load/save/cache
+shape as every other tiny config module here), validated so a saved
+list must contain exactly the same 4 real fields. New shared
+`SportsEngine._footer_pick()` replaced two separate hardcoded chains
+with one, so both views can never disagree about priority. New
+`GET`/`POST /api/layout` + a comma-separated text field in the control
+panel (matching the ticker card's own existing UX convention).
+
+**Verified, all nine pieces**: `render_audit.py`/`fold_audit.py` both
+clean throughout (0 modes failed, 0 feeds not folding, only pre-existing
+unrelated truncation warnings). Every synthetic-render claim above was
+actually rendered to a PNG and visually confirmed, not just described --
+ticker bar/tape, football turf, celebration player badge, NBA mini
+court, racing leaderboard. The layout-priority reorder was confirmed to
+actually change which field renders (`odds`-first vs `class_label`-first
+produced different real output from the same event dict). Real service
+restart + health check after every single change (owner explicitly
+approved "restart repeatedly while I'm away"), all clean (`err: None`,
+`loop_errors: 0`). All five HONEST GAPS above (crypto ids, player
+jersey/position shape, F1/NASCAR sport tagging, football numeric yard
+fields, NBA shot coordinate system) are real, stated inline in the code
+they affect, not just here -- this sandbox's network to CoinGecko/ESPN
+was unreachable the entire session, so anything requiring a live payload
+this project hasn't independently confirmed before is flagged rather
+than assumed correct. Next session: re-check all five against real live
+data.
+
+## Skins expanded, baseball diamond redesigned, real ambient reuse (2026-08-10, follow-up)
+
+Direct owner follow-up on the Tier 3 work above: "make the skins better",
+"more dynamic visual modes", "fix the baseball diamond into something
+more visually pleasing", "there should be pitch count or something".
+
+**Pitch count -- checked for real, not built.** No confirmed field for a
+game-total pitch count exists anywhere in the ESPN payloads this project
+actually parses (`_situation()`'s own docstring already states the full
+verified MLB set: balls/strikes/outs/onFirst/onSecond/onThird, nothing
+more). Deriving one from balls+strikes would be quietly WRONG -- foul
+balls past two strikes add real pitches without changing the strike
+count, so that arithmetic undercounts every at-bat with a foul-off.
+Flagged honestly instead of shipped as a plausible-looking wrong number.
+**What WAS real and available: `baseRunnersText`** (ESPN's own
+human-readable runner description, e.g. "RUNNER ON 2ND") --
+`sports._header_event()` had already been parsing this into
+`runners_text` since the odds work above, but nothing ever displayed
+it. Now shown on the baseball detail view, preferred over the project's
+own synthesized "RISP" tag (RISP is now only the fallback when ESPN's
+own text is absent) -- real ESPN prose beats a derived abbreviation
+when both are available.
+
+**Baseball diamond redesign** (`draw_baseball_diamond_hero()`), on
+direct visual feedback against the first version: added a mown-stripe
+grass field behind the dirt diamond (alternating light/dark bands, the
+real broadcast-field detail every televised infield has -- the diamond
+previously floated on flat black with nothing establishing it as a
+field), a brighter basepath EDGE outline around the dirt fill (was a
+flat blob), a real 5-point pentagon home plate (was a 4-pixel bar --
+the one base with a genuinely different real shape, now drawn like
+one), and a distinct plus/diamond shape for the three occupied-base
+markers (was a plain square, now visually distinct from both the
+plate's pentagon and the mound's disc). Same real geometry (home
+bottom/1st right/2nd top/3rd left) and same pulse-on-occupied
+technique, just genuinely more visual depth per the owner's own "more
+visually pleasing" ask.
+
+**Skins expanded, both wider AND deeper**, per an explicit two-part
+answer ("extend skins to more modes" + "more ambient effects like
+weather's rain/stars" -- both):
+- Two new skins (`forest`, `neon`), and every existing skin gained a
+  real `accent` color (previously only `ink`/`ink_dim`/`win`/`lose`/
+  `live`/`stale`/`hero_ink`) -- needed because WeatherEngine and
+  ClockEngine both lead with one dominant ACCENT color as their primary
+  chrome, unlike SportsEngine's INK/INK_DIM pairing. Every skin was
+  re-picked for real HUE separation from its neighbors (not a
+  brightness/saturation nudge on the same hue), so switching skins
+  reads as a genuinely different mode.
+- `_apply_skin()` (the exact instance-attribute-shadowing idiom
+  SportsEngine established) is now ALSO wired into `WeatherEngine`
+  (overrides `ACCENT`/`INK`/`INK_DIM`/`STALE`) and `ClockEngine`
+  (overrides `ACCENT`/`DIM` only -- `TIME`/`DATE`/`TEMP`/`ISS`/`SUN` stay
+  fixed, since those are the real hero readouts, not decorative chrome,
+  same "never recolor the real data" line every skin application in
+  this project draws). Still NOT blanket-applied to flights/satellite/
+  news/blog this pass -- stated explicitly as remaining scope, not a
+  silent omission.
+- **Ambient reactive touches, reused rather than duplicated a third
+  time.** `ClockEngine._draw_ambient()` (new) is the exact same
+  real-data-gated rain-streaks/night-stars logic
+  `WeatherEngine._draw_weather_ambient()` already established, reading
+  the identical fields off `self.wx` (weather.FEED.get(), already
+  polled here every tick to keep the feed warm) instead of
+  WeatherEngine's own `self.data`. The clock is the panel's RESTING
+  state and lit far more of the time than weather mode itself, so this
+  is the one place this touch reaches the most real screen-time.
+  `FlightEngine._frame_idle()` (the "CLEAR SKIES" screen) gained the
+  same real night-stars/rain gate, reading a newly cached
+  `self._sky_wx = weather.FEED.get()` (zero new I/O -- weather.FEED is
+  already running for any other mode reading it).
+
+**Explicitly NOT built: a decorative "plane flying by" animation on the
+idle screen**, despite that being the owner's own suggested image for
+"dynamic and intuitive." Reasoned through directly: the REAL version of
+"a plane goes by, the panel reacts" already exists and already ships --
+`PlaneWatchEngine`, which only ever fires for a genuinely tracked
+aircraft crossing the configured window. Drawing a fake silhouette on
+the ONE screen that exists specifically to say "no aircraft nearby"
+would be exactly the invented-visual this project's own repeated
+"never invent" rule forbids, on the one screen where honesty about
+absence is the entire point. The real-signal-gated night stars are the
+honest version of the same instinct -- reacting to something true (it's
+nighttime) instead of something false (a plane that isn't there).
+
+**Verified**: `render_audit.py`/`fold_audit.py` both clean (0 modes
+failed, 0 feeds not folding) after every piece. Direct engine checks:
+all 6 skins construct cleanly across `SportsEngine`/`WeatherEngine`/
+`ClockEngine` with no exceptions. A synthetic `neon`-skinned clock frame
+confirmed the header/accent actually recolored while `TIME`/`DATE`
+stayed fixed. Two synthetic baseball-detail renders (RISP fallback and
+real `runners_text`) both confirmed clean, no overflow/collision, and
+visually reviewed via PNG before shipping (the redesigned diamond
+specifically -- grass stripes, basepath edge, pentagon plate, plus-
+shaped bases -- all present and legible at 8x zoom). Real service
+restart, confirmed healthy (`err: None`) after each of the three
+follow-up changes. Test-only `skins_config.json` cleaned up before each
+real restart.
+
+## Tier 3: real ESPN odds + a local skin system (2026-08-10)
+
+Two competitive-research items the owner explicitly asked to build,
+picked up in the same session as the baseball diamond redesign.
+
+**Odds -- a real project policy REVERSED, on explicit owner
+instruction.** `sports.py` already had a standing "betting stays off by
+default" decision baked in (a comment predating this session: "Fields
+we already pay for and were dropping. Deliberately NOT including
+`odds`"), dropping ESPN's real `odds` field on the way in. Flagged to
+the owner as a real conflict before touching anything -- confirmed:
+reverse it. `sports._parse_odds()` (new) extracts ESPN's own pre-
+formatted `details` string ("NYM -1.5") and `overUnder` float from the
+FIRST provider entry on the same header payload every other field here
+already comes from -- zero new I/O, zero new (and zero PAID) data
+source, unlike the paid odds-API options the competitive-research pass
+separately flagged and rejected. Folded through `paneltext.panel_text()`
+at the same boundary every other externally-sourced string in this file
+already uses.
+
+**Displayed as ONE line, spread OR over/under, never both concatenated**
+-- an early draft combined them and the panel's own width budget
+silently dropped the over/under NUMBER via `fit_text()`'s whole-word
+truncation, leaving a meaningless bare "O/U" on screen (caught on a
+synthetic render before shipping, not by inspection). Spread wins when
+both are real. Wired into `_frame_universal_generic()` (basketball's
+current fallback, and any future sport without a dedicated renderer)
+and `_frame_event_detail_generic()` (MMA's current fallback), pre-game
+only in both -- once live, the game's own score/clock is the more
+useful fact for that one available footer row.
+
+**Honest gap, stated per this project's own "ship correct, flag
+honestly" precedent**: this sandbox cannot reach ESPN's odds-bearing
+endpoint this session (network-blocked, same `site.api.espn.com` 403
+already documented elsewhere in `sports.py`), so `_parse_odds()`'s real
+payload SHAPE is built from ESPN's own publicly documented format, not
+confirmed against a live response the way most fields in this file are.
+No `fold_audit.py` case was added yet either, for the same reason (no
+live payload to replay canaries through). Verify both the shape and add
+fold coverage the first session this device can reach ESPN's odds field
+live.
+
+**A safe, local skin system -- explicitly NOT the remote-plugin-store
+the research repo (ChuckBuilds/LEDMatrix) actually ships.** That real
+repo lets a user install plugins fetched from arbitrary GitHub repos --
+downloading and executing remote code on this device is out of scope
+regardless of what prompted the research, no exception. What that repo
+actually splits into two concepts -- plugins own data/scheduling,
+skins restyle the screens -- maps cleanly onto this project's own
+existing feed/engine split (feed modules already own all data, engine
+classes already own all rendering), so the only genuinely new, SAFE
+piece is the skin half: a named set of local, config-driven CHROME
+color overrides.
+
+`skins.py` (new, same shape as `dnd.py`: one JSON config, safe
+defaults, read-modify-write, cached on file mtime) defines four named
+skins (classic/midnight/sunset/mono), each overriding ONLY
+ink/ink_dim/win/lose/live/stale/hero_ink -- never a real, meaningful,
+data-driven color (a team's own real ESPN color, an altitude band, an
+alert severity color, `BASES_LOADED_GLOW`). "Never invent a color, only
+recolor the frame around it" -- the same discipline `brightness.py`
+already follows for brightness and every unit-conversion helper already
+follows for units, just extended to a third axis (theme).
+
+**PILOT SCOPE, stated explicitly, not silently limited**: wired into
+`SportsEngine` only this session (`_apply_skin()`, called from both
+`reset()` and `tick()` -- the tick() call means a skin change from the
+control panel applies live, without leaving and re-entering sports
+mode), not blanket-applied across every mode. `_apply_skin()` shadows
+the engine's own class-level chrome-color attributes with instance
+attributes, so every existing `self.INK`/`self.LIVE`/etc. read
+elsewhere in the class picks up the active skin with ZERO call-site
+changes anywhere else in `SportsEngine`.
+
+New `GET`/`POST /api/skins` (same shape as `/api/dnd`), a control-panel
+dropdown in the existing status card, and confirmed live end-to-end
+against the real running service: set `midnight` via a real POST,
+switched to `sports` mode, pulled a real non-black `/api/frame` (889 lit
+px, `err: None`), reverted to `classic`, restored `ambient`.
+
+**Verified**: `render_audit.py sports` and the full project sweep both
+clean (0 failed, only pre-existing unrelated truncation warnings).
+`fold_audit.py` clean (0 feeds not folding -- odds text folding
+confirmed by code inspection of `_parse_odds()`'s own
+`paneltext.panel_text()` call, not yet a dedicated replay case, per the
+honest gap noted above). Direct code check confirmed `SportsEngine.INK`
+actually changes per active skin (`sunset` -> `(255, 190, 140)`,
+`classic` -> `(150, 160, 185)`, both matching `skins.SKINS` exactly).
+Test-only `skins_config.json` cleaned up before the real service
+restart.
+
+## Baseball's expanded-detail view gets a real hero diamond (2026-08-10)
+
+Direct owner ask, with a real screenshot of the plain pre-game version:
+"the most visually pleasing baseball board on the market... genius
+stuff... all live and update live." Scoped to the LIVE state only --
+pre/post games (the screenshot's own case) keep the original record/
+series/venue/broadcast layout unchanged, since there's no live diamond
+state to show yet.
+
+**`draw_baseball_diamond_hero()`** (new, module level, next to the
+existing tiny `draw_diamond()` 4-dot glyph) -- a real filled infield
+shape (`_fill_poly()`, reused from the flight hero-silhouette work, not
+reinvented), home plate at bottom/1st right/2nd top/3rd left (same real
+orientation the small glyph already established), a pitcher's mound dot
+at the true centroid, and base markers that brighten (not enlarge --
+an early draft made lit bases bigger, which visually fused with the
+mound into a "bowtie" rather than reading as distinct corners, caught
+on a synthetic PNG review before shipping) when occupied, with the same
+breathing-glow pulse technique already established for the flight hero
+silhouettes and the bases-loaded sustained glow (same session, above).
+
+**`draw_count_pips()`** (new) -- balls/strikes as two short pip rows
+(3 ball pips, a 4th being a walk; 2 strike pips, a 3rd being a
+strikeout), the real broadcast-graphic convention, replacing the bare
+"3-2" digit pair.
+
+**Real niche stats, nothing invented**: RISP (runner in scoring
+position -- a real, standard broadcast term, derived from the same real
+`onSecond`/`onThird` booleans already on `bases`, not a new field) draws
+when there's room. Win probability draws ONLY when the expanded game IS
+the pinned favorite's own live game -- `sports.py`'s `_fetch_win_prob()`
+is scoped to that one game only (confirmed by reading its own docstring
+again before reusing it here), so showing a win% number on any other
+game's detail card would be presenting a figure that was never actually
+computed for it.
+
+**A real vertical-budget bug, caught by `render_audit.py` on the first
+run, not by eye**: the first draft used `+9` spacing between the two
+scale=2 team rows -- a scale=2 glyph is a real 10px tall, so `+9`
+overlapped them (`COLLISION event 1 detail: 'BAL' overlaps 'MIN'`).
+Fixed to `+11`, the same spacing the untouched pre/post layout right
+above it already uses for the identical row shape -- reused, not
+re-guessed a second time.
+
+**Verified**: `render_audit.py sports` clean (0 failed, same pre-existing
+unrelated tennis-name truncation warnings). Two synthetic renders sent
+for direct visual review: a live bases-loaded/full-count case (bases
+[1,0,1], 3-2 count, 2 outs, RISP showing, win% showing for a matched
+favorite event_id) and the unchanged pre-game case matching the owner's
+own screenshot pixel-for-pixel in layout. Full project sweep and
+`fold_audit.py` both clean. Real service restart, confirmed healthy
+(`err: null`).
+
+## Competitive-research pass: sticky recall, sustained glow, radar forward-heading tick (2026-08-10)
+
+Three build-now/design-discussion items picked up from a competitive
+research audit of real open-source LED-matrix projects (flight trackers,
+sports scoreboards). Each cites its real source repo; none of the ideas
+were built without independently verifying the source repo actually
+exists and actually does what's claimed.
+
+**1. Sticky recall for a live favorite sports game**
+(`robbydyer/sports`'s own `stickyDelay` precedent). Distinct from
+`SportsEngine.ambient_weight()`'s existing `FAVORITE_AMBIENT_BOOST`
+(2026-08-10, earlier this session) -- that only lengthens dwell when
+sports' turn naturally comes up in the rotation; this periodically pulls
+sports back to the FRONT of the rotation while a favorite is genuinely
+live, even mid-turn on something else. `AmbientEngine.STICKY_RECALL_TICKS`
+(3600 ticks, ~3min) -- long enough that the rest of the rotation still
+gets real airtime between recalls, short enough you're never long
+without a check-in. `SportsEngine.favorite_live()` (new, extracted
+verbatim from `ambient_weight()`'s own existing favorite-detection logic,
+not re-derived) is the one real signal both now share.
+`AmbientEngine._jump_to()` (new) forces the rotation onto a named
+sub-mode NOW, bypassing `_advance()`'s normal wrap-order stepping, while
+still capturing the outgoing frame for a normal slide transition -- not
+a hard cut. The recall counter resets whenever sports IS already showing
+(nothing to recall) or the favorite stops being live (nothing eligible),
+and never fires during a celebration, DND-suppressed state, or manual
+browsing (`self.cycling`/`browse.auto_ok` gated, same guards every other
+auto-advance path here already respects).
+
+**2. Sustained-state glow, baseball bases-loaded only**
+(`sflems/cfl-led-scoreboard`'s own redzone-glow precedent -- "lit for
+the duration of a real state, not a one-shot flash"). A second,
+complementary grammar to the existing one-shot `Pulse` scoring flash:
+`Pulse` still means "something just happened"; this means "a
+high-leverage state IS true right now". **Deliberately NOT extended to
+football redzone or hockey power-play** -- both were checked against
+this project's own real, already-inspected ESPN payloads (`_situation()`
+in `sports.py`) and neither field has EVER been confirmed present on a
+real payload this project has actually pulled; CLAUDE.md's own FOOTBALL/
+BASKETBALL section already states this honestly ("no possession
+indicator was built... guessing one would be inventing the feature").
+Bases-loaded (`onFirst`/`onSecond`/`onThird` all truthy) is the one real,
+always-derivable "tense right now" fact available without a new field or
+a guess, so it's the only sustained-glow state shipped this pass.
+`SportsEngine.BASES_LOADED_GLOW` (urgent red, distinct from `BASE_ON`'s
+gold so the sustained state reads as tension, not just "runners on"),
+drawn as a soft pulsing wash behind the diamond+outs area in
+`_render_baseball()` -- same breathing-glow technique
+(`rim()` + a slow sine) already established for the flight hero
+silhouettes, reused rather than reinvented, phased off `self.scroll`
+(this engine's own existing monotonic per-tick counter) rather than
+adding a second counter.
+
+**3. Flight radar forward-heading tick** (owner ask: "revisit the base
+scope, make it better than it is now"; FlightScnr's sweep-radar redesign
+was the tier-2 research item that prompted the discussion, though this
+specific addition is original, not copied from that repo). The trail
+(shipped 2026-08-08) already answers "where has this aircraft been";
+nothing on the scope answered "which way is it pointed right now" beyond
+the icon's own rotation, which is subtle at 1:1 LED pixel scale. Added a
+short (3nm, fixed-length -- a direction indicator, not a claimed
+time-ahead prediction) dim line extending from the selected aircraft's
+CURRENT dead-reckoned position along its real `track_deg`, using the
+SAME `_ext_dist_nm`/`_ext_dir_deg` origin the live icon itself already
+computes a few lines below (never a second, potentially-drifted position
+computation). Same narrow scope discipline the trail already established
+-- selected aircraft only, never all 8 (this scope has already had one
+real lag complaint from over-drawing, and one real "too many lines"
+complaint that led to the route-ray removal two sessions ago; this adds
+exactly one more line, and only when something is actively selected).
+Real `track_deg` only -- no track data means no tick drawn, never a
+guessed heading.
+
+**Also checked, found already correct, no code change**: (a) the idle
+fallback chain (ColinWaddell/FlightTracker's own clock->weather->
+satellite precedent) -- `AmbientEngine` already skips `has_content() ==
+False` modes and falls back to `clock`, confirmed by reading the code,
+not assumed; (b) non-ASCII airport/registration name folding
+(squix78/esp8266-plane-spotter-color's own known-issue list) --
+`origin_city`/`dest_city`/`airline`/registration all already fold through
+`paneltext.panel_text()` at the `flights.py` I/O boundary, confirmed by
+grep; (c) the `KeyError: 3` in `FlightEngine.input()`'s rotate-cycling
+flagged as an open follow-up in the FAVORITES section above --
+superseded by the flight-select-menu rewrite (2026-08-09, same day,
+earlier), which replaced the dict-keyed view-cycling with an explicit
+if/elif dispatch; confirmed no `self.view]`-style dict lookup remains
+anywhere in the file.
+
+**Deliberately not built**: a notable-registration watchlist
+(WPTK/awesome-planespotting-list) -- that list is real celebrity/gov/
+military tail numbers, and seeding it would mean asserting specific real
+registrations belong to specific real people/agencies without a verified
+source in hand. Fabricating plausible-looking ones would violate this
+project's own "never invent" rule at the data layer, not just the render
+layer. The mechanism already exists (`favorite_aircraft` accepts any
+registration today); only the seed data is missing, and stays missing
+until a real sourced list is provided.
+
+**Verified**: `render_audit.py sports`/`render_audit.py flights` and the
+full project sweep both clean (0 modes failed, only pre-existing
+unrelated truncation warnings). A synthetic bases-loaded baseball frame
+(751 lit px, no crash) and a synthetic selected-aircraft-with-track
+scope frame (812 lit px, no crash) both rendered directly. Real service
+restart, confirmed healthy (`err: null`, `loop_errors: 0`), switched
+through `flights` mode and pulled a real non-black `/api/frame`, restored
+to `ambient` afterward. Sticky recall and the bases-loaded glow are both
+honestly unverified against a real live trigger this session (no live
+favorite game and no real bases-loaded state occurred) -- the mechanism
+was verified by direct code/logic inspection and the render-path smoke
+tests above, matching this project's own "ship correct, flag honestly"
+precedent for features built between live occurrences of their trigger
+condition.
+
+## Plane-in-window takeover -- the "London BA billboard" pass (2026-08-10)
+
+Owner referenced the real 2019 British Airways London digital-billboard
+campaign (a board that pointed a child's silhouette at a real overhead
+BA flight, timed off live ADS-B, and named it) as the reference for what
+this project's own plane-in-window takeover (`PlaneWatchEngine`) should
+feel like emotionally, not technically -- four concrete asks, addressed
+in order:
+
+1. **"Feel like a discovery -- less competing decoration."** The
+   backdrop (`_backdrop_flights()`, the flights-mode radar-sweep wedge
+   blown up full-panel) was drawn at FULL `RING` brightness and moving
+   at 7deg/tick -- over 2x the already-just-dimmed 3deg/tick idle scope
+   sweep from the earlier radar-hierarchy pass this same session. That
+   made the busiest, fastest-moving thing on the whole card the
+   decoration BEHIND the hero silhouette, not the hero itself -- the
+   exact "decoration competing with the subject" problem just fixed on
+   the main scope, recurring here. Fixed the same way: dimmed to ~50%
+   brightness (`rim(self.RING, 0.5)`), same shared backdrop language
+   (still correctly reads as "window" via the violet tint), no new
+   visual system.
+2. **"Sparse and meaningful -- one or two perfect facts, not a data
+   dump."** The raw `{dist}MI {alt}FT` pair (two bare numbers, no
+   narrative) was replaced with the SAME real Hangar "story" fact the
+   post-dismissal DETAIL card already leads with: "FIRST SIGHTING" or
+   "SEEN NX", read from the exact same `hangar.LOG.get()` lookup this
+   screen was already doing (previously only to decide whether to draw
+   the first-sighting ring, the fact itself was never shown as text).
+   Falls back to real distance only when there's genuinely no Hangar
+   entry for this registration (no broadcast registration, or not
+   recorded yet) -- an honest degrade, never a blank row.
+3. **"Timing must feel inevitable."** Explicitly NOT touched this
+   pass, stated honestly rather than papered over: the real trigger
+   (`flights.FEED`'s adopt-then-diff `in_window` detection, see the
+   PLANE-IN-WINDOW TAKEOVER section far above) already fires the
+   instant a real poll shows a genuinely new window entry, bounded only
+   by the real ADS-B poll cadence (`flights.POSITION_REFRESH`, ~15s) --
+   that IS the real available granularity; there is no faster real
+   signal to trigger on without inventing a predictive "about to enter"
+   guess, which this project's own "never invent" rule rules out. No
+   code change proposed here without a concrete real-world case showing
+   the current cadence actually feels late.
+4. **"Handoff to Hangar should feel like the next beat."** Point 2's
+   fix does double duty here: because the takeover screen NOW shows the
+   exact same real fact ("FIRST SIGHTING"/"SEEN NX") the ceremonial
+   DETAIL card leads with after dismissal, the two screens tell one
+   continuous story ("you just saw it" -> "here's its story") instead
+   of the takeover showing raw numbers and the DETAIL card then
+   introducing a completely different kind of fact. The shared `RING`/
+   `HANGAR` violet color (already identical between the two screens,
+   confirmed by reading both, not assumed) reinforces the same
+   continuity visually.
+
+**A real render_audit.py coverage gap was found and fixed in the same
+pass, not shipped blind**: none of `drive_planewatch()`'s three existing
+synthetic variants use a registration that matches a real Hangar entry,
+so the new "FIRST SIGHTING"/"SEEN NX" branch had ZERO automated coverage
+-- every existing variant silently fell through to the distance-fallback
+branch instead. Added two new driven variants that monkeypatch
+`hangar.LOG.get()` (never the real `hangar_log.jsonl` file) to exercise
+both real text branches directly.
+
+**Verified**: `render_audit.py planewatch` clean (6 frames, up from 4;
+only a pre-existing unrelated truncation warning). Full project sweep
+and `fold_audit.py` both clean. A synthetic render (first-sighting case)
+sent as a PNG for direct visual review -- confirmed the silhouette now
+reads as unmistakably the subject against the calmer backdrop. Real
+service restart, confirmed healthy (0 loop_errors) -- this mode is
+force-triggered only, so there is no live mode-switch check possible
+without a real aircraft actually entering the window; same honest gap
+this feature has carried since it first shipped.
+
+## Flight radar hierarchy pass -- decoration dimmed, size tiers added, selection made unmistakable (2026-08-10)
+
+Direct follow-up to the audit above, with a concrete owner-supplied
+priority list (real radar UX research: ATC symbology principles, DIY/
+consumer LED radar conventions -- "don't clutter the target", "heading +
+category coding beats color alone", "controllers reject decoration that
+competes with the target"). Six real changes, all to `_frame_scope()`
+and `draw_scope_aircraft()`, no new visual systems added (the explicit
+constraint given) -- every change tunes an EXISTING element's brightness/
+size/visibility from a real fact already on hand, none invents a new one.
+
+1. **Sweep and coastline dimmed** (`SWEEP_COLOR`/`COASTLINE_COLOR`, new
+   class constants, ~55%/~40% dimmer than their previous defaults) --
+   both were previously drawn in the same brightness class as a routine
+   aircraft icon, so decoration was visually competing with the actual
+   subject instead of sitting behind it. Kept under a 90-value ceiling
+   in every channel; every real aircraft category color sits well above
+   150 in at least one channel, so "decoration" and "traffic" now
+   separate at a glance by brightness alone, not just by convention.
+2. **Calm/busy density scaling** (`CALM_DENSITY_FLOOR`/`CALM_DENSITY_AT`,
+   new) -- the (already-dimmed) sweep/coastline colors scale down
+   further as real aircraft count drops (floored at 55% so they never
+   vanish outright), reaching full brightness only at 4+ real aircraft.
+   A quiet sky with 1 aircraft up no longer looks as "busy" as a full
+   one just because the decorative layer never changed with it.
+3. **Trail shortened and dimmed further** (`TRAIL_MAX_POINTS` 20->10,
+   ~5min->~2.5min of real polls; brightness `c//3`->`c//5`) -- keeps the
+   real flown-path information (still the one context line with no
+   duplicate anywhere else in the mode, see the route-ray removal
+   above) while making it read as "recent history" rather than a line
+   rivaling the range rings for visual weight.
+4. **Distance legend ("12/23/46MI") now hidden whenever anything is
+   selected** (aircraft or the airport), and dimmed further even when
+   shown. It's reference context for reading the WHOLE scope; a focused
+   view on one aircraft doesn't need it competing for attention.
+5. **Icon SIZE now steps through the SAME hierarchy brightness already
+   uses**, instead of one shared "big" tier for every reason an
+   aircraft might stand out. `draw_scope_aircraft()`'s `big: bool` param
+   was replaced with a real `scale: float`, and `_frame_scope()` now
+   computes a genuine ladder: `SCALE_ROUTINE` (1.0) < `SCALE_NOTABLE`
+   (1.12) < `SCALE_WINDOW` (1.22) < `SCALE_FAVORITE` (1.32) <
+   `SCALE_SELECTED` (1.5). **Selection is the single largest tier,
+   above even a favorite** -- direct owner ask ("make selection
+   unmistakable"): the aircraft you're actually looking at right now
+   always visually wins, regardless of what else is independently true
+   about it. ATC-matched aircraft keep their own distinct color
+   (`ATC_MATCH` green) and ride the `SCALE_NOTABLE` tier rather than
+   needing their own size step.
+6. **Hierarchy consistency, checked not assumed**: the DETAIL card
+   (reached via select-to-expand) already used the same real
+   favorite > notable > routine size/brightness ordering from an
+   earlier session (2026-08-08) -- confirmed still true by reading its
+   current code rather than re-verifying from memory; no window tier
+   there since "in the window" is a scope-specific concept with no
+   equivalent off-scope. Left untouched -- already consistent with the
+   language just extended on the scope.
+
+**Explicitly NOT done, per the owner's own "what not to do" list**: no
+new visual systems, the route ray stays gone, no attempt to show more
+data on the scope (DETAIL/FLIGHT PATH still own that job), heading-first
+icon shapes/category-color coding left untouched (already matches the
+cited ATC-symbology research -- shape+color already carry heading and
+category, altitude already lives in DETAIL text rather than being a
+primary scope-color channel).
+
+**Verified**: `render_audit.py flights` and the full project sweep both
+clean (0 modes failed; only pre-existing unrelated marquee-edge/
+truncation warnings). Two new synthetic renders sent for direct visual
+review: the same busy 4-aircraft scene as the route-ray removal (now
+with the helicopter selected -- visibly the largest icon on screen,
+dimmer sweep/coastline, legend hidden), and a new calm 1-aircraft/
+nothing-selected scene (visibly dimmer decoration, legend present but
+subdued). Real service restart, switched to `flights`, confirmed a real
+non-error `/api/frame`, panel restored to `ambient` afterward.
+
+## Flight radar full audit -- route-bearing ray removed as a real duplicate (2026-08-10)
+
+Owner ask, prompted by the SAME screenshot that drove the weather-radar
+redesign above turning out to actually be a screenshot of THIS scope
+(confirmed by matching "12/23/46MI" to `SCOPE_RING_NM=(10,20,40)` run
+through `nm_to_mi()`): "explain everything about the flight radar... do a
+full audit... what happens when a plane is in view and everything that
+actually happens." Answered with a full walkthrough of the real pipeline
+(flights.py's polling/notability/window/favorite computation ->
+FlightEngine.tick()'s dead-reckoning/trail math -> _frame_scope()'s
+~10-layer render stack -> the step-by-step lifecycle of a real aircraft
+entering range) before touching any code -- see that explanation for the
+full detail; not fully reproduced here.
+
+**Finding, stated plainly: nothing here is a rendering BUG.**
+`render_audit.py` was clean before this change and stays clean after --
+every individual layer (rings, coastline, sweep, trail, route ray,
+airport marker, per-aircraft icon/glow/ring) was already correctly
+drawn, audited, and individually justified across many prior sessions.
+The real problem is ACCUMULATED VISUAL DENSITY: ~10 independent visual
+systems built incrementally, each reasoned about in isolation, stacked
+on one 64x64 screen with nobody asking whether the WHOLE PICTURE still
+reads as coherent once they're all present at once -- the same class of
+gap the weather-radar redesign just surfaced from a different angle.
+
+**Fix, following the owner's explicit direction ("keep everything, just
+clean up the visual hierarchy"): the route-bearing ray was removed from
+the scope, not hidden or relocated -- because auditing what it actually
+contributed found it was a real DUPLICATE.** The dedicated
+`VIEW_FLIGHT_PATH` world-map view (built earlier this project, see the
+"Flight select menu + global flight-path map" section above) already
+shows the same real fact -- which way this aircraft's route goes --
+more legibly: real city names, a proper equirectangular projection, no
+crowding from 7 other aircraft sharing the same tiny scope. Removing the
+ray loses no real information, it just stops drawing the same fact
+twice in two different places, one of them badly. **The trail (recent
+real flown path) was explicitly kept** -- audited the same way and found
+to have no duplicate anywhere else in the mode, so it stays exactly
+where it was, drawn the same way, only for the one selected aircraft.
+This halves the "crossing lines" the owner specifically flagged as
+confusing (trail + ray -> trail only) while genuinely keeping every
+real feature, matching the direction given rather than a unilateral cut.
+
+**Considered and rejected: moving the trail into the DETAIL card
+instead of leaving it on the scope.** Read through the DETAIL card's
+own render code first -- its own comments state it is ALREADY at zero
+spare vertical rows (a fully audited fixed layout, icon reaching
+x=21..43 at its widest heading, text packed to the real HEIGHT-5=59
+bound below it). There is no genuine free rectangle to add a mini-scope
+graphic without reopening the exact collision risk that budget exists
+to avoid -- confirmed by reading the layout math, not guessed. The
+trail stays on the scope, where it already had room.
+
+**Verified**: `render_audit.py flights` clean before and after (0 modes
+failed, only pre-existing unrelated marquee-edge/truncation warnings).
+A realistic synthetic 4-aircraft scene (one selected helicopter, one
+favorite, one in-window, matching real category/altitude/route shapes)
+was rendered and sent as a PNG both BEFORE and AFTER the change for
+direct visual comparison -- confirmed the crossing-line count visibly
+dropped from two to one. Real service restart, switched to `flights`
+mode, confirmed a real non-error `/api/frame`. Panel restored to
+`ambient` afterward.
+
+## Weather visual expansion: storm radar, hourly forecast, ambient touch (2026-08-10)
+
+Owner ask, after the alert-detection/scroll-speed audits above surfaced
+real live data worth building on: "make weather visually stunning" --
+scoped into three real pieces, all built on data already confirmed real
+and live earlier the same session (the storm's real polygon geometry,
+NWS's real 156-hour gridpoint forecast).
+
+**A real design mistake was caught and corrected mid-build, not shipped
+blind.** First draft of the storm radar view reused the flight/satellite
+scope's full visual language verbatim (dotted rings, the storm's real
+warned polygon outline, a second crossing line for projected motion, a
+tiny abbreviated legend). The owner then flagged, with a real screenshot,
+that this SAME scope language was already confusing elsewhere in the
+project ("no idea what the icons mean", "too cluttered for a tiny
+screen") -- meaning the new radar view would have inherited the identical
+problem by construction, not by accident. **Rebuilt from scratch** around
+one rule: a stranger should read it at a glance, no legend needed.
+
+**`_frame_radar()` (rewritten)** -- ONE ring, ONE pointer (home to the
+storm's real bearing, nothing else on the circle: no polygon outline, no
+second motion line), plus PLAIN TEXT for everything else: real distance
+in miles (`nm_to_mi()`), real 8-point compass direction (reusing the
+SAME `_compass()` the conditions view's wind direction already uses --
+one compass convention, not a second), and real motion described in
+words ("MOVING NE") instead of a second vector nobody could parse at a
+glance. Only the single CLOSEST tracked storm is shown at once (not the
+full alert list simultaneously); multiple tracked storms page via
+left/right, mirroring the existing alert-cycling input shape on the main
+view. Honest empty state ("NO STORMS TRACKED") when nothing currently
+carries real position data -- the far more common case, since most
+active alerts are zone-based watches/advisories with no point geometry
+at all.
+
+**`_frame_hourly()` (new)** -- real NWS gridpoint hourly forecast
+(`weather._fetch_hourly()`, new: temp, precip%, short text, wind, kept
+to the next `HOURLY_MAX_PERIODS` (18) of the real 156 hours NWS returns).
+Paged 3 hours at a time (`HOURLY_PAGE`, lowered from an initial 4 once
+feels-like needed a second text row per hour) via left/right. Two plain
+TEXT rows per hour -- time+temp, then feels-like/precip -- not a bar
+chart or sparkline, same "plain readable numbers, not unlabeled pixel
+graphics" lesson the radar rebuild just taught. A real render_audit.py
+overflow was caught and fixed before shipping here too: the first
+wording ("FEELS 104  20% RAIN") ran 75px against a 62px budget; shortened
+to match the main conditions view's own existing "FL 83F" tag convention
+("FL 104", "20%") rather than inventing a second, wordier style.
+
+**Real "feels like" for hourly, computed via NWS's OWN PUBLIC FORMULA,
+not a guess.** The hourly endpoint carries no direct heatIndex/windChill
+field at all (confirmed live -- only temperature/dewpoint/
+relativeHumidity), unlike the observation endpoint `feels_like_c()`
+already prefers a real reported field from. `weather._heat_index_f()`/
+`_wind_chill_f()` (new) are the Rothfusz regression and NWS's own wind
+chill formula -- the SAME published formulas NWS itself uses to compute
+the real heatIndex/windChill fields elsewhere -- applied only at NWS's
+own real thresholds (heat index >=80F, wind chill <=50F+3mph) via
+`_hourly_feels_like_f()`, which returns `None` outside those bands
+(the actual temp already IS the feels-like number there, same reasoning
+`feels_like_c()` already established). This is the one place in the
+project a "feels like" number is genuinely DERIVED rather than read --
+stated explicitly since `feels_like_c()`'s own docstring brags about
+never computing one; justified here because no real field exists to
+prefer, and the formula is public/standard, not invented. Verified
+against real live data: 88F + 77% RH -> 104F heat index, a realistic
+coastal-August value, not a fabricated one.
+
+**Weather-reactive ambient touch, extended to where it fits ("dynamic
+visual modes should be everywhere more where it fits logically")** --
+`_draw_weather_ambient()` (new): real NWS conditions text containing
+RAIN/SHOWER/STORM/DRIZZLE draws sparse falling streaks behind the
+numbers; genuine night (real sunrise/sunset bounds, not a guessed hour)
+draws a fixed set of slowly-twinkling stars. Gated strictly on REAL
+fields already on `self.data` -- never a generic "make it pretty"
+animation running regardless of actual conditions. Kept sparse (under a
+dozen `put_px` calls) to stay well under this project's per-frame cost
+discipline. Wired into BOTH the main conditions view and the new hourly
+view (both are plain data screens with room for it); DELIBERATELY left
+off the radar view -- that screen already communicates the weather
+condition visually via its own pointer, and adding rain streaks there
+would risk re-cluttering the exact screen just simplified for legibility.
+
+**A real tool gap was found and fixed in `render_audit.py` itself,
+not just in weather.** The generic view-sweep only knew the `VIEW_*`
+integer-constant convention (`eng.view = 0, 1, 2...`); `WeatherEngine`'s
+new `VIEWS = ["main", "hourly", "radar"]` is a STRING-valued convention
+the sweep silently no-op'd against (`eng.view = 0` is never equal to
+`"hourly"`), meaning a "clean" audit run gave ZERO real coverage of the
+new views -- the exact "one system doesn't know about a state another
+just entered" bug class this project names repeatedly, this time in the
+audit tool meant to catch it. Generalized (not special-cased to weather)
+so any future string-`VIEWS` engine is covered automatically: 29 frames
+became 32 once the sweep actually reached the new views.
+
+**Verified**: both audits clean throughout (including the two real bugs
+caught mid-build: the hourly overflow, and the fold-audit gap on the new
+`hourly_url`/`forecastHourly` raw URL field -- same "URL field, never
+drawn" exemption category as `county`/`forecastZone`/`zones` from the
+earlier alert-zone fix, added to `fold_audit.SKIP_KEYS`/`ignore_paths`).
+A new permanent `fold_audit.py` case (`weather hourly forecast`) proves
+`_fetch_hourly()`'s `short` field actually folds, verified by hand-
+checking the injected canaries would survive if the fold were skipped
+(same standing methodology as every other fold case here). Real
+polygon/motion path exercised directly against real nationwide alert
+data (a live Severe Thunderstorm Warning elsewhere in the country, since
+the local storm from earlier in the session had genuinely cleared by
+this point) -- 0 dropped/overflow/clipped across both a motion-carrying
+and a motion-less tracked storm. Real service restart; all THREE views
+cycled live via the real `/api/press/down` input path with distinct,
+non-identical frames confirmed at each step (byte-diffed, not assumed);
+real feels-like data (88F -> 104F) confirmed flowing end-to-end from a
+live `weather._fetch_hourly()` call through to the rendered frame.
+Synthetic PNGs sent for direct visual review before and after the radar
+redesign, and again after the feels-like addition. Panel restored to
+`ambient` afterward.
+
+## Global severe-weather takeover demoted to a periodic banner (2026-08-10)
+
+The weather zone-query fix above (see that section) unlocked the global
+severe-weather takeover firing live for the FIRST TIME EVER on a real,
+hours-long Severe Thunderstorm Warning -- and the original design
+(full-screen, no cycling, for the alert's whole real duration) read as
+"stuck" the moment it actually happened, per direct owner feedback.
+Two real iterations, same session, both owner-specified:
+
+**Iteration 1 -- full takeover to a bottom banner.** `engines.
+draw_severe_alert_banner()` (new) composites over whatever's already
+rendered, same bottom-20px non-blocking footprint `draw_notify_banner()`
+already established for HA notifications, but themed for real urgency
+rather than reused verbatim: a THICKER pulsing accent stripe in the real
+NWS severity color (`ALERT_SEVERITY_COLOR`), not notify's static 1px
+cool-blue divider. `arcade_server._severe_alert_frame(frame)` was
+rewritten from "return a standalone full-screen replacement frame" to
+"composite onto and return `frame`" -- same contract shape as
+`_notify_banner_frame()`. `engines.draw_alert_frame()` (the ORIGINAL
+full-screen version) is or was NOT deleted -- it's still exactly what
+`WeatherEngine`'s own dedicated `weather` mode view uses when someone is
+actually looking at weather, storm mini-scope included; only the
+GLOBAL cross-mode takeover was demoted.
+
+**A real crash was introduced and caught in this pass, not shipped
+blind**: two downstream references to the old `alert_frame` local
+(mode-transition-skip and night-dimming-exemption) were missed on the
+first edit, throwing `NameError: name 'alert_frame' is not defined` on
+literally every render tick -- confirmed via the real live log
+(`~/Library/Logs/henderburgh-arcade.log`), not assumed clean. Fixed by
+tracking severe-banner state as a real instance flag
+(`self._severe_active`, set inside `_severe_alert_frame()`) instead of
+a local variable: the transition-skip exemption was REMOVED entirely
+(a small banner riding along on top of a transitioning mode is fine,
+matching how the already-untransitioned-exempted notify banner already
+behaves -- no special case needed once it's not a full-screen
+interrupt), while the night-dimming exemption was KEPT and re-wired to
+the new flag (a real severe alert dimmed to 28% at 3am still defeats
+the entire point of surfacing it, banner or not).
+
+**A second, unrelated mistake happened while fixing the above**: `import
+arcade_server` was run directly to syntax-check the file -- the exact
+panel-lockup hazard this project's own standing rule exists to prevent
+(constructs a second live `Arcade`/DDP-sender singleton while the real
+launchd service may already be running). Caught immediately, the panel
+was confirmed still pingable, and `launchctl kickstart -k` was run right
+away to guarantee exactly one DDP sender exists again -- no lockup
+occurred this time, but the near-miss is recorded here as a live
+reminder of the rule (`ast.parse()` only, never a real import, for
+exactly this reason).
+
+**Iteration 2 -- permanent banner to a PERIODIC one.** Even as a small
+banner, it still sat on screen for the alert's ENTIRE real duration
+(could be an hour+) -- still "stuck", just a smaller stuck, per the
+owner's own next request: "should happen for like 15 seconds every 5
+minutes or something for as long as it is [active]." New module-level
+constants `SEVERE_BANNER_INTERVAL_S = 300.0` / `SEVERE_BANNER_SHOW_S =
+15.0` in `arcade_server.py`. Visibility is gated on WALL-CLOCK PHASE
+(`time.time() % INTERVAL_S < SHOW_S`), not a tick counter -- deliberately,
+so the schedule can't drift and needs no persisted state across mode
+switches or restarts. Verified the phase math directly (not just read):
+computed `visible` across 13 points spanning a full 300s cycle (0, 5,
+14, 15, 20, 100, 200, 295, 299, 300, 305, 315, 316 seconds in) --
+correctly `True` only for `[0, 15)` and `[300, 315)`, `False`
+everywhere else, exactly matching the intended 15-on/285-off pattern.
+`self._severe_visible_last` (new) detects the moment a new visible
+window begins so the pulse tick counter and marquee scroll RESTART
+CLEAN each time, rather than resuming mid-scroll from wherever they
+were ~5 minutes ago when the banner last disappeared (which would read
+as a broken/stale scroll on reappearance, not a fresh pop-up). The
+underlying `weather.FEED` polling (10min conditions / 2min alerts) is
+UNCHANGED -- the periodic gating only affects DRAWING, never polling,
+so alert freshness itself doesn't degrade between visible windows.
+
+**Verified**: both audits clean (this touches only compositing/gating
+logic in `arcade_server.py`, no new render surface beyond iteration 1's
+already-audited `draw_severe_alert_banner()`). Real service restart
+after the `NameError` fix confirmed `loop_errors: 0` (was accumulating
+one crash per render tick before the fix). Real live frame pulled in
+`flights` mode with a real active severe alert: confirmed real flights
+radar content in the top 40 rows (701 non-black px) AND the banner
+lit in the bottom 20 rows (1280 non-black px) simultaneously -- both
+visible at once, proving the composite-not-replace contract actually
+holds on a real frame, not just in the return-type reasoning. Panel
+restored to `ambient` afterward. The full 5-minute real-time on/off
+cadence was intentionally NOT idle-watched live in this session (the
+phase math and the live compositing are both independently verified;
+waiting out multiple real 5-minute cycles just to watch it wasn't
+worth blocking on) -- worth a real eyes-on confirmation next time a
+severe alert is active for a few cycles.
+
+## News headlines were cut off before the scroll finished (2026-08-10)
+
+Owner report, same session as the weather audit above: "the scrolling is
+correct, but it does not scroll until the story finishes all the way
+until switching to next story, and a lot of it gets cut off for every
+story." Confirmed as a real, measurable bug, not a perception issue.
+
+**Root cause**: `NewsEngine.SPOTLIGHT_TICKS = 260` (~13s) was a FIXED
+dwell per headline, regardless of length -- the class's own old
+docstring even called this out as deliberate ("fixed tick cadence...
+pacing is predictable regardless of headline length"), but that
+design was wrong in practice. Checked against real fetched Fox
+headlines (`news._fetch_headlines()`): real headlines run 70-110
+characters. The spotlight tape draws at scale=2 (`draw_marquee`'s pitch
+= `4*scale` = 8px/char) at a scroll speed of 0.5px/tick (10px/sec) --
+so a 100-char headline needs the tape ~84s to scroll past it ONCE, while
+the fixed 13s dwell showed barely 15% of it before jumping to the next
+headline. Every real headline was getting cut off, exactly as reported.
+
+**Fix**: `NewsEngine._spotlight_dwell_ticks(headline)` (new) computes
+the dwell from the SAME pitch/gap/scroll-speed constants the render
+path actually uses (`SPOTLIGHT_SCALE`, `SPOTLIGHT_GAP`, `SCROLL_SPEED`
+-- now named class constants instead of duplicated literals in two
+places, so the dwell math and the drawn scroll distance can't drift
+apart again) -- ticks needed for one full scroll pass, plus a
+`SPOTLIGHT_PAUSE_TICKS` (~1.5s) settle once it completes, floored at
+`SPOTLIGHT_MIN_TICKS` (~6s) so a short headline still gets a readable
+beat. `tick()`'s auto-advance now checks this per-headline dwell
+instead of the old fixed constant.
+
+**Verified**: both audits clean (touches only cycling logic and the
+gap/scale of an existing marquee call, no new render surface).
+Directly computed the dwell against 5 real fetched headlines: 61-93.5s
+each (was 13s flat). Drove a real `NewsEngine` through 2500 simulated
+ticks with real fetched headlines and a frozen feed: confirmed the
+engine advanced from headline 0 to headline 1 at tick 1853, exactly
+matching `_spotlight_dwell_ticks(heads[0])`'s own computed 1854 (the
+one-tick difference is `hold` starting its count at 1, not 0 -- exact,
+not approximate). Real service restart, switched to `news` mode,
+confirmed a real non-error `/api/frame`. Panel restored to `ambient`
+afterward.
+
+**Follow-up, same session: "feels off now."** The fix above was
+CORRECT (headlines genuinely stopped cutting off) but over-corrected
+the feel: at the original 0.5px/tick (10px/sec) scroll speed, waiting
+for a full pass meant 60-93s per real headline -- technically not cut
+off, but reads as the ticker being frozen, which is its own kind of
+wrong. The actual fix needed BOTH halves together, not either alone:
+`SCROLL_SPEED` raised 5x, from 0.5 to 2.5px/tick (50px/sec). Recomputed
+against the same real fetched headlines: 15.7-19.9s each -- back near
+the ORIGINAL mode's ~13s brisk pace, just now genuinely completing the
+scroll instead of arbitrarily cutting it off partway through. Because
+`_spotlight_dwell_ticks()` and the render path both read the same
+`SCROLL_SPEED` class constant (the whole point of centralizing it in
+the first fix), changing this one number is the entire fix -- no
+other code touched. Verified: both audits clean, real service restart,
+real non-error `/api/frame` in `news` mode, panel restored to `ambient`.
+
+## Weather alerts were missing real severe warnings -- zone query replaces point query (2026-08-10)
+
+Owner report: had received 2-3 real severe weather alerts (presumably on
+their phone) but the panel's `weather` mode only ever showed "Heat
+Advisory". Investigated against real live NWS data rather than guessing,
+and found a real, confirmed gap, not user error or stale polling.
+
+**Root cause, confirmed live**: `weather.py` queried
+`/alerts/active?point={lat},{lon}` -- precise, but a real, CONCURRENTLY
+ACTIVE Severe Thunderstorm Warning for the exact configured home county
+(Horry, SC / UGC `SCC051`) was completely ABSENT from that point query.
+Cross-checked against `/alerts?zone=SCC051` (the county's full alert
+history): the warning was real, `severity: Severe`, with a real polygon
+geometry and real storm-motion parameters (`eventMotionDescription`)
+-- it simply hadn't swept over the LITERAL home coordinates yet, even
+though it covered the whole county. A phone's Wireless Emergency Alert
+fires at county granularity, not exact-point-in-polygon, which is
+exactly why the owner got a real alert on their phone that the panel,
+querying more strictly than necessary, never saw.
+
+**Fix**: `weather._fetch_point()` now also extracts the real UGC zone
+codes NWS's own `/points` response carries (`county` and
+`forecastZone`, via new `_zone_id_from_url()` -- NWS gives full zone
+URLs, the alerts endpoint wants the bare code) into a `zones` list.
+`_fetch_alerts()` now queries `/alerts/active?zone=Z1,Z2` (confirmed
+live NWS accepts a comma-separated multi-zone query) once the point has
+resolved, falling back to the original point-based query before the
+first successful point fetch (cold start). Zone-based watches/
+advisories (already zone-scoped, not polygon-scoped) are unaffected
+either way -- this only changes behavior for the polygon-warned SEVERE
+event class (Thunderstorm/Tornado/Flash Flood warnings), which is
+exactly the class most worth not missing. `weather.FEED.get()`'s
+`alerts` list, the global severe-weather takeover
+(`arcade_server._severe_alert_frame()`), and the storm-motion mini-scope
+all read from the same one alerts list, so all three inherited the fix
+automatically -- no other code needed to change.
+
+**A real second-order bug caught by `fold_audit.py` itself, not
+missed**: the new `zones` UGC codes ("SCC051") are identifiers used to
+build a URL, never drawn on screen -- but the audit's canary-injection
+test appends canary characters to every raw string field it doesn't
+explicitly skip, including the RAW `county`/`forecastZone` URL fields
+before `_zone_id_from_url()` extracts the trailing segment, which
+landed the canaries INSIDE the extracted zone code
+(".../SCC051" -> ".../SCC051<canaries>"). This was a bug in the test's
+own injection scope, not a real fold gap -- a UGC code was never meant
+to be folded, the same reasoning `abbreviation`/`href`/`link` are
+already skipped in `fold_audit.SKIP_KEYS` for. Added `county`,
+`forecastZone`, and `zones` to that set.
+
+**Verified**: both audits clean. Directly confirmed against real live
+data: `weather._fetch_point()` resolved `zones: ['SCC051', 'SCZ054']`
+for the real configured home; `weather._fetch_alerts()` with those
+zones returned 2 real alerts (Severe Thunderstorm Warning, then Heat
+Advisory, correctly severity-sorted) where the point-only query returned
+only 1; the real storm-motion fields populated correctly on the newly-
+surfaced warning (bearing 314deg, 39.4nm, moving 269deg at 18kt -- real
+numbers, not fabricated). Real service restart, switched to `weather`
+mode, confirmed `score: 2` on the live running engine (matching the 2
+real alerts), pulled a real non-error `/api/frame`. Panel restored to
+`ambient` afterward.
+
+## Favorites driving ambient dwell time (2026-08-10)
+
+Owner ask, explicit about scope: "a modest weight multiplier, not a
+takeover." Extended `FlightEngine.ambient_weight()` and
+`SportsEngine.ambient_weight()` (both already existed, already the
+mechanism `AmbientEngine` uses to decide how long each sub-mode's turn
+lasts -- see satellite's own `ambient_weight()` a few sections up for
+the original precedent) to give a favorite a small, additive nudge when
+one is genuinely active right now.
+
+**`FAVORITE_AMBIENT_BOOST = 0.3`** (new, module-level in `engines.py`,
+shared by both overrides) -- deliberately smaller than the smallest real
+tier gap either engine's existing weight ladder has (0.5, "nothing" to
+"something exists" on both). This is load-bearing, not a nice round
+number: it means a favorite can only ever move dwell time WITHIN
+whatever tier its own real merits already earned, never leapfrog a
+genuinely bigger, unrelated signal into a higher tier. Verified directly
+(not just reasoned about): a favorite non-notable aircraft scores 1.3,
+strictly below a non-favorite NOTABLE aircraft's 2.5; a favorite in the
+sports ticker-filter case scores 1.3, strictly below any actually-live
+game's 3.0. Same additive-only shape as satellite's own WINDOW FILTER
+nudge to `ambient_weight()` (+0.25) and flights' `WINDOW_BOOST` to sort
+ranking -- a pattern already established twice in this project, reused
+rather than reinvented a third way.
+
+**Two real, already-computed signals, nothing re-derived:**
+- **Flights**: `is_favorite`, a real per-aircraft bool already stamped
+  by `flights._fetch_positions()` (see `FAVORITE_BOOST`'s own sort-side
+  precedent, 2026-08-09) -- `ambient_weight()` just checks whether any
+  currently-tracked aircraft has it set.
+- **Sports**: two real paths, either counts. The PINNED favorite's own
+  game being live (`self.data["favorite_game"]["state"] == "in"`,
+  already on `SportsEngine.data`). Or the favorite-teams TICKER FILTER
+  being on with a live match surviving it -- the filter is already
+  applied at the feed source (`sports.FEED.get_universal()`, per
+  2026-08-08's own note), so "any live event in the already-filtered
+  `self.universal` list, while the filter is enabled" already and
+  exactly means "a favorited team is live" -- nothing new to compute,
+  just read `sports.FEED.get_favorite_teams()`'s existing
+  `filter_enabled` flag.
+
+**Verified**: both audits clean (this change touches only weighting
+logic, not rendering, so no new render/fold surface). Directly exercised
+`ambient_weight()` against constructed engine instances covering every
+combination (no games/no aircraft, plain, favorite-only, notable-only,
+notable+favorite for flights; no games, games-not-live, live-not-
+favorite, pinned-favorite-live, and ticker-filter-live for sports) --
+printed weights matched the tier-safe design exactly in all cases. Real
+service restart, confirmed healthy (`/api/state` clean, 0 errors, 0
+loop_errors) before and after.
+
+**Found in passing, NOT part of this change, flagged separately**: the
+live service log showed a real, unrelated `KeyError: 3` in
+`FlightEngine.input()`'s rotate-view-cycling dict (a `self.view` value
+not covered by the dict's keys -- likely the newer `VIEW_MENU`/
+`VIEW_FLIGHT_PATH` views added in the flight-select-menu work not yet
+wired into this cycling table). Spun off as its own follow-up rather
+than folded into this change.
+
+## Owner Note -- a persistent, owner-authored message (2026-08-09)
+
+New mode (`ownernote.py` + `OwnerNoteEngine`, `ENGINES["ownernote"]`),
+explicitly distinct from two existing text-on-panel features that could
+be mistaken for the same thing: `/api/notify` (HA-pushed, EPHEMERAL,
+auto-clears) and `blog.py`'s guestbook (visitor-submitted, read-only,
+mirrors the public site). This is the owner's OWN typed words, saved
+once from the control panel, and stays on screen until changed or
+cleared -- a real sticky note.
+
+**No I/O module in the `FEED`/poller shape** -- `ownernote.py` is local
+config only (`ownernote_config.json`, one key, `{"text": str|None}`),
+same reasoning `notify.py`'s own docstring already gives for why it
+isn't `FEED`-shaped either: the owner PUSHES via the HTTP endpoint,
+there's nothing to poll. `OwnerNoteEngine.tick()` just re-reads the
+config file directly (matches `dnd.py`'s own "just read the config"
+simplicity for a similarly tiny setting), no background thread.
+
+**Folded at the WRITE boundary, inside `save_config()` itself** -- an
+owner-typed note is exactly the kind of text that can carry curly
+quotes/em-dashes/accents the 3x5 font can't draw, the same bug class
+this project has hit ten-plus times on externally-sourced text, just
+from a different source (the owner, not an API) this time. A live check
+confirmed a real em dash ("Back Sunday — feed the fish...") correctly
+folds to a plain hyphen before ever reaching the config file.
+
+**Visual design deliberately modeled on `BlogEngine`** (calm, no
+scrolling, no pulsing, Vestaboard-style) -- a static note has even less
+reason to animate than the guestbook's rotating posts, so it's simpler
+still: one screen, wrapped across up to 6 lines via the shared
+`wrap_text()` helper, vertically centered, `ambient_weight() == 0.8`
+matching the guestbook's own quiet weighting.
+
+**Verified**: both audits clean (added a new permanent `fold_audit.py`
+case, `ownernote.save_config`, replaying a real dirty string through the
+actual save path and restoring the real prior config afterward -- proved
+it would catch a real regression by hand-checking the unfolded canary
+characters survive when the fold is skipped, same standing methodology
+as every other fold case here). `render_audit.py ownernote` clean against
+both the empty state and a real long note. Real service restart, full
+live endpoint round-trip (`GET`/`POST /api/note`, a real em-dash note
+saved and folded correctly, mode-switched to `ownernote` with a real
+`/api/frame`-worthy clean state, cleared and reverted to `ambient`
+afterward, config confirmed back at `{"text": null}`).
+
+## Now Playing gets a mic-only equalizer toggle (2026-08-09)
+
+Owner ask: "have an option in that now playing that we can use the
+microphone instead for the equalizer." `nowplaying.py`'s config gained a
+third field, `mic_only` (default `False`), following the exact same
+"omitted preserves the existing value" convention `api_key`/`clear_key`
+already established a few sections above -- `save_config(mic_only=None)`
+leaves the saved value untouched, `save_config(mic_only=True/False)`
+changes it, same reasoning: a save that only changes the username must
+not silently reset this toggle any more than it should silently wipe the
+key.
+
+When on, `NowPlayingEngine.frame()` skips Last.fm entirely and shows a
+plain full-height equalizer (`"EQUALIZER"` header, real
+`audio_sync.FEED` bars filling most of the panel, or an honest "NO AUDIO
+SIGNAL FROM PANEL MIC" when `audio_sync.FEED`'s own `stale` flag is set)
+-- no Last.fm account needed at all. The bar-drawing code itself was
+factored out of the track-view's small bar row into a shared
+`_draw_fft_bars(buf, y0, y1, color)` helper, reused unchanged at both the
+small (track view) and full-height (mic-only view) scales -- same real
+mic-derived FFT data either way, never synthesized.
+
+`has_content()` now returns true when EITHER a Last.fm account is
+configured OR `mic_only` is set, so the mode counts as real content with
+zero Last.fm setup.
+
+Control panel gained a checkbox ("Use the mic as a plain equalizer
+instead") on the existing Now Playing card, POSTing `mic_only` alongside
+the existing fields; a dedicated `change` handler lets the toggle save on
+its own without touching the username/key fields. `render_audit.py`'s
+`drive_nowplaying` custom driver gained two mic-only variants (configured
+and unconfigured) alongside the existing four Last.fm variants.
+
+Verified: both audits clean, real service restart, real endpoint
+round-trip against the live service confirming the omitted-preserves
+behavior (`mic_only=true` set, then a user-only save with `mic_only`
+omitted correctly left it `true`), reverted to clean defaults afterward.
+
 ## Flight select menu + global flight-path map (2026-08-09)
 
 Owner ask: "when scrolling planes in flights, when you hit enter or
