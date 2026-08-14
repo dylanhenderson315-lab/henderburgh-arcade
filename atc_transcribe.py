@@ -37,6 +37,8 @@ log file simply gets no new entry for that cycle, same "degrade
 honestly, never guess" contract every other feed in this project follows.
 """
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -45,6 +47,17 @@ from pathlib import Path
 
 import atc
 import paneltext
+
+# mlx-whisper shells out to ffmpeg. launchd (and some stripped shells)
+# do not have Homebrew on PATH, so look in the two real install prefixes
+# before giving up. Does not invent a binary — only prepends dirs that
+# actually contain ffmpeg.
+for _ffmpeg_dir in ("/opt/homebrew/bin", "/usr/local/bin"):
+    if shutil.which("ffmpeg"):
+        break
+    candidate = Path(_ffmpeg_dir) / "ffmpeg"
+    if candidate.is_file():
+        os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
 
 ERROR_BACKOFF_BASE = 5.0
 ERROR_BACKOFF_MAX = 60.0

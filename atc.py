@@ -120,8 +120,14 @@ class AtcLogFeed:
             due = now - self._last_refresh_try >= self.REFRESH
         if due:
             self._refresh()
+        # Age-filter on every read, not just when the file changes.
+        # The worker trims LOG_PATH on its own cadence; if that process
+        # is dead the file sits untouched and a mtime short-circuit
+        # would keep serving week-old radio as if it were still live.
+        # LOG_MAX_AGE_SECONDS is "how long an entry stays worth showing".
+        cutoff = now - LOG_MAX_AGE_SECONDS
         with self._lock:
-            return list(self._entries)
+            return [e for e in self._entries if e.get("ts", 0) >= cutoff]
 
     def _refresh(self):
         # Set UNCONDITIONALLY, on every path out of this method (even the
