@@ -15849,10 +15849,14 @@ class ClockEngine:
     # start at or before y=59. cy=31 / r=20 puts the rim at y=11 and
     # y=51, leaving a clean 3px gap under the header and a 5px footer
     # row at y=54.
-    # r trimmed 20->18 (2026-08-13 HUD redesign) to leave real room for
-    # the corner reticle brackets (radius+6) without crowding the header
-    # rule above or the footer readout below.
-    FACE_CX, FACE_CY, FACE_R = 32, 31, 18
+    # r=20, same as the pre-drift version -- a real render_audit.py
+    # COLLISION (2026-08-14) proved 2-digit hour numerals ('11'/'12')
+    # need num_r=FACE_R-5 >= ~14px of radius to keep real clearance from
+    # their neighbor; shrinking r to buy drift/lift margin reopened that
+    # collision. DRIFT_LIFT was trimmed instead (6->2) so the vertical
+    # reach at every drift position still clears the header safely at
+    # the full r=20.
+    FACE_CX, FACE_CY, FACE_R = 32, 31, 20
 
     def _weather_wash_color(self, now):
         """A dim face fill from REAL NWS conditions text + real sunrise/
@@ -15923,54 +15927,58 @@ class ClockEngine:
         for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             put_px(buf, px + dx, py + dy, rim(pip, 0.5))
 
-    def _draw_hud_brackets(self, buf, cx, cy, radius, color):
-        """Four corner reticle brackets just outside the dial -- the
-        instrument-HUD framing device (targeting reticle / heads-up
-        readout corners) the owner asked for by name ('tony stark...
-        futuristic'). Pure chrome, not data -- fixed geometry, same
-        category as the bezel case it replaces."""
-        d = radius + 3
-        arm = 3
-        for sx, sy in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
-            x0, y0 = cx + sx * d, cy + sy * d
-            draw_line(buf, x0, y0, x0 - sx * arm, y0, color)
-            draw_line(buf, x0, y0, x0, y0 - sy * arm, color)
-
     def _draw_dial_ring(self, buf, cx, cy, radius, color):
         """Thin single-pixel precision ring -- the dial's own edge,
-        dim by default so the daylight arc and hour ticks read as the
-        brighter accents on top of it, not competing with a bold circle."""
+        standing in for a real clock's bezel where the black face meets
+        the case (the reference photo's white bezel edge), reduced to
+        the one line an LED matrix can honestly draw."""
         for i in range(144):
             a = math.radians(i * 2.5)
             put_px(buf, int(round(cx + radius * math.sin(a))),
                   int(round(cy - radius * math.cos(a))), color)
 
-    def _draw_sweep(self, buf, cx, cy, radius, color):
-        """Slow decorative radar-style sweep, independent of the real
-        hands -- pure atmosphere ('a live system'), the same honestly-
-        decorative category the flight/satellite scope sweeps already
-        are (CLAUDE.md's own note on scope_glow(): 'decoration over
-        continuously-known data, not a sensor'). One rotation every
-        ~48s at this tick rate; kept dim so it never competes with a
-        real hand."""
-        deg = (self.ticks * 0.375) % 360.0
-        a = math.radians(deg)
-        x1 = cx + radius * math.sin(a)
-        y1 = cy - radius * math.cos(a)
-        draw_line(buf, cx, cy, x1, y1, rim(color, 0.14))
+    NUMERAL_BY_HOUR = {0: "12", 1: "1", 2: "2", 3: "3", 4: "4", 5: "5",
+                       6: "6", 7: "7", 8: "8", 9: "9", 10: "10", 11: "11"}
+
+    def _draw_hour_numeral(self, buf, cx, cy, radius, hour, color):
+        """A real printed numeral (1-12), upright -- not rotated to the
+        hour angle, exactly like a real wall clock's numerals always
+        stay right-side-up regardless of where they sit on the dial.
+
+        REAL BUG, caught by render_audit.py rather than by eye: this
+        used to draw each numeral TWICE (offset 1px, for a faux-bold
+        weight) which made two-digit hours (10/11/12) wide enough to
+        genuinely overlap their neighbor at this radius -- confirmed a
+        real 'adjacent numeral' collision, not just the double-draw's
+        own harmless self-overlap. At 3x5-glyph scale a single stroke
+        already reads as the boldest this font gets; a second pass only
+        bought width, not weight. One draw now, and the radius/spacing
+        below is sized to this font's real measured width instead."""
+        s = self.NUMERAL_BY_HOUR[hour % 12]
+        a = math.radians(hour * 30.0)
+        x = cx + radius * math.sin(a)
+        y = cy - radius * math.cos(a)
+        w = text_w(s, 1)
+        tx, ty = int(round(x - w / 2)), int(round(y - 2))
+        draw_text3x5(buf, tx, ty, s, color)
 
     def _draw_hand(self, buf, cx, cy, deg, length, color, thick=False, glow_tip=True):
-        """HUD REDESIGN (2026-08-13): a single thin precision needle --
-        uniform 1px core, no parallel/feather strokes (those read as a
-        blocky 'clock hand' shape; the ask was for thin glowing
-        instrument needles). Hour vs. minute is told apart by LENGTH and
-        brightness alone, not stroke width -- one visual language for
-        every needle on the dial, closer to a real HUD altimeter/compass
-        needle than a wall clock's hands."""
+        """Bold tapered hand -- back to the reference photo's real
+        wall-clock language (a proper hour/minute blade, not a thin HUD
+        needle): a full-brightness core stroke, a parallel partner
+        stroke for real width, and a dim feather stroke on the far side
+        so the edge reads tapered rather than a flat block. `thick`
+        picks hour/minute's wider 2-core-stroke blade vs. the second
+        hand's single-stroke needle, same as this project's very first
+        pass at this dial."""
         a = math.radians(deg)
         x1 = cx + length * math.sin(a)
         y1 = cy - length * math.cos(a)
         draw_line(buf, cx, cy, x1, y1, color)
+        px, py = math.cos(a), math.sin(a)
+        if thick:
+            draw_line(buf, cx + px, cy + py, x1 + px, y1 + py, color)
+            draw_line(buf, cx - px, cy - py, x1 - px, y1 - py, rim(color, 0.45))
         tx, ty = int(round(x1)), int(round(y1))
         if glow_tip:
             tip = rim(color, 0.6)
@@ -15978,6 +15986,29 @@ class ClockEngine:
                 put_px(buf, tx + dx, ty + dy, tip)
             put_px(buf, tx, ty, (255, 255, 255) if thick else color)
         return tx, ty
+
+    # Sun-locked dial position (2026-08-14, direct owner idea: "locked
+    # with the sun... when it rises its on left and then all day slowly
+    # moves to the right"). The face itself becomes the sun's real path:
+    # left at sunrise, right at sunset, lifted highest at real solar
+    # noon in between -- a sin() arc between two real anchor points, the
+    # same honest-approximation category as the daylight arc's own
+    # sunrise/sunset math (real anchors, a smooth stylised curve between
+    # them, never a fabricated one). Before sunrise or after sunset it
+    # simply RESTS at the side it last reached -- no invented nighttime
+    # arc, because there is no real elevation data to honestly draw one
+    # from (only today's sunrise/sunset are on hand, not yesterday's).
+    DRIFT_X = 6      # +-px of real horizontal travel across the day
+    DRIFT_LIFT = 2   # px risen at real solar noon (see FACE_R's own note)
+
+    def _sun_face_pos(self, now):
+        sr, ss = (self.wx or {}).get("sunrise"), (self.wx or {}).get("sunset")
+        if not isinstance(sr, (int, float)) or not isinstance(ss, (int, float)) or ss <= sr:
+            return self.FACE_CX, self.FACE_CY
+        frac = clamp((now - sr) / (ss - sr), 0.0, 1.0)
+        cx = self.FACE_CX - self.DRIFT_X + frac * (2 * self.DRIFT_X)
+        cy = self.FACE_CY - self.DRIFT_LIFT * math.sin(frac * math.pi)
+        return cx, cy
 
     def _frame_analog(self):
         buf = blank()
@@ -15988,47 +16019,48 @@ class ClockEngine:
         draw_header(buf, place or "HENDERBURGH", self.ACCENT,
                     right_tag=time.strftime("%p", t).upper())
 
-        cx, cy, r = self.FACE_CX, self.FACE_CY, self.FACE_R
+        fx, fy = self._sun_face_pos(now)
+        cx, cy, r = int(round(fx)), int(round(fy)), self.FACE_R
 
-        # ---- HUD REDESIGN (2026-08-13) -----------------------------
-        # Direct owner ask: "ultra clean and elegant... think tony
-        # stark... the lit circle i dont like all that much." The filled
-        # sky-gradient disk is GONE -- the face stays black/near-black,
-        # an instrument dial rather than a lit object. What replaces it:
-        # a slow decorative sweep, a thin precision ring, hairline hour
-        # ticks, a daylight ARC instead of a filled ring, thin needle
-        # hands, and corner reticle brackets framing the whole dial like
-        # a targeting HUD. A live weather MOOD (storm/rain/snow/fog)
-        # still gets a real, but now much dimmer, wash UNDER the dial --
-        # atmosphere, not the dominant visual.
+        # ---- CLASSIC-DIAL REDESIGN (2026-08-14) --------------------
+        # Direct owner ask, with a real reference photo: a real numeraled
+        # quartz wall clock (bold white 1-12 on black, tapered hands,
+        # tick marks, a small text detail near centre) -- "more
+        # innovation" than a plain copy of it, not the sci-fi HUD from
+        # the previous pass (that direction is explicitly retired: no
+        # reticle brackets, no decorative sweep, no needle-thin hands).
+        # The "innovation" over the reference is entirely REAL data
+        # layered onto the same honest classic shape: a thin daylight
+        # arc riding the tick ring (real sunrise/sunset), a live weather
+        # mood tint, and a second-hand comet trail -- nothing sci-fi,
+        # just a wall clock that happens to know real things.
         wash = self._weather_wash_color(now)
         if wash:
-            fill_disk(buf, cx, cy, r - 2, rim(wash, 0.5))
+            fill_disk(buf, cx, cy, r - 2, rim(wash, 0.45))
 
-        self._draw_hud_brackets(buf, cx, cy, r, rim(self.ACCENT, 0.7))
-        self._draw_sweep(buf, cx, cy, r - 2, self.ACCENT)
-        self._draw_dial_ring(buf, cx, cy, r, rim(self.DIM, 0.7))
-
-        # Hour ticks -- hairline dashes, not blocks. Cardinals (12/3/6/9)
-        # read brighter and a touch longer so they orient the dial without
-        # needing numerals (numerals at this radius would collide with
-        # the hands).
-        for h in range(12):
-            deg = h * 30.0
-            a = math.radians(deg)
-            cardinal = h % 3 == 0
-            inner = r - (3 if cardinal else 2)
-            col = rim(self.TIME, 0.85 if cardinal else 0.4)
-            draw_line(buf,
-                      cx + inner * math.sin(a), cy - inner * math.cos(a),
-                      cx + r * math.sin(a), cy - r * math.cos(a),
-                      col)
-
+        self._draw_dial_ring(buf, cx, cy, r, rim(self.DIM, 0.8))
         self._draw_daylight_arc(buf, cx, cy, r, now)
+
+        # Minute ticks -- a dash at every non-hour minute, exactly the
+        # reference photo's small marks between the numerals. Hour
+        # positions get the numeral itself as their marker, not a tick,
+        # so the two never fight for the same pixels.
+        for m in range(60):
+            if m % 5 == 0:
+                continue
+            a = math.radians(m * 6.0)
+            put_px(buf, int(round(cx + (r - 1) * math.sin(a))),
+                  int(round(cy - (r - 1) * math.cos(a))), rim(self.TIME, 0.3))
+
+        num_r = r - 5
+        for h in range(12):
+            self._draw_hour_numeral(buf, cx, cy, num_r, h, self.TIME)
 
         # Hands from REAL wall-clock fractions, not tick counts -- a
         # tick-derived second hand would drift against every other clock
-        # in the room, same trap the digital colon already avoids.
+        # in the room, same trap the digital colon already avoids. Kept
+        # SHORTER than the numeral radius, same as a real clock's hands
+        # never reaching all the way out to the printed numbers.
         frac = now % 1.0
         sec = t.tm_sec + frac
         minute = t.tm_min + sec / 60.0
@@ -16040,21 +16072,21 @@ class ClockEngine:
         # trail already establishes. Faded copies of REAL previous tip
         # positions (this same real `now`-driven angle, sampled once a
         # frame), never a synthesized sweep.
-        sec_len = r - 1
+        sec_len = r - 2
         for i, (tx, ty) in enumerate(self._sec_trail):
             fade = (i + 1) / (len(self._sec_trail) + 1) * 0.5
             put_px(buf, tx, ty, rim(self.ACCENT, fade))
 
-        self._draw_hand(buf, cx, cy, hour * 30.0, r * 0.48, self.TIME, thick=True)
-        self._draw_hand(buf, cx, cy, minute * 6.0, r * 0.78, self.TIME, thick=False)
-        sx, sy = self._draw_hand(buf, cx, cy, sec * 6.0, sec_len, self.ACCENT, thick=False)
+        self._draw_hand(buf, cx, cy, hour * 30.0, num_r * 0.52, self.TIME, thick=True)
+        self._draw_hand(buf, cx, cy, minute * 6.0, num_r * 0.86, self.TIME, thick=True)
+        sx, sy = self._draw_hand(buf, cx, cy, sec * 6.0, sec_len, self.ACCENT,
+                                 thick=False, glow_tip=False)
         self._sec_trail.append((int(round(sx)), int(round(sy))))
 
-        # HUD hub -- a small hollow reticle ring with a bright core pixel,
-        # not a filled blob. Reads as an instrument pivot, not a dot.
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            put_px(buf, cx + dx, cy + dy, rim(self.ACCENT, 0.6))
-        put_px(buf, cx, cy, (255, 255, 255))
+        # Centre pin -- a small solid hub, the reference photo's own
+        # brass pivot, in the one accent colour this face spends on
+        # anything besides plain white/dim.
+        put_blob(buf, cx, cy, self.ACCENT)
 
         # One footer fact, not a stack -- the face is the subject.
         # Imminent ISS outranks temp outranks date, same "the thing you
