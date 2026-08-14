@@ -7420,6 +7420,32 @@ class SatelliteEngine(Browsable, BigMomentSource):
             weight += 0.25
         return weight
 
+    def ambient_interest(self):
+        """0..1 -- the director's eye (2026-08-14). A pass ACTUALLY
+        HAPPENING is the single most time-critical thing this whole
+        project can show: it is over in minutes and cannot be replayed,
+        which is exactly what should outrank a scoreboard that will
+        still be there in an hour. Everything here is the same real
+        pass data ambient_weight() already reads (overhead state,
+        skypass's own quality rank, real peak elevation, the real
+        window flag) -- just resolved continuously instead of in tiers."""
+        ps = self.sky.get("passes") or []
+        now_vis = [o for o in (self.sky.get("sky_now") or []) if o.get("visible")]
+        if any(self._is_overhead(p) for p in ps) or now_vis:
+            score = 0.85
+            els = [p.get("peak_el") for p in ps
+                   if isinstance(p.get("peak_el"), (int, float))]
+            if els:
+                score += 0.15 * clamp(max(els) / 90.0, 0.0, 1.0)
+            return clamp(score, 0.0, 1.0)
+        if not ps:
+            return 0.0
+        best_rank = max((skypass.quality_rank(p)[1] for p in ps), default=1)
+        score = {3: 0.5, 2: 0.32}.get(best_rank, 0.2)
+        if any(p.get("in_window") for p in ps):
+            score += 0.08
+        return clamp(score, 0.0, 1.0)
+
     # ---- render --------------------------------------------------------
     @staticmethod
     def _fmt_countdown(secs):
@@ -9245,6 +9271,40 @@ class FlightEngine(Browsable, BigMomentSource):
             weight += FAVORITE_AMBIENT_BOOST
         return weight
 
+    def ambient_interest(self):
+        """0..1 -- how compelling is the sky RIGHT NOW (2026-08-14).
+
+        Deliberately NOT the same question as ambient_weight(): that one
+        is coarse and answers "how long a turn does this mode deserve",
+        in tiers spaced 0.5 apart so a nudge can never leapfrog a tier.
+        This is the DIRECTOR'S EYE -- fine-grained, continuous, and
+        comparable across modes, answering "should someone be looking at
+        this instead of anything else". A plane 2nm overhead and a plane
+        38nm away score identically under ambient_weight (both just
+        "aircraft present"); they should not score identically here.
+
+        Every term is real, already-computed data: `dist_nm` from ADS-B,
+        `in_window` from the configured window cone, `notable`'s own rank
+        tier, `is_favorite` from the owner's own list. Nothing derived
+        that this mode does not already display."""
+        acs = self.data.get("aircraft") or []
+        if not acs:
+            return 0.0
+        dists = [a.get("dist_nm") for a in acs
+                 if isinstance(a.get("dist_nm"), (int, float))]
+        # Proximity is the spine: something directly overhead is the most
+        # interesting thing this mode can ever show.
+        near = 0.0
+        if dists:
+            near = clamp(1.0 - (min(dists) / float(flights.RADIUS_NM)), 0.0, 1.0)
+        score = 0.25 + 0.45 * near
+        if any(a.get("in_window") for a in acs):
+            score += 0.2       # genuinely visible out the real window
+        if any((a.get("notable") or (None, 0))[1] >= 3 for a in acs):
+            score += 0.15
+        if any(a.get("is_favorite") for a in acs):
+            score += 0.2
+        return clamp(score, 0.0, 1.0)
 
     def _frame_unconfigured(self, buf):
         msg = "SET LOCATION"
@@ -10447,6 +10507,20 @@ class NowPlayingEngine:
 
     def ambient_weight(self):
         return 2.2 if self.has_content() else 0.5
+
+    def ambient_interest(self):
+        """0..1 -- the director's eye (2026-08-14). Music playing right
+        now is genuinely worth the glass; nothing playing is not. No
+        recency decay is attempted here: this mode has no real
+        track-START timestamp to decay against (Last.fm's now-playing
+        response says THAT a track is playing, not when it began), and
+        inventing an age from when this process first happened to notice
+        it would be a fabricated number. Ambient's own music-steal
+        already handles the "it just changed" moment honestly via
+        track_key()."""
+        if not self.data.get("playing"):
+            return 0.0
+        return 0.6 if (self.data.get("track") or {}).get("track") else 0.3
 
     def track_key(self):
         """Identity of the current scrobble, or None. Ambient uses this
@@ -11994,6 +12068,60 @@ class SportsEngine(Browsable, BigMomentSource):
             weight += FAVORITE_AMBIENT_BOOST
         return weight
 
+    # Real period counts, for turning "what period is it" into "how late
+    # in the game is it" without guessing. Anything not listed falls back
+    # to 4, the most common shape -- and lateness only ever SCALES an
+    # existing score, so a wrong guess here cannot invent drama.
+    _REG_PERIODS = {"baseball": 9, "hockey": 3, "soccer": 2,
+                    "basketball": 4, "football": 4}
+
+    def ambient_interest(self):
+        """0..1 -- is a game genuinely worth watching RIGHT NOW?
+
+        The director's eye (2026-08-14), distinct from ambient_weight()'s
+        coarse "live vs. not" tiers: a one-run game in the 9th and a 12-0
+        blowout in the 3rd both score 3.0 there. Here they must not.
+
+        CLOSENESS x LATENESS, both from data already on the event -- the
+        real competitor scores and the real period, the same fields
+        _board_is_clutch()/_soccer_is_tight_late() already derive their
+        own live glows from. No invented 'excitement' field: ESPN does
+        not send one, and this only ranks games this mode is already
+        showing rather than claiming anything new about them."""
+        evs = [e for e in (self.universal or [])
+               if e.get("live") or e.get("state") == "in"]
+        if not evs:
+            # A real slate that has not started, or standings, is still
+            # worth a look -- just never worth interrupting anything for.
+            return 0.18 if (self.universal or self.data.get("games")) else 0.0
+        best = 0.0
+        for ev in evs:
+            scores = []
+            for c in (ev.get("competitors") or [])[:2]:
+                try:
+                    scores.append(int(c.get("score")))
+                except (TypeError, ValueError):
+                    scores = []
+                    break
+            # A one-score game reads as tense; a rout does not. Unknown
+            # scores fall back to mid, never to "maximally exciting".
+            if len(scores) == 2:
+                margin = abs(scores[0] - scores[1])
+                close = clamp(1.0 - margin / 8.0, 0.0, 1.0)
+            else:
+                close = 0.5
+            period = ev.get("period")
+            total = self._REG_PERIODS.get(ev.get("sport"), 4)
+            late = clamp(period / float(total), 0.0, 1.0) if isinstance(period, int) else 0.4
+            # Lateness never drops a live game below a real floor -- an
+            # early game is still live sport, just not appointment TV.
+            score = 0.4 + 0.5 * (0.35 + 0.65 * late) * (0.3 + 0.7 * close)
+            if self._board_is_clutch(ev) or self._soccer_is_tight_late(ev):
+                score += 0.2
+            best = max(best, score)
+        if self.favorite_live():
+            best += 0.25
+        return clamp(best, 0.0, 1.0)
 
     # ---- universal ticker + expanded detail -----------------------------
     SPORT_ACCENT = {
@@ -15054,6 +15182,31 @@ class WeatherEngine:
                            if t.get("id")))
         return ids or None
 
+    # Real NWS severity vocabulary -> director weight. Extreme/Severe are
+    # the same two this project's own global takeover already treats as
+    # the "interrupt anything" class (GLOBAL_ALERT_SEVERITIES).
+    _SEVERITY_INTEREST = {"extreme": 1.0, "severe": 0.9,
+                          "moderate": 0.55, "minor": 0.35}
+
+    def ambient_interest(self):
+        """0..1 -- the director's eye (2026-08-14). Real active alerts
+        and real tracked storm cells decide this; plain conditions are
+        deliberately LOW (a temperature is worth a glance, never worth
+        interrupting anything). Reads only what this mode already
+        displays: the real `severity` string on the alerts feed and the
+        real tracked-cell list the storm scope already plots."""
+        alerts = self.data.get("alerts") or []
+        tracks = self.data.get("tracks") or []
+        score = 0.0
+        for a in alerts:
+            sev = str(a.get("severity") or "").strip().lower()
+            score = max(score, self._SEVERITY_INTEREST.get(sev, 0.4))
+        if tracks:
+            score = max(score, 0.7)     # a real cell on the scope, moving
+        if score:
+            return clamp(score, 0.0, 1.0)
+        return 0.15 if self.data.get("conditions") else 0.0
+
     def adopt_ambient_view(self):
         """AUTO shows the live scope when there are tracks, else conditions."""
         if self.data.get("tracks"):
@@ -16665,6 +16818,39 @@ class AmbientEngine(Browsable):
     # follow.
     STICKY_RECALL_TICKS = 3600     # ~3min at this tick rate
 
+    # ---- THE DIRECTOR (2026-08-14) ---------------------------------
+    # Direct owner ask: ambient should be "theatrical and alive...
+    # purposeful, not waiting for the next one because you dont care
+    # whats on, but you cant take your eyes off it."
+    #
+    # The diagnosis, before any code: the old rotation had ONE TEMPO.
+    # Every mode got 10-45s from ambient_weight()'s 3-4 coarse tiers,
+    # so the pacing was metronomic and the director had no eye -- a
+    # plane 2nm overhead and one 38nm away scored identically, as did a
+    # one-run 9th inning and a 12-0 blowout. Nothing built, nothing
+    # paid off, and every cut looked the same (AUTO always dissolved
+    # through black, so a tornado entered exactly like a stock ticker).
+    #
+    # The fix is an EDIT RHYTHM, the way a real broadcast is cut:
+    #   MONTAGE -- a fast run of short glances across the best few
+    #              things happening, so the wall feels busy and alive
+    #              and you get a sense of everything at once.
+    #   FEATURE -- then the single most interesting thing gets a long,
+    #              unhurried hold so you can actually absorb it.
+    # Fast-slow-fast-slow is what makes something watchable; a constant
+    # tempo is what makes it wallpaper. Interest comes from each
+    # engine's own ambient_interest() (real data, see those methods).
+    BEAT_MONTAGE = "montage"
+    BEAT_FEATURE = "feature"
+    MONTAGE_TICKS = 90           # ~4.5s per glance -- long enough to read
+    MONTAGE_BEATS = 3            # glances before the feature lands
+    FEATURE_MIN_TICKS = 500      # ~25s -- a real, unhurried hold
+    FEATURE_MAX_TICKS = 1300     # ~65s when something is genuinely gripping
+    # Interest below this is "nothing much is happening" -- the director
+    # stops cutting fast and lets the panel breathe instead of
+    # frantically montaging three boring cards.
+    CALM_INTEREST = 0.35
+
     def __init__(self):
         self.score = 0
         names = []
@@ -16704,6 +16890,12 @@ class AmbientEngine(Browsable):
         self._storm_key = None           # last weather-track set, for the steal
         self._page_slot = 0              # which ACT_PAGE name this AUTO lap shows
         self._channel_flash = 0
+        # DIRECTOR state -- open on a montage so the very first thing
+        # anyone sees is the wall surveying what is happening, not a
+        # cold single card.
+        self._beat = self.BEAT_MONTAGE
+        self._montage_i = 0
+        self._cut_hard = False           # next transition is a hard cut
         self._init_scroll()
 
     @property
@@ -16843,6 +17035,87 @@ class AmbientEngine(Browsable):
         w = max(0.5, min(3.0, w))
         return int(clamp(self.DWELL_TICKS * w, self.DWELL_MIN, self.DWELL_MAX))
 
+    def _interest(self, name):
+        """0..1 for a slot. An engine without ambient_interest() falls
+        back to its coarse ambient_weight() normalised into the same
+        range, so a mode that never opted in still ranks sanely instead
+        of dropping to zero and never being featured."""
+        e = self.engines.get(name)
+        if e is None:
+            return 0.0
+        fn = getattr(e, "ambient_interest", None)
+        if callable(fn):
+            try:
+                return clamp(float(fn()), 0.0, 1.0)
+            except Exception:                  # noqa: BLE001
+                pass
+        try:
+            return clamp((float(e.ambient_weight()) - 0.5) / 2.5, 0.0, 1.0)
+        except Exception:                      # noqa: BLE001
+            return 0.3
+
+    def _ranked_available(self):
+        """Available slot indices, most interesting first. Ties keep
+        rotation order, so the running order stays predictable rather
+        than shuffling between two equally-quiet modes every tick."""
+        slots = self._slot_names()
+        avail = self._available()
+        return sorted(avail, key=lambda i: (-self._interest(slots[i]), i))
+
+    def _plan_beat(self, avail):
+        """Pick the next beat: another montage glance, or the feature.
+
+        A montage RUN is MONTAGE_BEATS quick glances down the ranked
+        list, then the top-ranked mode gets the long feature hold. When
+        the whole board is calm (nothing above CALM_INTEREST) the
+        montage is skipped entirely -- cutting fast between three
+        boring cards is worse than simply resting on the best one."""
+        slots = self._slot_names()
+        ranked = self._ranked_available()
+        if not ranked:
+            return
+        top_interest = self._interest(slots[ranked[0]])
+        if top_interest < self.CALM_INTEREST:
+            # CALM: long unhurried holds, but still a slow TOUR -- caught
+            # by driving a quiet board rather than by reading the code:
+            # jumping to ranked[0] every time meant a quiet night parked
+            # on the clock permanently and never showed the guestbook,
+            # note or news again, which is a real regression from the
+            # old even rotation. Calm means slow, not frozen.
+            self._beat = self.BEAT_FEATURE
+            self._montage_i = 0
+            self._advance(1)
+            self._cut_hard = False
+            return
+        # The montage deliberately SKIPS the feature subject (ranked[0])
+        # and glances at the runners-up instead. Caught by driving the
+        # real beat sequence rather than by reading it: including
+        # ranked[0] meant the best thing got a 4.5s glance, two other
+        # cards, and then its own 60s feature -- you saw the main event,
+        # left it, and came back, which reads as a stutter rather than a
+        # build. Teasing what else is around and THEN revealing the best
+        # thing is the structure that actually pays off.
+        rest = ranked[1:] if len(ranked) > 1 else ranked
+        if self._beat == self.BEAT_MONTAGE and self._montage_i < min(self.MONTAGE_BEATS, len(rest)):
+            pick = rest[self._montage_i]
+            self._montage_i += 1
+            self._jump_to(slots[pick])
+            return
+        self._beat = self.BEAT_FEATURE
+        self._montage_i = 0
+        self._jump_to(slots[ranked[0]])
+
+    def _beat_ticks(self):
+        """How long the CURRENT beat runs."""
+        if self._beat == self.BEAT_MONTAGE:
+            return self.MONTAGE_TICKS
+        slots = self._slot_names()
+        showing = slots[self.idx % len(slots)] if slots else None
+        # A genuinely gripping feature earns real extra time on screen;
+        # a quiet one still gets a full unhurried minimum.
+        span = self.FEATURE_MAX_TICKS - self.FEATURE_MIN_TICKS
+        return int(self.FEATURE_MIN_TICKS + span * self._interest(showing))
+
     def _slot_ready(self, name):
         """AUTO uses ambient_ready() when a mode has one (sports: a
         game, not the year-round table). Other channels use has_content."""
@@ -16863,7 +17136,21 @@ class AmbientEngine(Browsable):
                 if self._slot_ready(n)]
 
     def _transition_ticks(self):
-        return self.AUTO_TRANSITION_TICKS if self.channel == "auto" else self.TRANSITION_TICKS
+        """Cut length by INTENT (2026-08-14), not one house speed.
+
+        A real edit varies its cuts: an urgent steal SNAPS (a hard cut
+        is jarring on purpose -- that is the point of it), a montage
+        glance cuts fast to keep the run moving, and a feature dissolves
+        slowly because it is meant to feel like arriving somewhere. The
+        old code used AUTO_TRANSITION_TICKS for all three, so a tornado
+        taking the screen entered exactly like a stock ticker."""
+        if self.channel != "auto":
+            return self.TRANSITION_TICKS
+        if self._cut_hard:
+            return 0
+        if self._beat == self.BEAT_MONTAGE:
+            return 6
+        return self.AUTO_TRANSITION_TICKS
 
     def _transition_style(self):
         # AUTO cuts through black -- one house motion, like a stage.
@@ -16905,12 +17192,18 @@ class AmbientEngine(Browsable):
                         pass
                 return
 
-    def _jump_to(self, name):
+    def _jump_to(self, name, hard=False):
         """Force the rotation onto a specific sub-mode NOW, bypassing the
-        normal wrap-order stepping in _advance(). Used only by the sticky-
-        recall check in tick(). Mirrors _advance()'s own transition
-        capture so the jump slides in exactly like a normal step, not a
-        hard cut."""
+        normal wrap-order stepping in _advance(). Used by the sticky-
+        recall check, the music/storm steals, and the director's own
+        beat planner. Mirrors _advance()'s own transition capture so the
+        jump slides in exactly like a normal step.
+
+        `hard=True` marks this as an URGENT cut -- _transition_ticks()
+        then gives it zero blend, so a storm or a live favorite seizing
+        the glass SNAPS in instead of dissolving politely. That contrast
+        is the whole point: if every arrival looks the same, none of
+        them reads as urgent."""
         try:
             self._trans_from = self._render_current()
             self._trans_i = 0
@@ -16920,6 +17213,7 @@ class AmbientEngine(Browsable):
         if name in slots:
             self.idx = slots.index(name)
         self.hold = 0
+        self._cut_hard = hard
 
     # ---- input -----------------------------------------------------------
     def _step(self, direction):
@@ -17059,7 +17353,7 @@ class AmbientEngine(Browsable):
                     and self.cycling and self._celebration_t <= 0
                     and self.browse.auto_ok and sports_idx in avail):
                 if not showing_sports:
-                    self._jump_to("sports")
+                    self._jump_to("sports", hard=True)
                     avail = self._available()
                     showing_sports = True
                     sports_eng.adopt_live_detail(prefer_favorite=True)
@@ -17072,7 +17366,7 @@ class AmbientEngine(Browsable):
                 self._sticky_recall_hold += 1
                 if self._sticky_recall_hold >= self.STICKY_RECALL_TICKS:
                     self._sticky_recall_hold = 0
-                    self._jump_to("sports")
+                    self._jump_to("sports", hard=True)
                     avail = self._available()
                     showing_sports = True
                     sports_eng.adopt_live_detail(prefer_favorite=True)
@@ -17104,7 +17398,7 @@ class AmbientEngine(Browsable):
                 and self.browse.auto_ok and not dnd.is_enabled()
                 and np_idx >= 0 and np_idx in avail
                 and self.idx != np_idx):
-            self._jump_to("nowplaying")
+            self._jump_to("nowplaying", hard=True)
             avail = self._available()
         self._music_key = new_key
 
@@ -17120,7 +17414,7 @@ class AmbientEngine(Browsable):
               and self.browse.auto_ok and not dnd.is_enabled()
               and wx_idx >= 0 and wx_idx in avail
               and self.idx != wx_idx):
-            self._jump_to("weather")
+            self._jump_to("weather", hard=True)
             avail = self._available()
             try:
                 wx_eng.adopt_ambient_view()
@@ -17135,12 +17429,28 @@ class AmbientEngine(Browsable):
             self._advance(1)
             self.hold = 0
 
-        # Dwell pauses during a celebration AND during a live-favorite
-        # lock -- that card is the reason ambient exists tonight.
+        # THE DIRECTOR'S BEAT (2026-08-14). Dwell still pauses during a
+        # celebration and during a live-favorite lock -- that card is
+        # the reason ambient exists tonight -- but when it IS running,
+        # AUTO no longer walks the rotation on a flat weighted timer.
+        # It cuts a montage of quick glances, then features the single
+        # most interesting thing. WORLD/MIX keep the classic even-paced
+        # tour on purpose: those channels are a deliberate "show me
+        # everything in order", and re-cutting them by interest would
+        # take away the one thing that makes them different from AUTO.
         if (not live_locked and self._celebration_t <= 0 and self.cycling
                 and len(avail) > 1 and self.browse.auto_ok):
             self.hold += 1
-            if self.hold >= self._dwell_for(self.current):
+            if self.channel == "auto":
+                if self.hold >= self._beat_ticks():
+                    self.hold = 0
+                    if self._beat == self.BEAT_FEATURE:
+                        # A feature just ended -- open the next run of
+                        # glances rather than sliding to one more card.
+                        self._beat = self.BEAT_MONTAGE
+                        self._montage_i = 0
+                    self._plan_beat(avail)
+            elif self.hold >= self._dwell_for(self.current):
                 self.hold = 0
                 self._advance(1)
 
