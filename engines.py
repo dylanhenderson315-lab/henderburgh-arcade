@@ -10437,6 +10437,8 @@ class DepartureBoardEngine(Browsable):
         self.page = 0
         self._feed_err = None
         self._feed_age = None
+        self._sky_n = 0
+        self._routed_n = 0
         self._init_scroll()
 
     def has_content(self):
@@ -10466,7 +10468,11 @@ class DepartureBoardEngine(Browsable):
         snap = flights.FEED.get() or {}
         self._feed_err = snap.get("err")
         self._feed_age = snap.get("age")
-        aircraft = snap.get("aircraft") or []
+        # Full sky, not the radar's nearest eight. A MYR arrival that is
+        # ninth-nearest used to never appear on this board.
+        aircraft = snap.get("sky") or snap.get("aircraft") or []
+        self._sky_n = len(aircraft)
+        self._routed_n = sum(1 for ac in aircraft if ac.get("route"))
         rows = []
         if self.airport:
             for ac in aircraft:
@@ -10515,8 +10521,18 @@ class DepartureBoardEngine(Browsable):
                 draw_text_centered(buf, 46, fit_text(str(feed_err).upper(),
                                                      WIDTH - 4), self.INK_DIM)
             else:
-                draw_text_centered(buf, 28, "NOTHING TO/FROM", self.INK_DIM)
-                draw_text_centered(buf, 36, code, self.INK_DIM)
+                draw_text_centered(buf, 22, "NOTHING TO/FROM", self.INK_DIM)
+                draw_text_centered(buf, 30, code, self.INK)
+                sky_n = getattr(self, "_sky_n", 0)
+                routed = getattr(self, "_routed_n", 0)
+                if sky_n:
+                    draw_text_centered(buf, 42, fit_text(f"{sky_n} IN SKY", WIDTH - 4),
+                                       self.INK_DIM)
+                    draw_text_centered(buf, 50, fit_text(f"{routed} WITH ROUTE", WIDTH - 4),
+                                       self.INK_DIM)
+                else:
+                    draw_text_centered(buf, 42, "NO TRAFFIC IN", self.INK_DIM)
+                    draw_text_centered(buf, 50, "LOCAL SKY", self.INK_DIM)
             return bytes(buf)
 
         start = self.page * self.ROWS_PER_PAGE
@@ -10528,72 +10544,65 @@ class DepartureBoardEngine(Browsable):
             col = self.DEPARTING_COL if status == "DEPARTING" else self.ARRIVING_COL
             ident = ac.get("ident") or ac.get("reg") or "UNKNOWN"
             route = ac.get("route") or {}
-            # DEPARTING shows where it's headed; ARRIVING shows where it
-            # came from -- the informative end, same framing
-            # _route_status()'s own DETAIL-card caller uses.
             other_city = (route.get("dest_city") if status == "DEPARTING"
                          else route.get("origin_city"))
             other_code = (route.get("dest") if status == "DEPARTING"
                          else route.get("origin"))
             other = other_city or other_code or ""
-            line1 = fit_text(f"{status[:4]} {ident}", WIDTH - 4)
-            draw_text3x5(buf, 2, y, line1, col)
-            if other:
-                # fit_text() drops whole trailing words -- gluing
-                # "ARROW CITY" through it in one call meant a long city
-                # name got dropped ENTIRELY, leaving just the arrow (a
-                # real bug render_audit.py's TRUNCATED check caught:
-                # "< RALEIGH/DURHAM" -> "<"). Fit the city text into its
-                # own reserved budget instead, so the arrow always
-                # survives and the city degrades to a normal truncation
-                # (word-safe, never a total loss).
-                arrow = ">" if status == "DEPARTING" else "<"
-                city_budget = WIDTH - 4 - text_w(arrow + " ")
-                draw_text3x5(buf, 2, y + 6, arrow + " " + fit_text(other, city_budget), self.INK)
-            y += 15
+            tag = "DEP" if status == "DEPARTING" else "ARR"
+            dist = ac.get("dist_nm")
+            dist_txt = f"{dist:.0f}NM" if isinstance(dist, (int, float)) else ""
+            # Thin status rail, callsign on empty, distance on the right.
+            for by in range(11):
+                put_px(buf, 1, y + by, col)
+                put_px(buf, 2, y + by, col)
+            name_budget = WIDTH - 8 - (text_w(dist_txt) + 2 if dist_txt else 0)
+            draw_text3x5(buf, 5, y, fit_text(ident, name_budget), (255, 255, 255))
+            if dist_txt:
+                draw_text3x5(buf, WIDTH - 2 - text_w(dist_txt), y, dist_txt, self.INK_DIM)
+            arrow = ">" if status == "DEPARTING" else "<"
+            city_budget = WIDTH - 8 - text_w(tag) - 4
+            city = f"{arrow} {fit_text(other, city_budget)}" if other else tag
+            draw_text3x5(buf, 5, y + 6, city, self.INK)
+            draw_text3x5(buf, WIDTH - 2 - text_w(tag), y + 6, tag, col)
+            y += 16
             if y > HEIGHT - 5:
                 break
         return bytes(buf)
 
 
 class NowPlayingEngine:
-    """NOW PLAYING (2026-08-09) -- the real currently-playing track via
-    Last.fm (nowplaying.py), plus a real live visualizer bar driven by
-    the panel's own mic (audio_sync.py's real 16-band FFT, the SAME data
-    the WLED-side AudioReactive visualizer uses -- see nowplaying.py's
-    own module docstring for why the mic ALONE can't identify a song:
-    it's volume + FFT, no song identity, so this combines TWO
-    independently real sources rather than fabricating either one).
+    """NOW PLAYING -- Last.fm names the track. The panel mic is the instrument.
 
-    Three real states, matching nowplaying.FEED.get()'s own `playing`
-    tri-state exactly (None/False/True) -- same shape `FollowFlightEngine`/
-    `DepartureBoardEngine` already established for "not configured" vs.
-    "configured but honestly nothing right now" vs. "real content":
-      - not configured  -> "NO LAST.FM ACCOUNT SET" with instructions
-      - configured, nothing playing -> honest "NOTHING PLAYING RIGHT NOW"
-      - configured, playing -> track/artist/album + the real FFT bars
+    Two independently real signals, neither fabricated. Identity comes
+    from nowplaying.FEED (Last.fm). The visualizer comes from the
+    panel's own I2S mic via audio_sync.py. The 16-band FFT is drawn
+    only when UDP Sound Sync packets actually arrive. Otherwise the
+    glass is an analog envelope instrument of the real HTTP peak --
+    iris, studio VU, or scope. Never 16 invented frequencies from one
+    number.
 
-    The FFT bars are drawn even with no track resolved (a real player
-    that scrobbles slowly, or genuinely doesn't scrobble, still has real
-    audio flowing) -- gated on `audio_sync.FEED`'s own `stale` flag, not
-    on whether Last.fm resolved anything, since these are two
-    independent real signals and one being honestly absent must never
-    hide the other.
+    Left / right cycles three faces of the SAME real sample:
+      IRIS   polar meter (default) -- energy disc, peak ring, history
+      BARS   16-band analyzer, or a studio VU of the one peak
+      SCOPE  envelope history, or a real spectrogram when FFT is live
 
-    `mic_only` (nowplaying.py's config toggle) skips the Last.fm side
-    entirely and shows a plain full-height equalizer off the same real
-    FFT data -- for anyone who wants the mic visualizer without setting
-    up a Last.fm account at all.
+    Ambient / music-steal still only dwell on a NAMED track. A live
+    mic with no scrobble is a visualizer you open by hand.
     """
 
     name = "nowplaying"
     tick_rate = 0.05
+    FACES = ("IRIS", "BARS", "SCOPE")
+    HIST = 64
+    FFT_HIST = 40
 
     BG = (0, 0, 0)
     INK = (150, 160, 185)
     INK_DIM = (70, 76, 92)
-    ACCENT = (255, 90, 200)          # magenta -- distinct from every other mode's accent
-    BAR_COLOR = (90, 220, 255)       # cool cyan, reads as "signal" not "text"
+    ACCENT = (255, 90, 200)
+    BAR_COLOR = (90, 220, 255)
+    HOT = (255, 180, 70)
     AMBIENT_STYLE = "iris_open"
 
     def __init__(self):
@@ -10602,12 +10611,35 @@ class NowPlayingEngine:
                      "track": None, "age": None, "err": None}
         self.pulse = Pulse()
         self.scroll = 0.0
+        self._init_viz()
+
+    def _init_viz(self):
+        self._env = 0.0
+        self._hold = 0.0
+        self._flash = 0.0
+        self._hist = deque([0.0] * self.HIST, maxlen=self.HIST)
         self._fft_smooth = [0.0] * 16
         self._fft_peaks = [0.0] * 16
+        self._fft_hist = deque(maxlen=self.FFT_HIST)
+        self._face = 0
+        self._last_ingest = 0.0
+        self._viz_ready = True
+
+    def _ready(self):
+        if not getattr(self, "_viz_ready", False):
+            self._init_viz()
+        if not hasattr(self, "pulse"):
+            self.pulse = Pulse()
+        if not hasattr(self, "scroll"):
+            self.scroll = 0.0
+        if not hasattr(self, "data"):
+            self.data = {"configured": False, "mic_only": False, "playing": None,
+                         "track": None, "age": None, "err": None}
 
     def reset(self):
-        self._fft_smooth = [0.0] * 16
-        self._fft_peaks = [0.0] * 16
+        face = getattr(self, "_face", 0)
+        self._init_viz()
+        self._face = face % len(self.FACES)
 
     def has_content(self):
         # Ambient / music-steal only dwell on a NAMED track. A live
@@ -10647,16 +10679,23 @@ class NowPlayingEngine:
         return (name, artist)
 
     def input(self, cmd):
-        pass       # nothing to browse -- one track, one card
+        self._ready()
+        n = len(self.FACES)
+        if cmd in ("left", "up"):
+            self._face = (self._face - 1) % n
+        elif cmd in ("right", "down", "rotate"):
+            self._face = (self._face + 1) % n
 
     def auto(self):
         pass
 
     def tick(self):
+        self._ready()
         self.data = nowplaying.FEED.get()
         t = self.data.get("track")
         self.pulse.note((t.get("track"), t.get("artist")) if t else None)
         self.scroll += 0.6
+        self._ingest(audio_sync.FEED.get(), hist=True)
 
     @staticmethod
     def _band_color(i, n, peak=False):
@@ -10670,110 +10709,343 @@ class NowPlayingEngine:
             return tuple(min(255, c + 70) for c in col)
         return col
 
-    def _draw_fft_bars(self, buf, y0, y1, color):
-        """REAL live visualizer -- the panel's own mic, via WLED-MM's own
-        on-device 16-band FFT (audio_sync.py), not synthesized. Only
-        drawn while real packets are actually arriving (not `stale`) --
-        an idle/silent bar row would be worse than no row, the same
-        "never invent a visual" rule backgrounds.py's own WLED-effect
-        capture already follows. Shared by the track view's small bar
-        row and the mic-only equalizer's full-height one.
+    def _energy_color(self, v, flash=False):
+        """Cyan at rest, amber when loud, white only on a real transient."""
+        col = lerp_color(self.BAR_COLOR, self.HOT, clamp(v, 0.0, 1.0))
+        if flash:
+            return lerp_color(col, (255, 255, 255), 0.55)
+        return col
 
-        Peak-hold ticks and per-band color are derived from the SAME
-        real fft[] / samplePeak fields -- no invented spectrum."""
-        a = audio_sync.FEED.get()
-        if a.get("stale"):
-            return
-        fft = a.get("fft") or []
-        n = len(fft)
-        if n == 0:
-            return
-        if len(self._fft_smooth) != n:
-            self._fft_smooth = [0.0] * n
-            self._fft_peaks = [0.0] * n
-        bar_h = y1 - y0
-        bw = WIDTH / n
-        peaked = bool(a.get("peak"))
-        for i, level in enumerate(fft):
-            v = max(0.0, min(1.0, (level if isinstance(level, (int, float)) else 0) / 255.0))
-            self._fft_smooth[i] = self._fft_smooth[i] * 0.55 + v * 0.45
-            if v > self._fft_peaks[i]:
-                self._fft_peaks[i] = v
+    def _real_level(self, a):
+        """0..1 from whatever real field is live. Never invents a spectrum."""
+        if not a or a.get("stale"):
+            return 0.0
+        sm = a.get("sample_smth")
+        if isinstance(sm, (int, float)):
+            v = float(sm)
+            if v > 1.5:
+                v /= 255.0
+            return clamp(v, 0.0, 1.0)
+        pct = a.get("peak_pct")
+        if isinstance(pct, (int, float)):
+            return clamp(float(pct) / 100.0, 0.0, 1.0)
+        fft = a.get("fft")
+        if fft:
+            vals = []
+            for x in fft:
+                if isinstance(x, (int, float)):
+                    vals.append(clamp(float(x) / 255.0, 0.0, 1.0))
+            if vals:
+                return sum(vals) / float(len(vals))
+        return 0.0
+
+    def _bands(self, a):
+        """Real 16-band FFT as 0..1, or None. Missing stays missing."""
+        fft = (a or {}).get("fft")
+        if not fft:
+            return None
+        out = []
+        for x in fft:
+            if isinstance(x, (int, float)):
+                out.append(clamp(float(x) / 255.0, 0.0, 1.0))
             else:
-                self._fft_peaks[i] = max(0.0, self._fft_peaks[i] - 0.028)
-            h = max(1, int(self._fft_smooth[i] * bar_h))
-            x0 = int(i * bw)
-            x1 = int((i + 1) * bw) - 1
+                out.append(0.0)
+        return out or None
+
+    def _ingest(self, a, hist=True):
+        """Attack / release / peak-hold / transient of the real sample."""
+        v = self._real_level(a)
+        prev = self._env
+        if v > self._env:
+            self._env = self._env * 0.35 + v * 0.65
+        else:
+            self._env = self._env * 0.84 + v * 0.16
+        if v > self._hold:
+            self._hold = v
+        else:
+            self._hold = max(0.0, self._hold - 0.012)
+        if v - prev > 0.14:
+            self._flash = 1.0
+        else:
+            self._flash = max(0.0, self._flash - 0.07)
+        bands = self._bands(a)
+        if bands:
+            n = len(bands)
+            if len(self._fft_smooth) != n:
+                self._fft_smooth = [0.0] * n
+                self._fft_peaks = [0.0] * n
+            for i, b in enumerate(bands):
+                self._fft_smooth[i] = self._fft_smooth[i] * 0.55 + b * 0.45
+                if b > self._fft_peaks[i]:
+                    self._fft_peaks[i] = b
+                else:
+                    self._fft_peaks[i] = max(0.0, self._fft_peaks[i] - 0.028)
+            if hist:
+                self._fft_hist.append(list(self._fft_smooth))
+        if hist:
+            self._hist.append(self._env)
+        self._last_ingest = time.time()
+
+    def _stroke_ring(self, buf, cx, cy, r, color, n=None):
+        if r < 1:
+            return
+        steps = n if n is not None else max(16, int(r * 6))
+        for i in range(steps):
+            a = (i / float(steps)) * 2.0 * math.pi
+            put_px(buf, int(round(cx + r * math.cos(a))),
+                   int(round(cy + r * math.sin(a))), color)
+
+    def _draw_iris(self, buf, cx, cy, max_r, a):
+        """Analog polar meter. Disc = current envelope. Ring = peak hold.
+        History pips are past values of that same number. Spokes only
+        when a real 16-band FFT is live -- never faked from the peak."""
+        face = rim(self.INK_DIM, 0.55)
+        self._stroke_ring(buf, cx, cy, max_r, face)
+        bands = self._bands(a)
+        if bands:
+            n = len(bands)
+            peaked = bool(a.get("peak"))
+            for i, _b in enumerate(bands):
+                v = self._fft_smooth[i] if i < len(self._fft_smooth) else 0.0
+                ang = -math.pi / 2.0 + (i + 0.5) / float(n) * 2.0 * math.pi
+                inner = 3.0
+                length = inner + v * (max_r - inner - 1)
+                col = self._band_color(i, n, peak=peaked)
+                draw_line(buf,
+                          cx + inner * math.cos(ang),
+                          cy + inner * math.sin(ang),
+                          cx + length * math.cos(ang),
+                          cy + length * math.sin(ang), col)
+                if i < len(self._fft_peaks) and self._fft_peaks[i] > 0.08:
+                    pr = inner + self._fft_peaks[i] * (max_r - inner - 1)
+                    put_px(buf, int(round(cx + pr * math.cos(ang))),
+                           int(round(cy + pr * math.sin(ang))), rim(col, 1.0))
+        env_r = 2.0 + self._env * (max_r - 5)
+        hold_r = 2.0 + self._hold * (max_r - 5)
+        col = self._energy_color(self._env, flash=self._flash > 0.4)
+        if env_r >= 2:
+            fill_disk(buf, cx, cy, max(1, int(env_r)), rim(col, 0.28))
+            fill_disk(buf, cx, cy, max(1, int(env_r * 0.62)), rim(col, 0.62))
+            fill_disk(buf, cx, cy, max(1, int(max(2, env_r * 0.28))), col)
+        if hold_r > env_r + 0.6:
+            self._stroke_ring(buf, cx, cy, hold_r, self._energy_color(self._hold))
+        if self._flash > 0.05:
+            bloom = env_r + self._flash * 7.0
+            self._stroke_ring(buf, cx, cy, min(max_r - 1, bloom),
+                              lerp_color(col, (255, 255, 255), self._flash))
+        # Past envelope around the face -- the same number, through time.
+        hist = list(self._hist)
+        hn = len(hist)
+        if hn:
+            for i, hv in enumerate(hist):
+                ang = -math.pi / 2.0 + (i / float(hn)) * 2.0 * math.pi
+                rr = max_r - 1
+                c = rim(self._energy_color(hv), 0.25 + 0.75 * hv)
+                put_px(buf, int(round(cx + rr * math.cos(ang))),
+                       int(round(cy + rr * math.sin(ang))), c)
+        put_px(buf, cx, cy, (255, 255, 255) if self._flash > 0.5 else col)
+
+    def _draw_vu_lamps(self, buf, y0, y1):
+        """Studio LED VU of the ONE real peak. 16 thresholds, not 16 bands."""
+        segs = 16
+        gap = 1
+        avail = y1 - y0
+        seg_h = max(2, (avail - (segs - 1) * gap) // segs)
+        used = segs * seg_h + (segs - 1) * gap
+        top = y1 - used
+        x0, x1 = 22, 42
+        for i in range(segs):
+            thresh = (i + 1) / float(segs)
+            sy1 = y1 - i * (seg_h + gap)
+            sy0 = sy1 - seg_h
+            if sy0 < top:
+                break
+            on = self._env >= thresh - 1e-6
+            hold = self._hold >= thresh - 1e-6 and not on
+            if i < 10:
+                lit = (40, 210, 90)
+            elif i < 13:
+                lit = (230, 200, 50)
+            else:
+                lit = (255, 70, 60)
+            if on:
+                col = lit
+            elif hold:
+                col = rim(lit, 0.85)
+            else:
+                col = (18, 20, 26)
+            for y in range(sy0, sy1):
+                for x in range(x0, x1):
+                    put_px(buf, x, y, col)
+                put_px(buf, x0 - 1, y, rim(col, 0.4))
+                put_px(buf, x1, y, rim(col, 0.4))
+
+    def _draw_fft_bars(self, buf, y0, y1):
+        """Real 16-band analyzer. 3px bar + 1px gap = 64. Peak-hold ticks."""
+        n = len(self._fft_smooth)
+        if n <= 0:
+            return
+        bar_h = max(1, y1 - y0)
+        peaked = False
+        a = audio_sync.FEED.get()
+        if a and not a.get("stale"):
+            peaked = bool(a.get("peak"))
+        for i in range(n):
+            v = self._fft_smooth[i]
+            h = max(1, int(v * bar_h)) if v > 0.02 else 0
+            x0 = i * 4
+            x1 = x0 + 2
             col = self._band_color(i, n, peak=peaked)
-            for x in range(x0, max(x0, x1) + 1):
+            for x in range(x0, x1 + 1):
                 for y in range(y1 - h, y1):
-                    # Slight vertical fade so the bar reads as energy
-                    # rising, not a flat brick.
-                    fade = 0.45 + 0.55 * ((y1 - y) / float(max(1, h)))
+                    fade = 0.40 + 0.60 * ((y1 - y) / float(max(1, h)))
                     put_px(buf, x, y, tuple(int(c * fade) for c in col))
             ph = int(self._fft_peaks[i] * bar_h)
             if ph > 1:
                 py = y1 - ph
                 tick = rim(col, 1.0)
-                for x in range(x0, max(x0, x1) + 1):
+                for x in range(x0, x1 + 1):
                     put_px(buf, x, py, tick)
 
+    def _draw_scope(self, buf, y0, y1, a):
+        """Time is the second axis. Spectrogram only when FFT is real."""
+        bands = self._bands(a)
+        if bands and self._fft_hist:
+            rows = list(self._fft_hist)
+            n = len(self._fft_smooth)
+            span = max(1, y1 - y0)
+            for ry, frame in enumerate(rows[-span:]):
+                y = y0 + ry
+                if y >= y1:
+                    break
+                for i in range(n):
+                    v = frame[i] if i < len(frame) else 0.0
+                    col = rim(self._band_color(i, n), 0.20 + 0.80 * v)
+                    x0 = i * 4
+                    for x in range(x0, x0 + 3):
+                        put_px(buf, x, y, col)
+            return
+        hist = list(self._hist)
+        span = max(1, y1 - y0)
+        rows = hist[-span:]
+        mid = (y0 + y1) // 2
+        for ry, hv in enumerate(rows):
+            y = y0 + ry
+            half = int(hv * 30)
+            col = self._energy_color(hv)
+            for x in range(32 - half, 32 + half + 1):
+                put_px(buf, x, y, rim(col, 0.35 + 0.55 * hv))
+        # Envelope oscilloscope of the last 64 real samples.
+        if len(hist) >= 2:
+            prev = None
+            amp = max(4, (y1 - y0) // 2 - 1)
+            line = lerp_color(self.BAR_COLOR, (255, 255, 255),
+                              0.35 if self._flash > 0.3 else 0.0)
+            for x, hv in enumerate(hist[:WIDTH]):
+                y = int(round(mid - (hv - 0.5) * 2.0 * amp))
+                y = clamp(y, y0, y1 - 1)
+                if prev is not None:
+                    draw_line(buf, x - 1, prev, x, y, line)
+                prev = y
+
+    def _draw_ribbon(self, buf, y0, y1):
+        """64-wide history of the envelope under the iris."""
+        hist = list(self._hist)
+        h = max(1, y1 - y0)
+        for x, hv in enumerate(hist[:WIDTH]):
+            bh = max(1, int(hv * h)) if hv > 0.02 else 0
+            col = self._energy_color(hv)
+            for y in range(y1 - bh, y1):
+                fade = 0.45 + 0.55 * ((y1 - y) / float(max(1, bh)))
+                put_px(buf, x, y, tuple(int(c * fade) for c in col))
+
+    def _draw_pips(self, buf, y):
+        draw_dots(buf, y, len(self.FACES), self._face,
+                  on=self.BAR_COLOR, off=(32, 36, 46))
+
+    def _draw_viz(self, buf, y0, y1, a):
+        """Instrument in [y0, y1). Keeps the empty-card law: energy is
+        the bright thing, no header smash, no invented bands."""
+        if y1 - y0 < 8:
+            return
+        if a.get("stale"):
+            cx, cy = WIDTH // 2, (y0 + y1) // 2
+            self._stroke_ring(buf, cx, cy, min(18, (y1 - y0) // 2 - 1),
+                              rim(self.INK_DIM, 0.5))
+            mid = max(y0 + 2, cy - 6)
+            draw_text_centered(buf, mid, "NO AUDIO", self.INK_DIM)
+            draw_text_centered(buf, mid + 8, "SIGNAL", self.INK_DIM)
+            return
+        face = self.FACES[self._face % len(self.FACES)]
+        if face == "BARS":
+            if self._bands(a):
+                self._draw_fft_bars(buf, y0, y1)
+            else:
+                self._draw_vu_lamps(buf, y0, y1)
+            return
+        if face == "SCOPE":
+            self._draw_scope(buf, y0, y1, a)
+            return
+        # IRIS -- default. Polar, same language as the flight scope.
+        ribbon = 7 if (y1 - y0) >= 28 else 0
+        body_bot = y1 - ribbon
+        cx, cy = WIDTH // 2, (y0 + body_bot) // 2
+        max_r = max(6, min(cx - 2, cy - y0 - 1, body_bot - cy - 1, 24))
+        self._draw_iris(buf, cx, cy, max_r, a)
+        if ribbon:
+            self._draw_ribbon(buf, body_bot + 1, y1)
+
     def frame(self):
+        self._ready()
         buf = blank()
         fill(buf, self.BG)
 
         configured = self.data.get("configured")
         mic_only = self.data.get("mic_only")
         playing = self.data.get("playing")
-        track = self.data.get("track")
+        track = self.data.get("track") or {}
+        named = bool(playing and track.get("track"))
 
-        if mic_only and not (playing and track and track.get("track")):
-            # Plain equalizer only when there is no real scrobble to
-            # name. If Last.fm resolved a track, fall through and put
-            # the name on the EQ -- mic_only must not hide identity.
-            a = audio_sync.FEED.get()
-            draw_header(buf, "EQUALIZER", self.BAR_COLOR, stale=bool(a.get("stale")))
-            if a.get("stale"):
-                draw_text_centered(buf, 28, "NO AUDIO SIGNAL", self.INK_DIM)
-                draw_text_centered(buf, 36, "FROM PANEL MIC", self.INK_DIM)
+        a = audio_sync.FEED.get()
+        if time.time() - self._last_ingest > 0.04:
+            self._ingest(a, hist=False)
+
+        # Setup card only when Last.fm is the point and nothing is set.
+        if not configured and not mic_only:
+            draw_text_centered(buf, 18, "NO LAST.FM", self.INK)
+            draw_text_centered(buf, 26, "ACCOUNT SET", self.INK)
+            draw_text_centered(buf, 40, "SET ONE FROM", self.INK_DIM)
+            draw_text_centered(buf, 48, "CONTROL PANEL", self.INK_DIM)
+            return bytes(buf)
+
+        y0 = 2
+        if named:
+            name = track.get("track") or "UNKNOWN TRACK"
+            name_col = self.pulse.mix((255, 255, 255))
+            if text_w(name) > WIDTH - 4:
+                draw_marquee(buf, 2, name, name_col, self.scroll)
             else:
-                self._draw_fft_bars(buf, 10, HEIGHT - 2, self.BAR_COLOR)
-            return bytes(buf)
-
-        if not configured:
-            draw_header(buf, "NOW PLAYING", self.ACCENT)
-            draw_text_centered(buf, 24, "NO LAST.FM", self.INK)
-            draw_text_centered(buf, 32, "ACCOUNT SET", self.INK)
-            draw_text_centered(buf, 44, "SET ONE FROM", self.INK_DIM)
-            draw_text_centered(buf, 52, "CONTROL PANEL", self.INK_DIM)
-            return bytes(buf)
-
-        if not playing:
-            draw_header(buf, "NOW PLAYING", rim(self.ACCENT, 0.7),
-                        stale=bool(self.data.get("err")))
-            draw_text_centered(buf, 26, "NOTHING PLAYING", self.INK_DIM)
-            draw_text_centered(buf, 34, "RIGHT NOW", self.INK_DIM)
+                draw_text_centered(buf, 2, name, name_col)
+            artist = track.get("artist")
+            if artist:
+                draw_text_centered(buf, 9, fit_text(artist, WIDTH - 4), self.INK)
+                y0 = 16
+            else:
+                y0 = 10
+            if self.data.get("age") and self.data["age"] > 60:
+                put_px(buf, 1, 1, (255, 170, 40))
+                put_px(buf, 2, 1, (255, 170, 40))
+        elif not mic_only:
+            draw_text_centered(buf, 2, "NOTHING PLAYING", self.INK_DIM)
+            y0 = 10
             if self.data.get("err"):
-                draw_text_centered(buf, 48, fit_text(str(self.data["err"]), WIDTH - 4), self.INK_DIM)
-            return bytes(buf)
+                draw_text_centered(buf, 9, fit_text(str(self.data["err"]), WIDTH - 4),
+                                   self.INK_DIM)
+                y0 = 16
 
-        col = self.pulse.mix(self.ACCENT)
-        draw_header(buf, "NOW PLAYING", col,
-                    stale=bool(self.data.get("age") and self.data["age"] > 60))
-
-        name = track.get("track") or "UNKNOWN TRACK"
-        if text_w(name) > WIDTH - 4:
-            draw_marquee(buf, 12, name, (255, 255, 255), self.scroll)
-        else:
-            draw_text_centered(buf, 12, name, (255, 255, 255))
-        artist = track.get("artist")
-        if artist:
-            draw_text_centered(buf, 21, fit_text(artist, WIDTH - 4), self.INK)
-        album = track.get("album")
-        if album:
-            draw_text_centered(buf, 29, fit_text(album, WIDTH - 4), self.INK_DIM)
-
-        self._draw_fft_bars(buf, 38, 58, self.BAR_COLOR)
+        # Last legal glyph row is y=59. Pips live there. Viz stops at 58.
+        self._draw_viz(buf, y0, 58, a)
+        self._draw_pips(buf, 59)
         return bytes(buf)
 
 
@@ -13485,6 +13757,10 @@ class SportsEngine(Browsable, BigMomentSource):
             if line:
                 y = draw_text_on_empty(buf, y, fit_text(line, WIDTH - 6),
                                        self._clock_ink(ev))
+            strength = sit.get("strength")
+            if strength:
+                y = draw_text_on_empty(buf, y, fit_text(strength, WIDTH - 6),
+                                       self.INK)
             y = self._draw_last_play(buf, ev, y)
         else:
             y = draw_text_on_empty(buf, y, fit_text(ev.get("detail") or "", WIDTH - 6),
@@ -14361,12 +14637,9 @@ class SportsEngine(Browsable, BigMomentSource):
         to close for every other sport already covered. Same shape as
         basketball/soccer's own detail views: full records, a rink hero
         with real period/clock on top while live, venue/broadcast/series.
-        No power-play/possession marker plotted -- `_situation()`'s own
-        docstring already states no NHL power-play field was ever
-        confirmed real; guessing one is exactly what this project's
-        "never invent" rule forbids, same reasoning the football turf
-        and basketball court heroes already follow for their own sports'
-        unconfirmed fields."""
+        Power-play is a 2px pip from a real isPowerPlay bool. Strength
+        text (5 ON 4, EVEN) is drawn only when ESPN sent it -- never a
+        guessed PP clock."""
         accent = self._sport_accent(ev)
         draw_event_frame(buf, 1.0 if ev["live"] else 0.35, accent, accent)
 
@@ -14385,6 +14658,10 @@ class SportsEngine(Browsable, BigMomentSource):
             if line:
                 y = draw_text_on_empty(buf, y, fit_text(line, WIDTH - 8),
                                        self._clock_ink(ev))
+            strength = sit.get("strength")
+            if strength:
+                y = draw_text_on_empty(buf, y, fit_text(strength, WIDTH - 8),
+                                       self.INK)
             y = self._draw_last_play(buf, ev, y)
             y = self._draw_period_line(buf, ev, y)
         else:

@@ -1365,10 +1365,19 @@ class Handler(BaseHTTPRequestHandler):
             # control panel never has to reconcile two separate calls.
             s = nowplaying.FEED.get()
             cfg = nowplaying.FEED.get_config()
+            import audio_sync
+            mic = audio_sync.FEED.get()
             self._json({"configured": s["configured"], "user": cfg["user"],
                         "has_key": bool(cfg["api_key"]), "mic_only": cfg["mic_only"],
                         "playing": s["playing"],
-                        "track": s["track"], "age": s["age"], "err": s["err"]})
+                        "track": s["track"], "age": s["age"], "err": s["err"],
+                        "mic": {"stale": mic.get("stale"), "path": mic.get("path"),
+                                "peak_pct": mic.get("peak_pct"),
+                                "source": mic.get("source_name"),
+                                "processing": mic.get("processing"),
+                                "sync": mic.get("sync"),
+                                "has_fft": bool(mic.get("fft")),
+                                "err": mic.get("err")}})
         elif path == "/api/catalog":
             self._json(catalog.public_json())
         elif path == "/api/note":

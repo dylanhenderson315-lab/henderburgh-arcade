@@ -437,23 +437,29 @@ def drive_departures(audit):
 
 
 def drive_nowplaying(audit):
-    """NowPlayingEngine (2026-08-09) reads nowplaying.FEED, which is
-    honestly unconfigured in this environment (no real Last.fm key) --
-    the generic drive() loop would only ever cover the NO LAST.FM
-    ACCOUNT SET state. Sets `.data` directly, same technique every other
-    custom driver here uses. Six variants: not configured, configured
-    but honestly nothing playing (with a real-shaped API error message,
-    to exercise that text row too), a short track/artist/album, a
-    deliberately long track name to force the marquee-vs-centered branch
-    (text_w(name) > WIDTH-4), and two mic-only-equalizer variants (the
-    real audio_sync.FEED is whatever this environment's actual mic state
-    is -- typically stale here with no real WLED packets arriving -- so
-    both mic_only+configured and mic_only+unconfigured are covered to
-    exercise the header/mode dispatch regardless of which audio branch
-    happens to fire)."""
+    """NowPlayingEngine reads nowplaying.FEED (honestly unconfigured
+    here) and audio_sync.FEED (whatever the house mic is doing). The
+    generic drive() loop would only cover NO LAST.FM. Sets `.data`
+    directly and stubs audio_sync.FEED.get so every honest visual
+    branch is driven: Last.fm empty states, named track + marquee,
+    mic-only, peak-only iris/VU/scope, and real 16-band FFT iris/bars
+    /spectrogram. Never relies on live multicast."""
     frames = [0]
     collisions = []
-    variants = [
+    stale = {"stale": True, "fft": None, "peak_pct": None, "sample_smth": 0,
+             "peak": False, "sync": "SEND V2+", "err": None, "path": None}
+    peak = {"stale": False, "fft": None, "peak_pct": 47, "sample_smth": 0.47,
+            "peak": False, "path": "http", "source_name": "I2S",
+            "sync": "send v2+", "err": None, "processing": "running"}
+    loud = {"stale": False, "fft": None, "peak_pct": 88, "sample_smth": 0.88,
+            "peak": True, "path": "http", "source_name": "I2S",
+            "sync": "send v2+", "err": None, "processing": "running"}
+    fft = {"stale": False,
+           "fft": [20, 40, 80, 120, 200, 180, 90, 60, 40, 30, 25, 20, 15, 12, 10, 8],
+           "peak_pct": 55, "sample_smth": 0.55, "peak": False, "path": "udp",
+           "fft_magnitude": 140.0, "fft_major_peak": 440.0,
+           "sync": "send v2+", "err": None}
+    card = [
         {"configured": False, "mic_only": False, "playing": None, "track": None, "age": None, "err": None},
         {"configured": True, "mic_only": False, "playing": False, "track": None, "age": 5.0,
          "err": "INVALID API KEY - YOU MUST BE GRANTED A VALID KEY"},
@@ -466,12 +472,33 @@ def drive_nowplaying(audit):
         {"configured": True, "mic_only": True, "playing": True, "age": 2.0, "err": None,
          "track": {"track": "HOPPIPOLLA", "artist": "SIGUR ROS", "album": "TAKK..."}},
     ]
-    for i, data in enumerate(variants):
-        eng = engines.NowPlayingEngine.__new__(engines.NowPlayingEngine)
-        eng.data = data
-        eng.pulse = engines.Pulse()
-        eng.scroll = 0.0
-        _snap(audit, eng, "nowplaying variant %d" % i, frames, collisions)
+    orig = engines.audio_sync.FEED.get
+    try:
+        n = 0
+        for data in card:
+            for audio, faces in ((stale, (0,)), (peak, (0, 1, 2)), (loud, (0,)), (fft, (0, 1, 2))):
+                for face in faces:
+                    engines.audio_sync.FEED.get = lambda a=audio: a
+                    eng = engines.NowPlayingEngine.__new__(engines.NowPlayingEngine)
+                    eng.data = data
+                    eng.pulse = engines.Pulse()
+                    eng.scroll = 0.0
+                    eng._init_viz()
+                    eng._face = face
+                    for i in range(16):
+                        step = dict(audio)
+                        if audio is peak:
+                            step["sample_smth"] = 0.2 + (i % 8) * 0.08
+                        elif audio is loud:
+                            step["sample_smth"] = 0.7 + (i % 4) * 0.07
+                        elif audio is fft:
+                            step["fft"] = [min(255, v + (i * 7 + b * 3) % 80)
+                                           for b, v in enumerate(audio["fft"])]
+                        eng._ingest(step, hist=True)
+                    _snap(audit, eng, "nowplaying variant %d" % n, frames, collisions)
+                    n += 1
+    finally:
+        engines.audio_sync.FEED.get = orig
     return frames[0], collisions
 
 

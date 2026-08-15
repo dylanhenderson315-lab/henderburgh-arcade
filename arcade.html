@@ -50,7 +50,8 @@
   .device::before{content:"";position:absolute;inset:8px;border-radius:16px;
                   border:1px solid #ffffff08;pointer-events:none;}
   canvas#c{width:min(56vw,300px);height:min(56vw,300px);image-rendering:pixelated;
-           border-radius:6px;display:block;background:#000;}
+           border-radius:6px;display:block;background:#000;outline:none;}
+  canvas#c:focus{box-shadow:0 0 0 2px var(--accent);}
   .now{min-width:0;}
   .kicker{font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.22em;
           color:var(--accent);margin:0 0 8px;text-transform:uppercase;}
@@ -173,7 +174,7 @@
   <div class="col">
   <section class="pair">
     <div class="device">
-      <canvas id="c" width="64" height="64"></canvas>
+      <canvas id="c" width="64" height="64" tabindex="0"></canvas>
     </div>
     <div class="now">
       <p class="kicker" id="hero-kicker">ON THE GLASS</p>
@@ -230,7 +231,7 @@
         <button data-mode="sports" style="--tile:#ff8c28">SPORTS<small>Empty card. K-zone. Last pitch. Scoring takeovers.</small></button>
         <button data-mode="gameday" class="takeover" style="--tile:#eb2d41">GAME DAY<small>Takes the night. Hands the panel back when it ends.</small></button>
         <button data-mode="ticker" style="--tile:#3ce66e">TICKER<small>Your symbols. Left/right steps. HOLD parks.</small></button>
-        <button data-mode="nowplaying" style="--tile:#ff5ac8">MUSIC<small>A named track only. Last.fm is set below.</small></button>
+        <button data-mode="nowplaying" style="--tile:#ff5ac8">MUSIC<small>Iris, VU, scope. 16-band only when FFT arrives. Last.fm names it.</small></button>
       </div>
     </div>
 
@@ -376,8 +377,13 @@
       clear an existing key.</div>
     <div class="row"><label><input type="checkbox" id="np-mic-only">
       Use the mic as a plain equalizer instead</label></div>
-    <div class="hint">Skips Last.fm entirely and just shows the panel's
-      own mic-driven bars — no account needed.</div>
+    <div class="hint">Skips Last.fm and uses the panel mic as a full
+      instrument. Left/right on the glass cycles iris, studio VU, and
+      scope — all of the same real sample. The 16-band FFT only arrives
+      if UDP Sound Sync packets reach this Mac. If they do not (common
+      when the panel is Wi-Fi and this computer is Ethernet), those
+      three faces read the panel’s real peak instead — never a fake
+      spectrum.</div>
   </div>
 
   <div id="notecard" class="card hide">
@@ -704,10 +710,10 @@ let curBg = 'none', bgTouched = 0;
 async function poll(){
   try{
     const j = await (await fetch('/api/state', {cache:'no-store'})).json();
-    draw(j.rgb);
-    $('mode').textContent = j.mode.toUpperCase() + (j.paused ? ' · PAUSED' : '');
-    $('score').textContent = j.score;
-    renderStatusMode(j.mode, j.paused);
+    if (j.rgb) draw(j.rgb);
+    if ($('mode')) $('mode').textContent = (j.mode || '—').toUpperCase() + (j.paused ? ' · PAUSED' : '');
+    if ($('score')) $('score').textContent = j.score;
+    try { renderStatusMode(j.mode, j.paused); } catch (_) {}
     $('pausebtn').textContent = j.paused ? '▶ Resume' : '⏸ Pause';
     $('pausebtn').classList.toggle('on', !!j.paused);
     if (j.background != null){
@@ -741,8 +747,11 @@ async function poll(){
     else if (axChanged) renderLegend();
     if (Date.now() - cfgTouched > 2500){ applyMirrorCfg(j.mirror_cfg); applyVideoCfg(j.video_cfg); }
     if (j.video_file !== curVideoFile){ curVideoFile = j.video_file; highlightVideo(); }
-  }catch(_){}
+  }catch(err){
+    if (window.console) console.warn('panel poll', err);
+  }
 }
+poll();
 setInterval(poll, 60);
 
 /* ---------- status overview ----------
@@ -768,7 +777,7 @@ const HERO = {
   sports: ['SPORTS', 'The scorebug. DETAIL when it is live. White is the score until the clock earns it.'],
   gameday: ['GAME DAY', 'Takes the night. Hands the panel back when the event ends.'],
   ticker: ['TICKER', 'Your symbols. Nothing invented. HOLD parks the tape.'],
-  nowplaying: ['MUSIC', 'A named track only. Last.fm is set on this page.'],
+  nowplaying: ['MUSIC', 'The panel mic is the instrument. Left/right cycles iris, VU, and scope. 16-band FFT only when packets arrive — never a fake spectrum. Last.fm names the track.'],
   news: ['NEWS', 'Headlines. HOLD parks.'],
   events: ['EVENTS', 'What this board just saw.'],
   blog: ['BLOG', 'The guestbook. Left and right walk posts.'],
@@ -1060,11 +1069,28 @@ async function loadNowPlaying(){
        $('np-key').placeholder = j.has_key ? '••••••••  (already set — leave blank to keep it)'
                                             : 'paste a free Last.fm API key';
        if (!$('np-mic-only').matches(':focus')) $('np-mic-only').checked = !!j.mic_only;
-       $('np-status').textContent = j.mic_only ? 'Mic-only equalizer active'
+       const mic = j.mic || {};
+       let micLine = 'Mic: looking…';
+       if (mic.stale){
+         micLine = 'Mic: panel can hear, but UDP sync is not reaching this Mac'
+           + (mic.sync ? ' (' + mic.sync + ')' : '')
+           + (mic.err ? ' — ' + mic.err : '');
+       } else if (mic.path === 'udp' && mic.has_fft){
+         micLine = 'Mic: live 16-band FFT from the panel'
+           + (mic.peak_pct != null ? ' · peak ' + mic.peak_pct + '%' : '');
+       } else if (mic.path === 'http'){
+         micLine = 'Mic: live peak ' + (mic.peak_pct != null ? mic.peak_pct + '%' : '')
+           + (mic.source ? ' · ' + mic.source : '')
+           + ' (multicast from the panel is not arriving — using the panel’s own reading)';
+       } else if (!mic.stale){
+         micLine = 'Mic: live' + (mic.peak_pct != null ? ' · peak ' + mic.peak_pct + '%' : '');
+       }
+       const song = j.mic_only ? 'Equalizer'
          : !j.configured ? ''
          : (j.playing
              ? ('Now playing: ' + (j.track ? (j.track.track + ' — ' + j.track.artist) : '?'))
-             : (j.err ? ('Error: ' + j.err) : 'Nothing playing right now')); }catch(_){}
+             : (j.err ? ('Error: ' + j.err) : 'Nothing playing right now'));
+       $('np-status').textContent = [song, micLine].filter(Boolean).join(' · '); }catch(_){}
 }
 $('np-save').addEventListener('click', async () => {
   const j = await (await post('/api/nowplaying',
@@ -1118,7 +1144,6 @@ $('note-clear').addEventListener('click', async () => {
 });
 
 const AM_LABEL = {};
-};
 const AM_HINT = {
   auto: 'AUTO is a show: sky, play, board, then today\'s note if set, then one page. A live favorite locks sports DETAIL. Follow only if that flight is airborne. Night gallery 2–7am.',
   world: 'WORLD is every glance mode — flights, ISS, weather radar, sports DETAIL, music, follow, board, ticker, news, events, blog, note, clock.',
@@ -1486,12 +1511,26 @@ function syncUI(){
 const setMode = m => fetch('/api/mode/' + m, {method:'POST'});
 const sendInput = c => fetch('/api/input/' + c, {method:'POST'});
 
-$('power').addEventListener('click', () =>
-  setMode(curMode && curMode !== 'off' ? 'off' : 'on'));
-document.querySelectorAll('[data-mode]').forEach(b =>
-  b.addEventListener('click', () => setMode(b.dataset.mode)));
-document.querySelectorAll('[data-in]').forEach(b =>
-  b.addEventListener('click', () => sendInput(b.dataset.in)));
+const armKeys = () => { try { $('c').focus(); } catch (_) {} };
+$('power').addEventListener('click', () => {
+  setMode(curMode && curMode !== 'off' ? 'off' : 'on');
+  armKeys();
+});
+document.querySelectorAll('[data-mode]').forEach(b => {
+  b.tabIndex = -1;
+  b.addEventListener('click', () => { setMode(b.dataset.mode); armKeys(); });
+});
+document.querySelectorAll('[data-in]').forEach(b => {
+  b.tabIndex = -1;
+  b.addEventListener('click', () => { sendInput(b.dataset.in); armKeys(); });
+});
+armKeys();
+addEventListener('click', e => {
+  const t = e.target;
+  if (!t || !t.closest) return;
+  if (t.closest('input, select, textarea, a, label, details')) return;
+  armKeys();
+});
 
 // 'hold' had no key at all, so Tetris's hold slot and Powder's material
 // selector were unreachable from a keyboard.
@@ -1508,9 +1547,10 @@ const KEYS = {ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',
 const PLAYABLE = new Set(['snake','tetris','pong','breakout','tron','flappy',
                           'invaders','dodge','2048','life',
                           'brawler','chase','tunnel','powder',
-                          'ticker','satellite','flights',
+                          'ticker','satellite','flights','followflight',
+                          'departures','nowplaying','ownernote','events',
                           'sports','news','weather','clock','blog',
-                          'ambient','gameday']);
+                          'ambient','gameday','menu']);
 /* Powder is genuinely pointer-driven, so on the desktop dashboard you draw
    straight onto the preview canvas: it is already a 1:1 map of the panel,
    which makes it the honest place to aim. Sends the same /api/pointer the
@@ -1611,7 +1651,8 @@ function renderLegend(){
 
 const playable = () => {
   const base = (curMode || '').split('-')[0];
-  return PLAYABLE.has(base) && curMode && !curMode.endsWith('-demo');
+  return !!(curMode && curMode !== 'off' && !curMode.endsWith('-demo')
+            && PLAYABLE.has(base));
 };
 
 addEventListener('keydown', e => {
@@ -1619,16 +1660,17 @@ addEventListener('keydown', e => {
   if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
 
-  if (e.key === 'p' || e.key === 'P'){ e.preventDefault(); togglePause(); return; }
-  if (e.key === 'Escape' || e.key === 'Backspace'){ e.preventDefault(); goHome(); return; }
+  if (e.key === 'p' || e.key === 'P'){ e.preventDefault(); togglePause(); armKeys(); return; }
+  if (e.key === 'Escape' || e.key === 'Backspace'){ e.preventDefault(); goHome(); armKeys(); return; }
 
   const c = KEYS[e.key];
   if (!c || !playable()) return;
   e.preventDefault();
+  e.stopPropagation();
   if (e.repeat || keyHeld[c]) return;      // OS repeat must not re-fire press
   kPress(c);
   keyHeld[c] = REPEATABLE[c] ? setInterval(() => sendInput(c), 130) : true;
-});
+}, true);
 
 addEventListener('keyup', e => {
   const c = KEYS[e.key];

@@ -158,6 +158,16 @@
   }
   #note .desk .hint{font-size:10px; color:var(--ink-dim); margin-top:6px; line-height:1.45;}
   #note .desk .count{font-size:10px; letter-spacing:.08em;}
+  #note .desk select{
+    width:100%; box-sizing:border-box; background:#16140f; color:var(--ink);
+    border:1px solid #3a332a; border-radius:8px; padding:8px; font:14px inherit;
+    touch-action:manipulation;
+  }
+  #note .desk label.chk{
+    display:flex; gap:8px; align-items:center; font-size:12px; margin-top:8px;
+  }
+  #note .desk .mixlist{max-height:110px; overflow:auto; margin-top:6px; -webkit-overflow-scrolling:touch;}
+  #note .desk .mixlist label{display:flex; gap:8px; align-items:center; font-size:11px; margin-top:4px;}
 
   /* ================= real cross joystick D-pad =================
      Matte black plastic, no colour glow -- a proper cabinet joystick
@@ -419,8 +429,8 @@ const GAMES = {
     note:'Left/right walks posts. HOLD parks the cycle.'},
   events:   {name:'EVENTS',    color:'#ffbe5a', axis:'horizontal',
     note:'Left/right pages the log.'},
-  nowplaying: {name:'MUSIC',   color:'#ff5ac8',
-    note:'Now playing — no browse. Open the control panel to set Last.fm.'},
+  nowplaying: {name:'MUSIC',   color:'#ff5ac8', axis:'horizontal',
+    note:'Left/right cycles iris, VU, and scope. Last.fm names the track — set it on the control panel.'},
   ownernote: {name:'TODAY',    color:'#ffd66e',
     note:'Today\'s work sticky. 84 characters. Type it here.'},
   followflight: {name:'FOLLOW', color:'#ffc85a',
@@ -818,6 +828,14 @@ function buildControls(base, scheme, demo){
     buildNoteDesk();
   } else if (base === 'followflight'){
     buildFollowDesk();
+  } else if (base === 'nowplaying'){
+    buildMusicDesk();
+  } else if (base === 'sports'){
+    buildSportsDesk();
+  } else if (base === 'ambient'){
+    buildAmbientDesk();
+  } else if (base === 'gameday'){
+    buildGameDayDesk();
   } else if (base === 'boot'){
     $('note').textContent = 'Watch on the panel, or tap to jump straight to the menu.';
   } else if (base === 'menu'){
@@ -909,6 +927,151 @@ function buildFollowDesk(){
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({callsign: ''})});
     refresh();
+  };
+}
+
+function postJSON(url, body){
+  return fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body || {})}).then(r => r.json());
+}
+
+function buildMusicDesk(){
+  $('note').innerHTML =
+    '<div class="desk">'+
+    '<input type="text" id="desk-np-user" placeholder="Last.fm username" autocomplete="off">'+
+    '<label class="chk"><input type="checkbox" id="desk-np-mic"> Mic as equalizer</label>'+
+    '<div class="row"><button type="button" id="desk-np-save">Save</button></div>'+
+    '<div class="hint" id="desk-np-now"></div>'+
+    '<div class="hint">Left/right cycles iris, VU, and scope. The API key stays on the control panel — username here keeps a key that is already set. Mic-only is the room, named only when Last.fm is scrobbling.</div>'+
+    '</div>';
+  const user = $('desk-np-user');
+  const mic = $('desk-np-mic');
+  const now = $('desk-np-now');
+  const paint = (j) => {
+    if (j.user && document.activeElement !== user) user.value = j.user;
+    if (document.activeElement !== mic) mic.checked = !!j.mic_only;
+    const m = j.mic || {};
+    let line = j.mic_only ? 'Equalizer' : (!j.configured ? 'No Last.fm account'
+      : (j.playing ? ('Now: ' + ((j.track && j.track.track) || '?')) : 'Nothing playing'));
+    if (m.stale) line += ' · mic looking';
+    else if (m.path === 'udp' && m.has_fft) line += ' · 16-band FFT';
+    else if (m.peak_pct != null) line += ' · mic ' + m.peak_pct + '%';
+    now.textContent = line;
+  };
+  fetch('/api/nowplaying').then(r => r.json()).then(paint).catch(() => {});
+  $('desk-np-save').onclick = async () => {
+    await postJSON('/api/nowplaying', {user: user.value, mic_only: mic.checked});
+    fetch('/api/nowplaying').then(r => r.json()).then(paint).catch(() => {});
+  };
+  mic.onchange = () => $('desk-np-save').click();
+}
+
+function buildSportsDesk(){
+  $('note').innerHTML =
+    '<div class="desk">'+
+    '<select id="desk-sp-lg"><option value="">League</option></select>'+
+    '<select id="desk-sp-tm" style="margin-top:8px"><option value="">Team</option></select>'+
+    '<div class="row"><button type="button" id="desk-sp-pin">Pin</button>'+
+    '<button type="button" id="desk-sp-clear">Unpin</button></div>'+
+    '<div class="hint" id="desk-sp-now"></div>'+
+    '<div class="hint">Pinned team locks live DETAIL in ambient. Left/right walks games. DETAIL opens the in-depth card.</div>'+
+    '</div>';
+  const lg = $('desk-sp-lg');
+  const tm = $('desk-sp-tm');
+  const now = $('desk-sp-now');
+  let teams = {};
+  const fillTeams = (league, selected) => {
+    const list = teams[league] || [];
+    tm.innerHTML = '<option value="">Team</option>' + list.map(t => {
+      const abbr = t.abbr || '';
+      const name = ((t.location || '') + ' ' + abbr).trim() || abbr;
+      const sel = abbr === selected ? ' selected' : '';
+      return '<option value="'+abbr+'"'+sel+'>'+name+'</option>';
+    }).join('');
+  };
+  Promise.all([
+    fetch('/api/sports/config').then(r => r.json()),
+    fetch('/api/sports/teams').then(r => r.json()).catch(() => ({})),
+  ]).then(([cfg, t]) => {
+    teams = t.teams || {};
+    const leagues = cfg.known_leagues || Object.keys(teams);
+    const fav = cfg.favorite || {};
+    lg.innerHTML = '<option value="">League</option>' + leagues.map(code =>
+      '<option value="'+code+'"'+(code === fav.league ? ' selected' : '')+'>'+code+'</option>').join('');
+    if (fav.league) fillTeams(fav.league, fav.team_abbr);
+    now.textContent = fav.team_abbr
+      ? ('Pinned: ' + fav.league + ' ' + fav.team_abbr)
+      : 'No team pinned.';
+  }).catch(() => {});
+  lg.onchange = () => fillTeams(lg.value);
+  $('desk-sp-pin').onclick = async () => {
+    const j = await postJSON('/api/sports/favorite', {league: lg.value, team_abbr: tm.value});
+    const fav = j.favorite || {};
+    now.textContent = j.ok === false ? (j.error || 'error')
+      : (fav.team_abbr ? ('Pinned: ' + fav.league + ' ' + fav.team_abbr) : 'Pinned.');
+  };
+  $('desk-sp-clear').onclick = async () => {
+    await postJSON('/api/sports/favorite', {});
+    lg.value = ''; fillTeams('');
+    now.textContent = 'No team pinned.';
+  };
+}
+
+function buildAmbientDesk(){
+  $('note').innerHTML =
+    '<div class="desk">'+
+    '<div class="hint" id="desk-am-now">MIX picks</div>'+
+    '<div class="mixlist" id="desk-am-mix"></div>'+
+    '<div class="row"><button type="button" id="desk-am-save">Save mix</button></div>'+
+    '<div class="hint">Up/down changes channel (AUTO WORLD ARCADE MIX). Left/right steps. HOLD pauses. MIX is only what you tick.</div>'+
+    '</div>';
+  const box = $('desk-am-mix');
+  const now = $('desk-am-now');
+  const paint = (j) => {
+    const labels = j.labels || {};
+    const mix = new Set(j.mix || []);
+    const names = j.mixable || Object.keys(labels);
+    now.textContent = 'Channel: ' + String(j.channel || 'auto').toUpperCase();
+    box.innerHTML = names.map(n =>
+      '<label><input type="checkbox" data-mix="'+n+'" '+(mix.has(n)?'checked':'')+'> '+
+      (labels[n] || n.toUpperCase())+'</label>').join('');
+  };
+  fetch('/api/ambient').then(r => r.json()).then(paint).catch(() => {});
+  $('desk-am-save').onclick = async () => {
+    const mix = [...box.querySelectorAll('[data-mix]:checked')].map(el => el.dataset.mix);
+    const j = await postJSON('/api/ambient', {mix});
+    paint(j);
+  };
+}
+
+function buildGameDayDesk(){
+  $('note').innerHTML =
+    '<div class="desk">'+
+    '<select id="desk-gd-target">'+
+    '<option value="ufc">UFC card</option>'+
+    '<option value="team">Pinned team</option>'+
+    '</select>'+
+    '<label class="chk"><input type="checkbox" id="desk-gd-exit" checked> Hand back when it ends</label>'+
+    '<div class="row"><button type="button" id="desk-gd-save">Save</button></div>'+
+    '<div class="hint" id="desk-gd-now"></div>'+
+    '<div class="hint">Takes the night. Left/right browses the card. Power or MENU leaves it.</div>'+
+    '</div>';
+  const tgt = $('desk-gd-target');
+  const ex = $('desk-gd-exit');
+  const now = $('desk-gd-now');
+  const paint = (j) => {
+    const cfg = j.config || j;
+    if (cfg.target && document.activeElement !== tgt) tgt.value = cfg.target;
+    if (document.activeElement !== ex) ex.checked = cfg.auto_exit !== false;
+    const ev = cfg.event || {};
+    now.textContent = ev.name ? ev.name
+      : (ev.game ? ev.game : (ev.next ? ev.next : 'No event loaded.'));
+  };
+  fetch('/api/gameday/config').then(r => r.json()).then(paint).catch(() => {});
+  $('desk-gd-save').onclick = async () => {
+    await postJSON('/api/gameday/config',
+      {target: tgt.value, auto_exit: ex.checked});
+    fetch('/api/gameday/config').then(r => r.json()).then(paint).catch(() => {});
   };
 }
 

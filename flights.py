@@ -86,7 +86,7 @@ FOLLOW_URL = FOLLOW_SOURCES[0][1]
 
 RADIUS_NM = 40                  # "in the local sky" -- roughly a 15 min drive's worth of horizon
 MAX_TRACKED = 8                 # nearest N, so the mode has a bounded, meaningful list
-MAX_LOOKUPS_PER_REFRESH = 4     # be polite to adsbdb; new callsigns just enrich next cycle
+MAX_LOOKUPS_PER_REFRESH = 8     # radar 8 + board candidates; cache means this is burst-only
 
 POSITION_REFRESH = 15.0
 CONFIG_CHECK = 10.0
@@ -1118,7 +1118,7 @@ def _fetch_positions(lat, lon):
                      + (FAVORITE_BOOST if a["is_favorite"] else 0.0))
     out.sort(key=lambda a: (-_rank(a),
                             a["dist_nm"] if a["dist_nm"] is not None else 1e9))
-    return out[:MAX_TRACKED]
+    return out
 
 
 def _route_plausible(home_lat, home_lon, origin_lat, origin_lon, dest_lat, dest_lon,
@@ -1282,6 +1282,7 @@ class FlightFeed:
     def __init__(self):
         self._lock = threading.Lock()
         self._aircraft = []
+        self._sky = []
         self._updated = 0.0
         self._last_try = 0.0
         self._last_read = 0.0
@@ -1351,12 +1352,13 @@ class FlightFeed:
         with self._lock:
             self._last_read = now
             aircraft = [dict(a) for a in self._aircraft]
+            sky = [dict(a) for a in self._sky]
             updated, err = self._updated, self._err
             home_label = self._home[2]
         self._ensure_thread()
         age = (now - updated) if updated else None
         return {
-            "aircraft": aircraft, "age": age,
+            "aircraft": aircraft, "sky": sky, "age": age,
             "home_label": home_label,
             "configured": satellite.FEED.configured,
             "err": err,
@@ -1401,20 +1403,24 @@ class FlightFeed:
         if not configured:
             with self._lock:
                 self._aircraft = []
+                self._sky = []
                 self._updated = time.time()
                 self._err = None
             return
 
         try:
-            aircraft = _fetch_positions(lat, lon)
+            sky = _fetch_positions(lat, lon)
+            aircraft = sky[:MAX_TRACKED]
         except Exception as e:                        # noqa: BLE001 - never die
             with self._lock:
                 self._err = f"{type(e).__name__}"
             return
 
-        # Enrich with cached/looked-up routes, capped per cycle.
+        # Enrich the whole sky, radar eight first. The board reads
+        # every aircraft in range, not just the eight the scope shows
+        # -- a MYR arrival that is 9th-nearest used to be invisible.
         lookups_left = MAX_LOOKUPS_PER_REFRESH
-        for ac in aircraft:
+        for ac in sky:
             cs = ac["callsign"]
             if not cs:
                 ac["route"] = None
@@ -1463,7 +1469,7 @@ class FlightFeed:
         # cadence. Only aircraft that actually broadcast a registration
         # are recorded -- see hangar.py's own docstring on why a bare
         # hex isn't treated as a substitute tail number.
-        for ac in aircraft:
+        for ac in sky:
             if ac["reg"]:
                 hangar.LOG.record_sighting(
                     ac["reg"], ac["type"], (ac.get("route") or {}).get("airline"))
@@ -1473,14 +1479,14 @@ class FlightFeed:
         # zero new poll cadence). Reacts to the real `in_window` flag
         # `_fetch_positions()` already computed above via
         # satellite.in_window() -- this only diffs it against last cycle.
-        now_in_window = {_ac_key(a) for a in aircraft
+        now_in_window = {_ac_key(a) for a in sky
                           if a.get("in_window") and _ac_key(a)}
         if self._seen_window is None:
             self._seen_window = now_in_window   # first read: adopt, don't fire
         else:
             newly = now_in_window - self._seen_window
             if newly:
-                entered = [a for a in aircraft if _ac_key(a) in newly]
+                entered = [a for a in sky if _ac_key(a) in newly]
                 entered.sort(key=lambda a: (
                     a["dist_nm"] if isinstance(a.get("dist_nm"), (int, float)) else 1e9,
                     -(a["notable"][1] if a.get("notable") else 0)))
@@ -1506,6 +1512,7 @@ class FlightFeed:
             self._seen_window = now_in_window
 
         with self._lock:
+            self._sky = sky
             self._aircraft = aircraft
             self._updated = time.time()
             self._err = None

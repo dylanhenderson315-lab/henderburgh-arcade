@@ -44,7 +44,7 @@ MODES = (
     _m("departures", "BOARD", "data", (120, 200, 255), menu=True, sequence=True,
        note="Live to/from home. Not a scheduled board. Left/right pages."),
     _m("nowplaying", "MUSIC", "data", (255, 90, 200), menu=True, sequence=True,
-       note="Named track only. Last.fm is set on the control panel."),
+       note="Left/right cycles iris, VU, and scope. Last.fm names the track."),
     _m("ownernote", "TODAY", "data", (255, 214, 110), menu=True, sequence=True,
        note="Today's work sticky. 84 characters. Edit on this phone."),
     _m("sports", "SPORTS", "data", (255, 140, 40), menu=True, sequence=True,
