@@ -156,6 +156,10 @@ def _fetch_ac_list(sources, url_kwargs):
     return []
 
 
+_airport_cache = None
+_airport_mtime = None
+
+
 def load_airport():
     """The home airport, for the radar scope's airport marker, or None.
 
@@ -165,29 +169,42 @@ def load_airport():
     as {"code", "lat", "lon"}; anything malformed returns None so the
     scope simply draws no airport rather than plotting a guessed one.
 
+    Cached on mtime so DepartureBoardEngine.tick (and ambient warming
+    it at 20 Hz) does not open the file every frame.
+
     NOT auto-detected. Resolving "the nearest airport" needs a whole
     airport database (OurAirports' CSV is 12MB) to answer a question the
     owner can answer once in a config field -- same config-driven pattern
     as the pinned golfer and the favourite team.
     """
+    global _airport_cache, _airport_mtime
     path = satellite.CONFIG_PATH
-    if not path.exists():
+    try:
+        mt = path.stat().st_mtime if path.exists() else None
+    except OSError:
+        return dict(_airport_cache) if _airport_cache else None
+    if mt == _airport_mtime:
+        return dict(_airport_cache) if _airport_cache else None
+    _airport_mtime = mt
+    if mt is None:
+        _airport_cache = None
         return None
     try:
         data = json.loads(path.read_text()) or {}
     except (json.JSONDecodeError, OSError, TypeError, ValueError):
-        return None
+        return dict(_airport_cache) if _airport_cache else None
     ap = data.get("airport")
-    if not isinstance(ap, dict):
-        return None
-    try:
-        lat, lon = float(ap["lat"]), float(ap["lon"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
-        return None
-    return {"code": paneltext.panel_text(ap.get("code"))[:4] or "ARPT",
-            "lat": lat, "lon": lon}
+    parsed = None
+    if isinstance(ap, dict):
+        try:
+            lat, lon = float(ap["lat"]), float(ap["lon"])
+            if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+                parsed = {"code": paneltext.panel_text(ap.get("code"))[:4] or "ARPT",
+                          "lat": lat, "lon": lon}
+        except (KeyError, TypeError, ValueError):
+            parsed = None
+    _airport_cache = parsed
+    return dict(parsed) if parsed else None
 
 
 # North-American ICAO prefixes. US = K+IATA (MYR/KMYR), Canada = C,

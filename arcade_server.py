@@ -36,6 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
+import catalog
 import engines
 import gameday
 import mma
@@ -1368,8 +1369,11 @@ class Handler(BaseHTTPRequestHandler):
                         "has_key": bool(cfg["api_key"]), "mic_only": cfg["mic_only"],
                         "playing": s["playing"],
                         "track": s["track"], "age": s["age"], "err": s["err"]})
+        elif path == "/api/catalog":
+            self._json(catalog.public_json())
         elif path == "/api/note":
-            self._json(ownernote.load_config())
+            data = ownernote.load_config()
+            self._json({**data, **ownernote.preview(data.get("text"))})
         elif path == "/api/ambient":
             cfg = ambient.load_config()
             live = None
@@ -1380,9 +1384,8 @@ class Handler(BaseHTTPRequestHandler):
                 "channel": (live or cfg)["channel"] if live else cfg["channel"],
                 "channels": list(ambient.CHANNELS),
                 "mix": (live or cfg).get("mix") or cfg["mix"],
-                "mixable": (live or {}).get("mixable") or list(
-                    engines.AmbientEngine.SEQUENCE + engines.AmbientEngine.GALLERY
-                    + engines.AmbientEngine.MIX_EXTRA),
+                "mixable": (live or {}).get("mixable") or list(catalog.mixable()),
+                "labels": catalog.labels(),
                 "showing": (live or {}).get("showing"),
             })
         elif path == "/api/events":
@@ -1821,7 +1824,8 @@ class Handler(BaseHTTPRequestHandler):
             # text is the whole boundary this endpoint exists to guard.
             try:
                 j = json.loads(body or b"{}")
-                self._json({"ok": True, **ownernote.save_config(j.get("text"))})
+                saved = ownernote.save_config(j.get("text"))
+                self._json({"ok": True, **saved, **ownernote.preview(saved.get("text"))})
             except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/gameday/config":

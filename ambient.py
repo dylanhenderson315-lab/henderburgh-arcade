@@ -19,6 +19,8 @@ need a mix).
 import json
 from pathlib import Path
 
+import catalog
+
 CONFIG_PATH = Path(__file__).parent / "ambient_config.json"
 
 CHANNELS = ("auto", "world", "arcade", "mix")
@@ -26,11 +28,7 @@ DEFAULT_CHANNEL = "auto"
 # Default MIX is the full visual world -- every glance mode that is
 # honest to put on a wall. Owner can trim this list. AUTO/WORLD ignore
 # it and already walk the full SEQUENCE.
-DEFAULT_MIX = (
-    "flights", "satellite", "weather", "sports", "nowplaying",
-    "followflight", "departures", "ticker", "news", "events",
-    "blog", "ownernote", "clock",
-)
+DEFAULT_MIX = catalog.sequence()
 
 
 def load_config():

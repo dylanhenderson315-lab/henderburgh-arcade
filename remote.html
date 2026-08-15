@@ -61,6 +61,7 @@
     #actionzone{grid-area:action; margin-top:0; justify-self:center;}
     #marquee{align-self:center;}
     #note{max-width:340px; margin:0 auto;}
+    #desk{max-width:340px; margin:8px auto 0;}
     .cab-bg{opacity:1;}
   }
 
@@ -142,6 +143,21 @@
   }
 
   #note{grid-area:note; text-align:center; color:var(--ink-dim); font-size:11px; padding:0 16px 2px; line-height:1.5;}
+  #note .desk{text-align:left; max-width:320px; margin:0 auto; touch-action:manipulation; -webkit-user-select:text; user-select:text;}
+  #note .desk textarea, #note .desk input[type=text]{
+    width:100%; box-sizing:border-box; background:#16140f; color:var(--ink);
+    border:1px solid #3a332a; border-radius:8px; padding:8px; font:14px/1.4 inherit;
+    touch-action:manipulation;
+  }
+  #note .desk textarea{min-height:72px; resize:vertical;}
+  #note .desk .row{display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;}
+  #note .desk button{
+    font-size:11px; font-weight:800; letter-spacing:.08em; text-transform:uppercase;
+    border-radius:8px; border:1px solid #3a332a; background:#211d17; color:var(--ink);
+    padding:8px 12px;
+  }
+  #note .desk .hint{font-size:10px; color:var(--ink-dim); margin-top:6px; line-height:1.45;}
+  #note .desk .count{font-size:10px; letter-spacing:.08em;}
 
   /* ================= real cross joystick D-pad =================
      Matte black plastic, no colour glow -- a proper cabinet joystick
@@ -388,13 +404,13 @@ const GAMES = {
     note:'Left/right walks games. Up/down walks leagues. DETAIL opens the in-depth card. BACK leaves it.'},
   weather:  {name:'WEATHER',   color:'#5abeff', dpad:true,
     actions:[{cmd:'rotate',label:'DETAIL',glyph:'◉'},{cmd:'drop',label:'BACK',glyph:'↩'}],
-    note:'Up/down: conditions, hourly, radar. On radar, DETAIL is the selected storm. Left/right walks tracks.'},
+    note:'Up/down: conditions, hourly, radar. Ambient: hourly, or radar if storms. On radar, DETAIL is the selected storm. Left/right walks tracks.'},
   clock:    {name:'CLOCK',     color:'#78c8ff', axis:'horizontal',
     actions:[{cmd:'rotate',label:'FACE',glyph:'⟳'}],
     note:'FACE flips analog and digital. On digital, left/right toggles seconds.'},
   ambient:  {name:'AMBIENT',   color:'#b060ff', dpad:true,
     actions:[{cmd:'rotate',label:'HOLD',glyph:'⏸'}],
-    note:'Up/down changes channel (AUTO, WORLD, ARCADE, MIX). Left/right steps. HOLD pauses the cycle.'},
+    note:'Up/down changes channel (AUTO, WORLD, ARCADE, MIX). Left/right steps. HOLD pauses. AUTO is a show: sky, play, board, today\'s note, one page.'},
   news:     {name:'NEWS',      color:'#e8c23a', axis:'horizontal',
     actions:[{cmd:'rotate',label:'HOLD',glyph:'⏸'}],
     note:'Left/right walks headlines. HOLD parks the tape.'},
@@ -405,12 +421,12 @@ const GAMES = {
     note:'Left/right pages the log.'},
   nowplaying: {name:'MUSIC',   color:'#ff5ac8',
     note:'Now playing — no browse. Open the control panel to set Last.fm.'},
-  ownernote: {name:'NOTE',     color:'#ffd66e',
-    note:'The owner note. Edit it from the control panel.'},
+  ownernote: {name:'TODAY',    color:'#ffd66e',
+    note:'Today\'s work sticky. 84 characters. Type it here.'},
   followflight: {name:'FOLLOW', color:'#ffc85a',
-    note:'One followed flight. Set the callsign from the control panel.'},
+    note:'ICAO callsign only — UAL123, not UA123.'},
   departures: {name:'BOARD',   color:'#78c8ff', axis:'horizontal',
-    note:'Left/right pages live departures and arrivals.'},
+    note:'Live to/from home — airborne traffic whose route names this airport. Not a scheduled FIDS. Left/right pages.'},
   gameday:  {name:'GAME DAY',  color:'#eb2d41', axis:'horizontal',
     actions:[{cmd:'rotate',label:'SELECT',glyph:'◉'}],
     note:'Game Day takeover. Left/right browses the card. Power or MENU leaves it.'},
@@ -447,8 +463,24 @@ function applyTheme(scheme){
 }
 
 let missed = 0;
+let catalogLoaded = false;
+async function ensureCatalog(){
+  if (catalogLoaded) return;
+  try{
+    const j = await (await fetch('/api/catalog')).json();
+    (j.modes || []).forEach(m => {
+      if (!GAMES[m.name]) GAMES[m.name] = {name: m.label, color: m.color, note: m.note};
+      else {
+        if (m.label) GAMES[m.name].name = m.label;
+        if (m.note && !GAMES[m.name].note) GAMES[m.name].note = m.note;
+      }
+    });
+    catalogLoaded = true;
+  } catch (e) {}
+}
 async function poll(){
   try{
+    await ensureCatalog();
     const j = await (await fetch('/api/state', {cache:'no-store'})).json();
     missed = 0;
     $('livedot').classList.add('live');
@@ -782,7 +814,11 @@ function buildControls(base, scheme, demo){
   if (!panelOn){ $('dpadzone').innerHTML=''; $('actionzone').innerHTML=''; $('note').textContent = 'Press the power button to start the system.'; return; }
   if (!scheme){ $('dpadzone').innerHTML=''; $('actionzone').innerHTML=''; return; }
 
-  if (base === 'boot'){
+  if (base === 'ownernote'){
+    buildNoteDesk();
+  } else if (base === 'followflight'){
+    buildFollowDesk();
+  } else if (base === 'boot'){
     $('note').textContent = 'Watch on the panel, or tap to jump straight to the menu.';
   } else if (base === 'menu'){
     $('note').textContent = 'Browse on the panel with the dpad, then SELECT to choose PLAY or WATCH.';
@@ -796,6 +832,84 @@ function buildControls(base, scheme, demo){
 
   buildDpad(scheme);
   buildActions(scheme);
+}
+
+function buildNoteDesk(){
+  $('note').innerHTML =
+    '<div class="desk">'+
+    '<textarea id="desk-note" placeholder="THE ONE THING TO HOLD ON THE WALL"></textarea>'+
+    '<div class="count" id="desk-note-count">0 / 84</div>'+
+    '<div class="row"><button type="button" id="desk-note-save">Save</button>'+
+    '<button type="button" id="desk-note-clear">Clear</button></div>'+
+    '<div class="hint">6 lines × 14 glyphs. Uppercase on the wall. This is today\'s sticky, not a notebook.</div>'+
+    '</div>';
+  const ta = $('desk-note');
+  const count = $('desk-note-count');
+  const paint = (j) => {
+    const n = (j && typeof j.chars === 'number') ? j.chars : (ta.value || '').trim().length;
+    const b = (j && j.budget) || 84;
+    count.textContent = n + ' / ' + b + ((j && j.fits === false) ? ' — crops' : '');
+  };
+  fetch('/api/note').then(r => r.json()).then(j => {
+    if (j.text) ta.value = j.text;
+    paint(j);
+  }).catch(() => {});
+  ta.addEventListener('input', () => paint());
+  $('desk-note-save').onclick = async () => {
+    const j = await (await fetch('/api/note', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({text: ta.value})})).json();
+    paint(j);
+  };
+  $('desk-note-clear').onclick = async () => {
+    ta.value = '';
+    await fetch('/api/note', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({text: ''})});
+    paint({chars:0, budget:84, fits:true});
+  };
+}
+
+function followStatusLine(j){
+  if (!j || !j.configured) return 'No flight set.';
+  if (j.airborne === true){
+    const alt = j.aircraft && j.aircraft.alt_ft != null ? (' · ' + Math.round(j.aircraft.alt_ft) + ' ft') : '';
+    return 'Airborne now' + alt;
+  }
+  if (j.airborne === false) return 'Not currently airborne — still watching.';
+  if (j.err) return 'No signal: ' + j.err + ' — still looking.';
+  return 'Looking for this flight.';
+}
+
+function buildFollowDesk(){
+  $('note').innerHTML =
+    '<div class="desk">'+
+    '<input type="text" id="desk-ff" placeholder="UAL123" autocomplete="off" autocapitalize="characters">'+
+    '<div class="row"><button type="button" id="desk-ff-go">Follow</button>'+
+    '<button type="button" id="desk-ff-stop">Stop</button></div>'+
+    '<div class="hint" id="desk-ff-now"></div>'+
+    '<div class="hint">ICAO radio callsign: three letters + number. UAL123 is United. UA123 is the ticket code and will read NOT AIRBORNE even if the jet is up. DAL not DL. SWA not WN. AAL not AA.</div>'+
+    '</div>';
+  const inp = $('desk-ff');
+  const now = $('desk-ff-now');
+  const refresh = () => fetch('/api/flights/follow').then(r => r.json()).then(j => {
+    if (j.callsign && document.activeElement !== inp) inp.value = j.callsign;
+    now.textContent = followStatusLine(j);
+  }).catch(() => {});
+  refresh();
+  $('desk-ff-go').onclick = async () => {
+    await fetch('/api/flights/follow', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({callsign: inp.value})});
+    refresh();
+  };
+  $('desk-ff-stop').onclick = async () => {
+    inp.value = '';
+    await fetch('/api/flights/follow', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({callsign: ''})});
+    refresh();
+  };
 }
 
 /* ------------------------------------------------------------- keyboard

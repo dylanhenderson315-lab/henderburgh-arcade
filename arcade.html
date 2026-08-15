@@ -5,222 +5,298 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0a0a0b">
-<title>HENDERBURGH ARCADE</title>
+<title>Henderburgh — Companion</title>
 <style>
-  :root{--bg:#0a0a0b;--panel:#141416;--line:#26262b;--ink:#e8e8ea;--dim:#8a8a92;
-        --accent:#3ddc84;--red:#ff6b6b;}
+  :root{
+    --bg:#090807; --panel:#141210; --line:#2a2620; --ink:#f3ecd9; --dim:#9a917e;
+    --accent:#e8c36a; --green:#4fce6c; --red:#ff6b6b; --tile:#78c8ff;
+    --safe-b: env(safe-area-inset-bottom, 0px);
+  }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
-  body{margin:0;background:var(--bg);color:var(--ink);
-       font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-       padding:18px 16px calc(28px + env(safe-area-inset-bottom));min-height:100vh;}
-  h1{font-size:14px;letter-spacing:.32em;font-weight:600;margin:2px 0 0;text-align:center;}
-  .sub{font-size:10.5px;color:var(--dim);letter-spacing:.16em;margin-top:4px;text-align:center;}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;}
+  body{min-height:100vh;padding:0 0 calc(32px + var(--safe-b));
+    background:
+      radial-gradient(ellipse 80% 50% at 50% -10%, #1c1812 0%, transparent 55%),
+      var(--bg);}
+  a{color:var(--accent);text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  button,input,select,textarea{
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
 
-  .shell{display:flex;gap:16px;align-items:flex-start;justify-content:center;
-         max-width:780px;margin:14px auto 0;flex-wrap:wrap;}
-  .main{display:flex;flex-direction:column;align-items:center;gap:14px;flex:1;min-width:min(100%,280px);}
-  .side{width:min(100%,220px);position:sticky;top:14px;}
+  .mast{display:flex;align-items:center;justify-content:space-between;
+        padding:18px 22px 8px;max-width:1180px;margin:0 auto;}
+  .brand{display:flex;align-items:center;gap:12px;}
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:#3a3630;}
+  .brand .dot.live{background:var(--green);box-shadow:0 0 10px #4fce6c88;}
+  .brand h1{font-size:13px;letter-spacing:.34em;font-weight:700;margin:0;}
+  .brand .sub{font-size:10px;color:var(--dim);letter-spacing:.16em;margin-top:3px;
+              font-family:ui-monospace,Menlo,monospace;}
+  .mast nav{display:flex;gap:18px;font-size:11px;letter-spacing:.16em;text-transform:uppercase;
+            font-family:ui-monospace,Menlo,monospace;}
+  .mast nav a{color:var(--dim);}
+  .mast nav a:hover{color:var(--ink);text-decoration:none;}
 
-  .screen{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px;}
-  canvas#c{width:min(72vw,320px);height:min(72vw,320px);image-rendering:pixelated;
-           border-radius:5px;display:block;background:#000;}
-  .status{font-size:11.5px;color:var(--dim);letter-spacing:.1em;display:flex;gap:16px;}
-  .status b{color:var(--accent);font-weight:600;}
+  .page{max-width:1180px;margin:0 auto;padding:0 18px;
+        display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:22px;align-items:start;}
+  .col{min-width:0;}
 
-  button{font-family:inherit;font-size:12px;letter-spacing:.07em;color:var(--ink);
+  .pair{display:grid;grid-template-columns:auto 1fr;gap:28px;align-items:center;
+        padding:10px 0 22px;}
+  .device{position:relative;padding:14px;border-radius:22px;
+          background:linear-gradient(180deg,#1c1914,#0e0c0a);
+          border:1px solid #3a342c;
+          box-shadow:inset 0 1px 0 #ffffff14, 0 30px 60px -28px #000c;}
+  .device::before{content:"";position:absolute;inset:8px;border-radius:16px;
+                  border:1px solid #ffffff08;pointer-events:none;}
+  canvas#c{width:min(56vw,300px);height:min(56vw,300px);image-rendering:pixelated;
+           border-radius:6px;display:block;background:#000;}
+  .now{min-width:0;}
+  .kicker{font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.22em;
+          color:var(--accent);margin:0 0 8px;text-transform:uppercase;}
+  #hero-name{font-size:clamp(28px,5vw,46px);line-height:1;margin:0 0 10px;letter-spacing:.02em;
+             font-weight:700;}
+  #hero-lede{font-size:16px;line-height:1.45;color:var(--dim);margin:0 0 16px;max-width:36ch;}
+  .status{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--dim);
+          letter-spacing:.1em;display:flex;flex-wrap:wrap;gap:14px;margin-bottom:14px;}
+  .status b{color:var(--green);font-weight:600;}
+  .pstate{font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;
+          color:var(--dim);text-transform:uppercase;margin:8px 0 0;}
+
+  button{font-size:12px;letter-spacing:.07em;color:var(--ink);
          background:var(--panel);border:1px solid var(--line);border-radius:10px;
          padding:9px 13px;cursor:pointer;transition:.15s;}
   button:hover{border-color:var(--accent);color:var(--accent);}
-  button.active{background:var(--accent);color:#08210f;border-color:var(--accent);font-weight:700;}
-  .power{font-size:14px;letter-spacing:.14em;font-weight:700;padding:13px 32px;border-radius:14px;}
-  .power.on{background:var(--accent);color:#08210f;border-color:var(--accent);}
+  button.active{background:var(--accent);color:#1a1408;border-color:var(--accent);font-weight:700;}
+  .power{font-size:13px;letter-spacing:.16em;font-weight:700;padding:12px 28px;border-radius:14px;}
+  .power.on{background:var(--green);color:#08210f;border-color:var(--green);}
   .power.off{background:transparent;color:var(--red);border-color:#5c2b2b;}
-  .pstate{font-size:10px;letter-spacing:.12em;color:var(--dim);text-transform:uppercase;margin-top:-6px;}
 
-  .modes{display:flex;flex-wrap:wrap;gap:7px;justify-content:center;max-width:420px;}
+  .modes{display:flex;flex-wrap:wrap;gap:8px;}
   #modes.dim{opacity:.42;}
-
-  /* Grouped mode picker. Four genuinely different kinds of thing, so the
-     grouping is structural rather than decorative. */
-  #modes{display:flex;flex-direction:column;gap:14px;max-width:420px;width:100%;}
-  .group{display:flex;flex-direction:column;align-items:center;gap:8px;}
-  .group h3{font-size:9.5px;letter-spacing:.2em;color:var(--dim);margin:0;
-            text-transform:uppercase;font-weight:600;}
-  .demos{width:100%;max-width:420px;}
-  .demos summary{font-size:10px;letter-spacing:.1em;color:var(--dim);cursor:pointer;
-                 text-align:center;padding:4px;list-style:none;}
+  #modes{display:flex;flex-direction:column;gap:28px;width:100%;margin:8px 0 24px;}
+  .group{display:flex;flex-direction:column;gap:10px;}
+  .group h3{font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.22em;
+            color:var(--dim);margin:0;text-transform:uppercase;font-weight:600;}
+  .group .lede{font-size:13px;color:var(--dim);margin:0 0 4px;line-height:1.4;}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:8px;}
+  .tiles.games{grid-template-columns:repeat(auto-fill,minmax(112px,1fr));}
+  #modes button[data-mode]{
+    text-align:left;padding:14px 14px 12px;border-radius:12px;min-height:72px;
+    display:flex;flex-direction:column;justify-content:flex-end;gap:6px;
+    background:linear-gradient(180deg,#1a1713,#12100e);
+    position:relative;overflow:hidden;letter-spacing:.08em;font-size:11px;}
+  #modes button[data-mode]::before{
+    content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
+    background:var(--tile, var(--accent));}
+  #modes button[data-mode]:hover{transform:translateY(-1px);border-color:#4a4338;}
+  #modes button[data-mode].active{background:var(--tile,#e8c36a);color:#120e08;border-color:transparent;}
+  #modes button[data-mode].active::before{background:#120e08;}
+  #modes button[data-mode] small{display:block;font-size:9px;letter-spacing:.04em;
+    font-weight:400;opacity:.7;line-height:1.35;text-transform:none;}
+  #modes button.takeover{border-color:#7a2230;color:#ff8b98;}
+  #modes button.takeover:hover{border-color:#eb2d41;}
+  #modes button.takeover.active{background:#eb2d41;color:#fff;}
+  .demos{width:100%;}
+  .demos summary{font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.1em;
+                 color:var(--dim);cursor:pointer;padding:6px 0;list-style:none;}
   .demos summary::-webkit-details-marker{display:none;}
   .demos summary:hover{color:var(--accent);}
-  .demos .modes{margin-top:8px;}
+  .demos .tiles{margin-top:8px;}
 
-  /* GAME DAY is a takeover, not a peer of the other modes -- it seizes the
-     whole panel and hands it back on its own. Its own colour says so
-     before the label is read, matching engines.GAMEDAY_ACCENT. */
-  #modes button.takeover{border-color:#7a2230;color:#ff5f72;font-weight:700;letter-spacing:.1em;}
-  #modes button.takeover:hover{border-color:#eb2d41;color:#ff8b98;}
-  /* ID-qualified purely for robustness against any future generic button
-     rule; plain `button.takeover.active` already wins on specificity. */
-  #modes button.takeover.active{background:#eb2d41;color:#fff;border-color:#eb2d41;}
   .pad{display:grid;grid-template-columns:repeat(3,56px);grid-template-rows:repeat(3,56px);gap:7px;}
   .pad button{font-size:19px;padding:0;}
   .pad .sp{visibility:hidden;}
 
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;
-        padding:14px;width:100%;max-width:420px;}
-  .side .card{max-width:none;}
-  .card h2{font-size:10.5px;letter-spacing:.18em;color:var(--dim);margin:0 0 11px;
-           text-transform:uppercase;font-weight:600;}
+  .sheet-dock{display:flex;flex-direction:column;gap:12px;margin:0 0 28px;}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;
+        padding:16px 16px 14px;width:100%;}
+  .card h2{font-family:ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:.18em;
+           color:var(--dim);margin:0 0 12px;text-transform:uppercase;font-weight:600;}
   .row{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:9px;}
   .row:last-child{margin-bottom:0;}
-  label{font-size:11px;color:var(--dim);letter-spacing:.05em;min-width:74px;}
+  label{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--dim);
+        letter-spacing:.05em;min-width:74px;}
   .side label{min-width:0;display:block;margin-bottom:5px;}
-  select,input[type=range]{font-family:inherit;font-size:11.5px;background:#101012;
-    color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 8px;flex:1;min-width:0;}
+  select,input[type=text],input[type=password],input[type=range],textarea{
+    font-size:11.5px;background:#0c0b09;color:var(--ink);
+    border:1px solid var(--line);border-radius:8px;padding:7px 9px;flex:1;min-width:0;}
+  textarea{width:100%;resize:vertical;}
   .side select,.side input[type=range]{width:100%;flex:none;}
   input[type=range]{padding:0;accent-color:var(--accent);}
-  input[type=file]{font-family:inherit;font-size:11px;color:var(--dim);max-width:100%;}
+  input[type=file]{font-size:11px;color:var(--dim);max-width:100%;}
   video#src{width:100%;border-radius:9px;background:#000;margin-top:9px;display:none;}
   video#src.show{display:block;}
-  .hint{font-size:10px;color:var(--dim);letter-spacing:.05em;line-height:1.65;}
+  .hint{font-family:ui-monospace,Menlo,monospace;font-size:10px;color:var(--dim);
+        letter-spacing:.04em;line-height:1.65;}
   .shotwrap{position:relative;width:100%;border:1px solid var(--line);border-radius:9px;
             overflow:hidden;background:#000;min-height:74px;touch-action:none;}
   .shotwrap img{width:100%;display:block;opacity:.85;}
-  #sel{position:absolute;border:1.5px solid var(--accent);background:rgba(61,220,132,.18);
+  #sel{position:absolute;border:1.5px solid var(--accent);background:rgba(232,195,106,.18);
        display:none;pointer-events:none;}
   .shothint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
             font-size:10px;color:var(--dim);letter-spacing:.08em;text-align:center;padding:8px;}
-  .err{font-size:10.5px;color:var(--red);line-height:1.55;max-width:420px;text-align:center;}
+  .err{font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:var(--red);
+       line-height:1.55;max-width:420px;}
   .hide{display:none!important;}
-  .badge{font-size:9.5px;letter-spacing:.1em;color:var(--accent);}
+  .badge{font-family:ui-monospace,Menlo,monospace;font-size:9.5px;letter-spacing:.1em;color:var(--accent);}
   .vlist{display:flex;flex-direction:column;gap:5px;max-height:160px;overflow-y:auto;}
   .vlist button{width:100%;text-align:left;font-size:11px;padding:8px 10px;}
   .vlist .empty{font-size:10.5px;color:var(--dim);padding:4px 0;}
-  @media (max-width:640px){
-    .side{position:static;width:100%;order:-1;}
-    .shell{flex-direction:column;}
+  .side{position:sticky;top:14px;}
+  @media (max-width:900px){
+    .page{grid-template-columns:1fr;}
+    .side{position:static;order:3;}
+    .pair{grid-template-columns:1fr;justify-items:center;text-align:center;}
+    #hero-lede{margin-left:auto;margin-right:auto;}
+    .status,.now .modes{justify-content:center;}
+    .device{justify-self:center;}
   }
 </style>
 </head>
 <body>
-  <h1>HENDERBURGH&nbsp;ARCADE</h1>
-  <div class="sub">apollo m-1 · 64×64 · <a href="/setup" style="color:inherit;">first-time setup →</a></div>
+  <header class="mast">
+    <div class="brand">
+      <span class="dot" id="livedot"></span>
+      <div>
+        <h1>HENDERBURGH</h1>
+        <div class="sub">Companion · paired to the 64×64</div>
+      </div>
+    </div>
+    <nav>
+      <a href="/remote">Phone</a>
+      <a href="/setup">Setup</a>
+    </nav>
+  </header>
 
-  <div class="shell">
-  <div class="main">
-  <div class="screen"><canvas id="c" width="64" height="64"></canvas></div>
-  <div class="status"><span>MODE&nbsp;<b id="mode">—</b></span><span>SCORE&nbsp;<b id="score">0</b></span>
-    <span>BG&nbsp;<b id="bg-label">NONE</b></span></div>
+  <div class="page">
+  <div class="col">
+  <section class="pair">
+    <div class="device">
+      <canvas id="c" width="64" height="64"></canvas>
+    </div>
+    <div class="now">
+      <p class="kicker" id="hero-kicker">ON THE GLASS</p>
+      <h2 id="hero-name">THE BOARD</h2>
+      <p id="hero-lede">This page is the companion. The panel is the screen. Pick a face, set what it watches, leave it on the wall.</p>
+      <div class="status"><span>MODE&nbsp;<b id="mode">—</b></span><span>SCORE&nbsp;<b id="score">0</b></span>
+        <span>BG&nbsp;<b id="bg-label">NONE</b></span></div>
+      <button id="power" class="power off">⏻&nbsp;&nbsp;TURN ON</button>
+      <div class="pstate" id="pstate">panel released</div>
+      <div class="modes" id="gamectl" style="margin-top:12px;">
+        <button id="pausebtn">⏸ Pause <span class="hint">P</span></button>
+        <button id="homebtn">⌂ Home <span class="hint">Esc</span></button>
+      </div>
+      <div id="err" class="err hide" style="margin-top:10px;"></div>
+      <div id="gamepad" class="hide" style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;margin-top:12px;">
+        <div class="pad">
+          <div class="sp"></div><button data-in="up">▲</button><div class="sp"></div>
+          <button data-in="left">◀</button><button data-in="rotate">⟳</button><button data-in="right">▶</button>
+          <div class="sp"></div><button data-in="down">▼</button><div class="sp"></div>
+        </div>
+        <button data-in="drop">⤓ DROP</button>
+        <div class="hint">Arrows / WASD · ↑ rotate · Space drop</div>
+      </div>
+    </div>
+  </section>
 
-  <button id="power" class="power off">⏻&nbsp;&nbsp;TURN ON</button>
-  <div class="pstate" id="pstate">panel released</div>
-
-  <!-- Pause / Home. Key bindings alone are not discoverable, so the two
-       functions that interrupt a game get real buttons on both surfaces. -->
-  <div class="modes" id="gamectl">
-    <button id="pausebtn">⏸ Pause <span class="hint">P</span></button>
-    <button id="homebtn">⌂ Home <span class="hint">Esc</span></button>
-  </div>
-
-  <!-- Mode picker, GROUPED. A flat list of 36 buttons stopped being
-       navigable once the data modes landed; these are four genuinely
-       different kinds of thing and the grouping says so. -->
   <div id="modes">
     <div class="group">
-      <h3>Games</h3>
-      <div class="modes">
-      <button data-mode="snake">▶ Snake</button>
-      <button data-mode="tetris">▶ Tetris</button>
-      <button data-mode="pong">▶ Pong</button>
-      <button data-mode="breakout">▶ Breakout</button>
-      <button data-mode="tron">▶ Tron</button>
-      <button data-mode="flappy">▶ Flappy</button>
-      <button data-mode="invaders">▶ Invaders</button>
-      <button data-mode="dodge">▶ Dodge</button>
-      <button data-mode="2048">▶ 2048</button>
-      <button data-mode="life">▶ Life</button>
-      <button data-mode="brawler">▶ Brawler</button>
-      <button data-mode="chase">▶ Chase</button>
-      <button data-mode="tunnel">▶ Tunnel</button>
-      <button data-mode="powder">▶ Powder</button>
+      <h3>Director</h3>
+      <p class="lede">The show. Not a playlist — it decides what is worth the glass.</p>
+      <div class="tiles">
+        <button data-mode="ambient" style="--tile:#b060ff">AMBIENT<small>AUTO / WORLD / ARCADE / MIX. Live games lock DETAIL.</small></button>
+        <button data-mode="clock" style="--tile:#78c8ff">CLOCK<small>The resting face. Analog or digital. FACE flips.</small></button>
+        <button data-mode="ownernote" style="--tile:#ffd66e">TODAY<small>One 84-character sticky. Vestaboard, not Evernote.</small></button>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Sky</h3>
+      <p class="lede">What is actually over the house. Empty stays a scope, never a fake board.</p>
+      <div class="tiles">
+        <button data-mode="flights" style="--tile:#78c8ff">FLIGHTS<small>Polar radar. Window cone. Climb and descent as real fpm.</small></button>
+        <button data-mode="followflight" style="--tile:#ffc85a">FOLLOW<small>ICAO only — UAL123, not UA123. Ambient if airborne.</small></button>
+        <button data-mode="departures" style="--tile:#78c8ff">MYR LIVE<small>To and from home. Not a scheduled FIDS.</small></button>
+        <button data-mode="satellite" style="--tile:#ffe23c">ISS<small>Pass list and live sky. Dead host is not an empty sky.</small></button>
+        <button data-mode="weather" style="--tile:#5abeff">WEATHER<small>Hourly glance. Radar when a cell is real.</small></button>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Play</h3>
+      <p class="lede">The scorebug, not the ticker. DETAIL when it is live.</p>
+      <div class="tiles">
+        <button data-mode="sports" style="--tile:#ff8c28">SPORTS<small>Empty card. K-zone. Last pitch. Scoring takeovers.</small></button>
+        <button data-mode="gameday" class="takeover" style="--tile:#eb2d41">GAME DAY<small>Takes the night. Hands the panel back when it ends.</small></button>
+        <button data-mode="ticker" style="--tile:#3ce66e">TICKER<small>Your symbols. Left/right steps. HOLD parks.</small></button>
+        <button data-mode="nowplaying" style="--tile:#ff5ac8">MUSIC<small>A named track only. Last.fm is set below.</small></button>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Desk</h3>
+      <p class="lede">Reading and the log. One page per glance.</p>
+      <div class="tiles">
+        <button data-mode="news" style="--tile:#ffe23c">NEWS<small>Headlines. HOLD parks the tape.</small></button>
+        <button data-mode="events" style="--tile:#ffbe5a">EVENTS<small>What just happened on this board.</small></button>
+        <button data-mode="blog" style="--tile:#b060ff">BLOG<small>The guestbook. Left/right walks posts.</small></button>
+      </div>
+    </div>
+
+    <div class="group">
+      <h3>Arcade</h3>
+      <p class="lede">Fourteen native games. ARCADE ambient plays them as living art.</p>
+      <div class="tiles games">
+      <button data-mode="snake" style="--tile:#33ffb0">SNAKE</button>
+      <button data-mode="tetris" style="--tile:#00c8ff">TETRIS</button>
+      <button data-mode="pong" style="--tile:#8fffc7">PONG</button>
+      <button data-mode="breakout" style="--tile:#ff5a78">BREAKOUT</button>
+      <button data-mode="tron" style="--tile:#00fff2">TRON</button>
+      <button data-mode="flappy" style="--tile:#ffe23c">FLAPPY</button>
+      <button data-mode="invaders" style="--tile:#ff33c8">INVADERS</button>
+      <button data-mode="dodge" style="--tile:#ffd23c">DODGE</button>
+      <button data-mode="2048" style="--tile:#b060ff">2048</button>
+      <button data-mode="life" style="--tile:#7dffb0">LIFE</button>
+      <button data-mode="brawler" style="--tile:#50eb82">BRAWLER</button>
+      <button data-mode="chase" style="--tile:#ffe23c">CHASE</button>
+      <button data-mode="tunnel" style="--tile:#786eff">TUNNEL</button>
+      <button data-mode="powder" style="--tile:#e6be5a">POWDER</button>
       </div>
       <details class="demos">
-        <summary>Auto-play demos — the panel plays itself</summary>
-        <div class="modes">
-      <button data-mode="snake-demo">🤖 Snake auto</button>
-      <button data-mode="tetris-demo">🤖 Tetris auto</button>
-      <button data-mode="pong-demo">🤖 Pong auto</button>
-      <button data-mode="breakout-demo">🤖 Breakout auto</button>
-      <button data-mode="tron-demo">🤖 Tron auto</button>
-      <button data-mode="flappy-demo">🤖 Flappy auto</button>
-      <button data-mode="invaders-demo">🤖 Invaders auto</button>
-      <button data-mode="dodge-demo">🤖 Dodge auto</button>
-      <button data-mode="2048-demo">🤖 2048 auto</button>
-      <button data-mode="life-demo">🤖 Life auto</button>
-      <button data-mode="brawler-demo">🤖 Brawler auto</button>
-      <button data-mode="chase-demo">🤖 Chase auto</button>
-      <button data-mode="tunnel-demo">🤖 Tunnel auto</button>
-      <button data-mode="powder-demo">🤖 Powder auto</button>
+        <summary>Self-playing demos — the panel drives itself</summary>
+        <div class="tiles games">
+      <button data-mode="snake-demo">SNAKE AUTO</button>
+      <button data-mode="tetris-demo">TETRIS AUTO</button>
+      <button data-mode="pong-demo">PONG AUTO</button>
+      <button data-mode="breakout-demo">BREAKOUT AUTO</button>
+      <button data-mode="tron-demo">TRON AUTO</button>
+      <button data-mode="flappy-demo">FLAPPY AUTO</button>
+      <button data-mode="invaders-demo">INVADERS AUTO</button>
+      <button data-mode="dodge-demo">DODGE AUTO</button>
+      <button data-mode="2048-demo">2048 AUTO</button>
+      <button data-mode="life-demo">LIFE AUTO</button>
+      <button data-mode="brawler-demo">BRAWLER AUTO</button>
+      <button data-mode="chase-demo">CHASE AUTO</button>
+      <button data-mode="tunnel-demo">TUNNEL AUTO</button>
+      <button data-mode="powder-demo">POWDER AUTO</button>
         </div>
       </details>
     </div>
 
     <div class="group">
-      <h3>Data &amp; ambient</h3>
-      <div class="modes">
-      <button data-mode="clock">🕐 Clock</button>
-      <button data-mode="ticker">📈 Ticker</button>
-      <button data-mode="satellite">🛰 ISS</button>
-      <button data-mode="flights">✈ Flights</button>
-      <button data-mode="followflight">🎯 Follow flight</button>
-      <button data-mode="departures">🛫 Departure board</button>
-      <button data-mode="sports">🏆 Sports</button>
-      <button data-mode="news">📰 News</button>
-      <button data-mode="weather">🌤 Weather</button>
-      <button data-mode="blog">💬 Guestbook</button>
-      <button data-mode="events">🕒 Recent Events</button>
-      <button data-mode="nowplaying">🎵 Now Playing</button>
-      <button data-mode="ownernote">📝 Note</button>
-      <button data-mode="ambient">🔄 Ambient</button>
-      </div>
-    </div>
-
-    <div class="group">
-      <h3>Event</h3>
-      <div class="modes">
-        <button data-mode="gameday" class="takeover">🥊 Game Day</button>
-      </div>
-      <div class="hint">Takes over the whole panel for one event and hands it
-        back when the event ends. Only a severe weather alert interrupts it.</div>
-    </div>
-
-    <div class="group">
-      <h3>Media</h3>
-      <div class="modes">
-      <button data-mode="mirror">🖥 Mirror</button>
-      <button data-mode="video">🎬 Video</button>
-      <button data-mode="cast">📱 Cast</button>
+      <h3>Stage</h3>
+      <p class="lede">Put something else on the glass. The panel stays 64×64.</p>
+      <div class="tiles">
+        <button data-mode="mirror" style="--tile:#8ab4ff">MIRROR<small>One window, not the whole desk.</small></button>
+        <button data-mode="video" style="--tile:#ff8c5a">VIDEO<small>A file on this Mac. Loops until you leave.</small></button>
+        <button data-mode="cast" style="--tile:#ff5ac8">CAST<small>From this browser. Keep the page awake.</small></button>
       </div>
     </div>
   </div>
 
-  <div id="err" class="err hide"></div>
-
-  <!-- Game controls -->
-  <div id="gamepad" class="hide" style="display:flex;flex-direction:column;align-items:center;gap:8px;">
-    <div class="pad">
-      <div class="sp"></div><button data-in="up">▲</button><div class="sp"></div>
-      <button data-in="left">◀</button><button data-in="rotate">⟳</button><button data-in="right">▶</button>
-      <div class="sp"></div><button data-in="down">▼</button><div class="sp"></div>
-    </div>
-    <button data-in="drop">⤓ DROP</button>
-    <div class="hint">Keyboard: arrows / WASD · ↑ rotate · Space drop</div>
-  </div>
-
-  <!-- ============ PER-MODE CONFIG ============
-       Every one of these had a working API endpoint and NO user interface,
-       so the only way to set a favourite team or an RSS feed was a raw
-       curl. Same shape as the mirror/video/cast cards: shown when the mode
-       it belongs to is selected. -->
+  <div class="sheet-dock">
+  <!-- Per-mode companion sheets. Shown when that face is on the glass. -->
 
   <div id="tickercard" class="card hide">
     <h2>Ticker — watchlist</h2>
@@ -262,11 +338,13 @@
       <button id="ff-clear">Stop</button>
       <span id="ff-msg" class="badge"></span></div>
     <div id="ff-now" class="hint"></div>
-    <div class="hint">Real flight number/ICAO callsign (airline code +
-      number, e.g. UAL123 — not the IATA form UA123), tracked anywhere
-      it's currently airborne, not just nearby. If it isn't broadcasting
-      right now the panel says so honestly instead of guessing a
-      position.</div>
+    <div class="hint">Type the ICAO radio callsign: airline <b>three
+      letters</b> + number. <b>UAL123</b> is United. <b>UA123</b> is
+      not — that is the IATA ticket code and will read NOT AIRBORNE
+      even if the plane is up. Same trap: DAL not DL, SWA not WN,
+      AAL not AA. The phone shows LOOKING / NO SIGNAL / NOT AIRBORNE
+      as three different facts. Ambient only dwells when it is actually
+      airborne.</div>
   </div>
 
   <div id="favaccard" class="card hide">
@@ -303,15 +381,18 @@
   </div>
 
   <div id="notecard" class="card hide">
-    <h2>Note</h2>
-    <div class="row"><textarea id="note-text" rows="3" style="flex:1"
-      placeholder="A short message that stays on the panel until you change or clear it"></textarea></div>
+    <h2>Today — one work note</h2>
+    <div class="row"><textarea id="note-text" rows="4" style="flex:1"
+      placeholder="THE ONE THING TO HOLD ON THE WALL"></textarea></div>
+    <div id="note-preview" class="hint">0 / 84 panel characters</div>
     <div class="row"><button id="note-save">Save</button>
       <button id="note-clear">Clear</button>
       <span id="note-msg" class="badge"></span></div>
-    <div class="hint">Your own words, persistent — unlike Home
-      Assistant notifications (which auto-clear) or the guestbook
-      (which mirrors visitor posts from the site).</div>
+    <div class="hint">This is a Vestaboard, not a notebook. The panel
+      can draw 6 lines × 14 glyphs (84 characters), uppercase only.
+      Type the one reminder, the one job, the one line you need to see
+      from across the room. Ambient shows it whenever it is set. Fold
+      happens at save — what you see in the count is what the wall holds.</div>
   </div>
 
   <div id="ambientcard" class="card hide">
@@ -524,9 +605,9 @@
     <div class="hint">Pick a video from your phone and press play — it streams straight
       to the LED panel. Keep this page open and the screen awake while it plays.</div>
   </div>
-  </div><!-- /.main -->
+  </div><!-- /.sheet-dock -->
+  </div><!-- /.col -->
 
-  <!-- Right rail: Home Assistant dynamic backgrounds -->
   <aside class="side">
     <!-- Status overview — "look at this ONE page and know at a glance
          what the device is doing right now". Current mode + whether a
@@ -594,7 +675,7 @@
       <div class="hint" id="keylegend"></div>
     </div>
   </aside>
-  </div><!-- /.shell -->
+  </div><!-- /.page -->
 
 <script>
 const $ = id => document.getElementById(id);
@@ -675,12 +756,67 @@ const MODE_LABELS = {
   planewatch: 'PLANE IN WINDOW', notify: 'HA NOTIFICATION', gameday: 'GAME DAY',
   off: 'off (released to lighting)', menu: 'menu', boot: 'starting…',
 };
+const HERO = {
+  ambient: ['AMBIENT', 'The director. AUTO is a show. WORLD walks the sky. ARCADE plays itself. MIX is yours.'],
+  clock: ['CLOCK', 'The resting face. Analog or digital. Rain and ISS stay honest.'],
+  ownernote: ['TODAY', 'One work sticky. 84 characters. Ambient holds it when it is set.'],
+  flights: ['FLIGHTS', 'Polar radar of what is really up. Climb and descent only when ADS-B says so.'],
+  followflight: ['FOLLOW', 'One ICAO callsign. Type UAL123, not UA123. Ambient only if it is airborne.'],
+  departures: ['MYR LIVE', 'Airborne traffic whose route names home. Not a scheduled board.'],
+  satellite: ['ISS', 'Pass list and live sky. A dead catalogue is not an empty sky.'],
+  weather: ['WEATHER', 'Hourly when the sky is quiet. Radar when a cell is real.'],
+  sports: ['SPORTS', 'The scorebug. DETAIL when it is live. White is the score until the clock earns it.'],
+  gameday: ['GAME DAY', 'Takes the night. Hands the panel back when the event ends.'],
+  ticker: ['TICKER', 'Your symbols. Nothing invented. HOLD parks the tape.'],
+  nowplaying: ['MUSIC', 'A named track only. Last.fm is set on this page.'],
+  news: ['NEWS', 'Headlines. HOLD parks.'],
+  events: ['EVENTS', 'What this board just saw.'],
+  blog: ['BLOG', 'The guestbook. Left and right walk posts.'],
+  snake: ['SNAKE', 'Walls kill. Grow. The panel is the cabinet.'],
+  tetris: ['TETRIS', 'Hold, drop, lock. Same keys as the phone.'],
+  pong: ['PONG', 'Alcorn speed law. The ball is the point.'],
+  breakout: ['BREAKOUT', 'The brick field. Same cabinet as the rest.'],
+  tron: ['TRON', 'Light cycles. A night gallery face.'],
+  flappy: ['FLAPPY', 'One button. Honest gravity.'],
+  invaders: ['INVADERS', 'Rows descend. You shoot.'],
+  dodge: ['DODGE', 'Stay out of the way.'],
+  '2048': ['2048', 'Slide. Merge. The board is 64×64.'],
+  life: ['LIFE', 'Conway. A night gallery face.'],
+  brawler: ['BRAWLER', 'A fight on the glass.'],
+  chase: ['CHASE', 'Four hunters. Different rules.'],
+  tunnel: ['TUNNEL', 'Fly the gap. A night gallery face.'],
+  powder: ['POWDER', 'Draw on the preview. The canvas is the panel.'],
+  mirror: ['MIRROR', 'One window. A whole desk is unreadable at 64×64.'],
+  video: ['VIDEO', 'A file on this Mac. Loops until you leave.'],
+  cast: ['CAST', 'From this browser. Keep the page awake.'],
+  menu: ['MENU', 'The shelf on the glass.'],
+  boot: ['BOOT', 'Curtain up.'],
+  planewatch: ['IN THE WINDOW', 'Something is crossing the glass right now.'],
+  notify: ['NOTIFY', 'A banner that earned the panel.'],
+  off: ['RELEASED', 'The arcade let go. Normal lighting owns the panel.'],
+};
+function renderHero(mode, paused){
+  const base = (mode || '').split('-')[0];
+  const pair = HERO[base] || HERO[mode] || [MODE_LABELS[mode] || (mode || 'THE BOARD').toUpperCase(),
+    'This page sets the face. The panel is the screen.'];
+  const demo = (mode || '').endsWith('-demo');
+  if ($('hero-name')) $('hero-name').textContent = pair[0] + (demo ? ' · AUTO' : '') + (paused ? ' · PAUSED' : '');
+  if ($('hero-lede')) $('hero-lede').textContent = pair[1];
+  if ($('hero-kicker')) $('hero-kicker').textContent =
+    mode === 'off' || !mode ? 'STANDBY' : (mode === 'planewatch' || mode === 'notify' ? 'TAKEOVER' : 'ON THE GLASS');
+  const tile = document.querySelector('[data-mode="'+base+'"]');
+  const c = tile && getComputedStyle(tile).getPropertyValue('--tile').trim();
+  if ($('hero-name')) $('hero-name').style.color = c || '';
+}
 function renderStatusMode(mode, paused){
   const el = $('st-mode'); if (!el) return;
   const label = MODE_LABELS[mode] || (mode || '—').toUpperCase();
   el.textContent = label + (paused ? ' · PAUSED' : '');
   el.style.color = (mode === 'planewatch' || mode === 'notify')
     ? 'var(--red)' : 'var(--accent)';
+  renderHero(mode, paused);
+  const dot = $('livedot');
+  if (dot) dot.classList.toggle('live', !!(mode && mode !== 'off'));
 }
 async function pollStatusExtras(){
   try{
@@ -710,6 +846,14 @@ async function pollStatusExtras(){
 }
 pollStatusExtras();
 setInterval(pollStatusExtras, 15000);
+fetch('/api/catalog').then(r => r.json()).then(j => {
+  (j.modes || []).forEach(m => {
+    if (!HERO[m.name] && (m.label || m.note))
+      HERO[m.name] = [m.label || m.name.toUpperCase(), m.note || ''];
+    else if (HERO[m.name] && m.label) HERO[m.name][0] = m.label;
+  });
+  if (curMode) renderHero(curMode);
+}).catch(() => {});
 
 /* ---------- do not disturb ---------- */
 function renderDnd(enabled){
@@ -895,7 +1039,10 @@ async function loadFollow(){
          : (j.airborne === true
              ? ('Airborne now' + (j.aircraft && j.aircraft.alt_ft != null
                  ? ('  ·  ' + Math.round(j.aircraft.alt_ft) + 'ft') : ''))
-             : 'Not currently airborne'); }catch(_){}
+             : (j.airborne === false
+                 ? 'Not currently airborne — still watching'
+                 : (j.err ? ('No signal: ' + j.err + ' — still looking')
+                          : 'Looking for this flight'))); }catch(_){}
 }
 $('ff-save').addEventListener('click', async () => {
   const j = await (await post('/api/flights/follow', {callsign: $('ff-callsign').value})).json();
@@ -940,13 +1087,27 @@ $('np-mic-only').addEventListener('change', async () => {
   loadNowPlaying();
 });
 
+function paintNotePreview(j){
+  const el = $('note-preview');
+  if (!el) return;
+  const chars = (j && typeof j.chars === 'number') ? j.chars
+    : ($('note-text').value || '').trim().length;
+  const budget = (j && j.budget) || 84;
+  const fits = j && typeof j.fits === 'boolean' ? j.fits : chars <= budget;
+  el.textContent = chars + ' / ' + budget + ' panel characters'
+    + (fits ? '' : ' — over budget, wall will crop');
+  el.style.color = fits ? '' : '#e07070';
+}
 async function loadNote(){
   try{ const j = await (await fetch('/api/note')).json();
-       if (!$('note-text').matches(':focus')) $('note-text').value = j.text || ''; }catch(_){}
+       if (!$('note-text').matches(':focus')) $('note-text').value = j.text || '';
+       paintNotePreview(j); }catch(_){}
 }
+$('note-text').addEventListener('input', () => paintNotePreview());
 $('note-save').addEventListener('click', async () => {
   const j = await (await post('/api/note', {text: $('note-text').value})).json();
-  say('note-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
+  say('note-msg', j.ok === false ? (j.error || 'error')
+    : (j.fits === false ? 'saved — over 84, wall crops' : 'saved'), j.ok !== false);
   loadNote();
 });
 $('note-clear').addEventListener('click', async () => {
@@ -956,18 +1117,10 @@ $('note-clear').addEventListener('click', async () => {
   loadNote();
 });
 
-const AM_LABEL = {
-  flights:'FLIGHTS', satellite:'ISS', nowplaying:'MUSIC', weather:'WEATHER',
-  sports:'SPORTS', ticker:'TICKER', news:'NEWS', blog:'BLOG',
-  life:'LIFE', tunnel:'TUNNEL', tron:'TRON', powder:'POWDER',
-  departures:'BOARD', events:'EVENTS', ownernote:'NOTE',
-  followflight:'FOLLOW', clock:'CLOCK',
-  snake:'SNAKE', pong:'PONG', breakout:'BREAKOUT', chase:'CHASE',
-  flappy:'FLAPPY', invaders:'INVADERS', dodge:'DODGE', tetris:'TETRIS',
-  '2048':'2048', brawler:'BRAWLER',
+const AM_LABEL = {};
 };
 const AM_HINT = {
-  auto: 'AUTO walks every data mode that has something to show. A live favorite locks sports DETAIL. Night or a quiet sky adds the gallery.',
+  auto: 'AUTO is a show: sky, play, board, then today\'s note if set, then one page. A live favorite locks sports DETAIL. Follow only if that flight is airborne. Night gallery 2–7am.',
   world: 'WORLD is every glance mode — flights, ISS, weather radar, sports DETAIL, music, follow, board, ticker, news, events, blog, note, clock.',
   arcade: 'ARCADE is every self-playing game as living art.',
   mix: 'MIX is only what you tick below, in that order. Live sports still open in DETAIL.',
@@ -979,6 +1132,7 @@ async function loadAmbient(){
     document.querySelectorAll('#am-channels [data-am]').forEach(b =>
       b.classList.toggle('active', b.dataset.am === ch));
     $('am-hint').textContent = AM_HINT[ch] || AM_HINT.auto;
+    Object.assign(AM_LABEL, j.labels || {});
     const mix = new Set(j.mix || []);
     const names = j.mixable || Object.keys(AM_LABEL);
     $('am-mix').innerHTML = names.map(n =>
@@ -1294,7 +1448,8 @@ function syncUI(){
   // Playable engines only (not *-demo and not media modes).
   const base = (curMode || '').split('-')[0];
   const PLAYABLE = new Set(['snake','tetris','pong','breakout','tron','flappy',
-                            'invaders','dodge','2048','life']);
+                            'invaders','dodge','2048','life',
+                            'brawler','chase','tunnel','powder']);
   const playing = PLAYABLE.has(base) && curMode && !curMode.endsWith('-demo');
   $('gamepad').classList.toggle('hide', !playing);
   const mirroring = curMode === 'mirror';

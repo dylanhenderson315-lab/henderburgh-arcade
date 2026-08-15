@@ -22,11 +22,13 @@ from collections import deque
 from pathlib import Path
 
 import ambient
+import catalog
 import audio_sync
 import dnd
 import events_log
 import nowplaying
 import ownernote
+import paneltext
 import market
 import satellite
 import skypass
@@ -354,7 +356,18 @@ def wrap_text(text, max_px, max_lines=None, scale=1):
         else:
             if cur:
                 lines.append(cur)
-            cur = w
+            if text_w(w, scale) <= max_px:
+                cur = w
+            else:
+                piece = ""
+                for ch in w:
+                    t2 = piece + ch
+                    if piece and text_w(t2, scale) > max_px:
+                        lines.append(piece)
+                        piece = ch
+                    else:
+                        piece = t2
+                cur = piece
     if cur:
         lines.append(cur)
     if max_lines is not None:
@@ -1001,15 +1014,22 @@ def draw_scorebug_bars(buf, y, comps, row_h=8, possession=None):
         if _comp_matches_tag(c, possession):
             for by in range(row_h):
                 put_px(buf, 3, y + by, (255, 255, 255))
+        nx = 6
+        seed = c.get("seed")
+        if isinstance(seed, int) and 1 <= seed <= 99:
+            # 3x5 has no '#'. Dim number on the rail is the seed.
+            stag = str(seed)
+            draw_text3x5(buf, nx, y + 2, stag, (28, 28, 32))
+            nx += text_w(stag) + 2
         abbr_txt = fit_text(c.get("abbr") or "", 30, 1)
-        draw_text3x5(buf, 6, y + 2, abbr_txt, ink)
+        draw_text3x5(buf, nx, y + 2, abbr_txt, ink)
         sc = c.get("score")
         sc_txt = "" if sc is None else str(sc)
         box_w = (text_w(sc_txt, 1) + 4) if sc_txt else 0
         bx0 = WIDTH - 3 - box_w
         rec = c.get("record")
         if rec:
-            aw = 6 + text_w(abbr_txt, 1) + 4
+            aw = nx + text_w(abbr_txt, 1) + 4
             avail = bx0 - 2 - aw
             if avail >= text_w(rec, 1):
                 draw_text3x5(buf, aw, y + 2, rec, ink)
@@ -1211,6 +1231,23 @@ def dim_hero_text_band(buf, x0, y0, x1, y1, factor=0.45):
             i = (y * WIDTH + x) * 3
             r, g, b = buf[i], buf[i + 1], buf[i + 2]
             put_px(buf, x, y, (int(r * factor), int(g * factor), int(b * factor)))
+
+
+def fill_plate(buf, x0, y0, x1, y1, color=(0, 0, 0)):
+    """Empty field. Names, records, and clocks sit on this -- never on
+    turf, wood, ice, paint, or an octagon. MLB's readability law."""
+    for y in range(max(0, y0), min(HEIGHT, y1)):
+        for x in range(max(0, x0), min(WIDTH, x1)):
+            put_px(buf, x, y, color)
+
+
+def draw_text_on_empty(buf, y, text, color, x_min=3):
+    """Punch a black plate, then draw. Returns the next y."""
+    if not text:
+        return y
+    fill_plate(buf, 2, max(0, y - 1), WIDTH - 2, min(HEIGHT, y + 6))
+    draw_text_centered(buf, y, text, color, x_min=x_min)
+    return y + 7
 
 
 # =============================================================================
@@ -1851,36 +1888,56 @@ def _sunburst_rays(buf, t, color, n=10):
                 put_px(buf, x, y, tuple(int(c * fade) for c in color))
 
 
-def _backdrop_sports(buf, t, color, moment=None):
-    """Rings + rotating rays -- stadium energy. The ORIGINAL burst,
-    unchanged, so the sports moments that already shipped look exactly
-    as they did before tiers existed.
+def _score_pip(buf, x, y, color):
+    """One bright mark -- a ball, a puck, a shot. Not a logo."""
+    for dx, dy in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)):
+        put_px(buf, x + dx, y + dy, color)
+    put_px(buf, x, y, (255, 255, 255))
 
-    ADDS a small per-sport identity icon as an accent, reusing the SAME
-    shape definition the header glyph draws (SPORT_ICONS / draw_diamond
-    for baseball), just at 2x scale -- the "one shape language, multiple
-    contexts" pattern, not a second design. Drawn in the top-left corner,
-    outside the centered text plate's reach, so it never collides with
-    the kind/line1/line2 block drawn afterward. The burst/ray backdrop
-    itself is UNCHANGED -- this only adds an accent on top of it, per
-    the "backdrop stays each mode's own visual language, only the
-    accent/detail varies" rule already used for the flights/satellite
-    backdrops."""
+
+def _backdrop_score_field(buf, t, color, sport):
+    """Mute sport geometry + a travelling pip. The graphic is the
+    sport; the text plate sits on empty over it. Same heroes DETAIL
+    already uses -- no second invented language."""
+    dim = tuple(int(c * 0.55) for c in color)
+    if sport == "baseball":
+        draw_baseball_diamond_hero(buf, _CX, 50, 9, [False, False, False],
+                                   on_col=color, off_col=dim, pulse=1.0)
+        _score_pip(buf, _CX, 48 - int((t * 1.5) % 26), color)
+    elif sport == "football":
+        draw_football_drive_strip(buf, 4, 44, WIDTH - 4, 56, phase=t * 0.2)
+        _score_pip(buf, 8 + int((t * 2.4) % (WIDTH - 20)), 50, color)
+    elif sport == "hockey":
+        draw_hockey_rink_hero(buf, 6, 42, WIDTH - 6, 58)
+        _score_pip(buf, 10 + int((t * 2.0) % (WIDTH - 24)), 50, color)
+    elif sport == "soccer":
+        draw_soccer_pitch_hero(buf, 6, 42, WIDTH - 6, 58)
+        _score_pip(buf, 10 + int((t * 2.0) % (WIDTH - 24)), 50, color)
+    elif sport == "basketball":
+        draw_basketball_court_hero(buf, 6, 42, WIDTH - 6, 58)
+        arc = abs(math.sin(t * 0.18))
+        _score_pip(buf, _CX, 56 - int(arc * 16), color)
+    elif sport == "mma":
+        draw_octagon_hero(buf, _CX, 48, 9)
+    elif sport == "golf":
+        _score_pip(buf, _CX, 50 - int((t * 1.3) % 22), color)
+    else:
+        _score_pip(buf, _CX, 50 - int((t * 1.3) % 20), color)
+
+
+def _backdrop_sports(buf, t, color, moment=None):
+    """Stadium energy over a mute sport field. Scoring takeovers
+    should read as THAT sport, not a generic firework."""
+    sport = (moment or {}).get("sport")
+    if sport:
+        _backdrop_score_field(buf, t, color, sport)
     _sunburst_rays(buf, t, color)
-    # Three rings at staggered radii/phases so they don't read as one
-    # blob -- each expands and wraps, giving continuous outward motion
-    # for the whole hold rather than a single pulse that goes static.
     for k in range(3):
         radius = ((t * 1.6 + k * 11) % (_MAX_BURST_R - 3)) + 3
         ring_color = tuple(int(c * (1.0 - 0.4 * (k / 3))) for c in color)
         _burst_ring(buf, t, radius, ring_color, phase=k * 1.9)
-    sport = (moment or {}).get("sport")
     icon_color = (255, 255, 255)
     if sport == "baseball":
-        # Reuse the existing diamond glyph directly rather than adding a
-        # redundant second baseball shape -- drawn "empty" (no real base
-        # state to show here) since a celebration accent isn't a live
-        # base/out state, just an identity mark.
         draw_diamond(buf, 4, 4, [False, False, False],
                      on_col=icon_color, off_col=tuple(int(c * 0.35) for c in icon_color))
     else:
@@ -1984,9 +2041,13 @@ def draw_celebration(buf, t, moment, total=CELEBRATION_TICKS):
     kind = str(moment.get("kind") or "")
     line1 = str(moment.get("line1") or "")
     line2 = str(moment.get("line2") or "")
-    lines = [ln for ln in (kind, line1, line2) if ln]
-    block_h = len(lines) * 8
-    y0 = _CY - block_h // 2 + 4
+    kscale = 2 if kind and text_w(kind, 2) <= WIDTH - 6 else 1
+    block_h = (5 * kscale + 3 if kind else 0)
+    if line1:
+        block_h += 8
+    if line2:
+        block_h += 8
+    y0 = max(4, _CY - block_h // 2)
     for y in range(max(0, y0 - 2), min(HEIGHT, y0 + block_h + 2)):
         for x in range(WIDTH):
             cur = buf[(y * WIDTH + x) * 3:(y * WIDTH + x) * 3 + 3]
@@ -1999,8 +2060,9 @@ def draw_celebration(buf, t, moment, total=CELEBRATION_TICKS):
     kind_color = (255, 255, 255) if flash else color
     y = y0
     if kind:
-        draw_text_centered(buf, y, fit_text(kind, WIDTH - 6, scale=1), kind_color)
-        y += 8
+        draw_text_centered(buf, y, fit_text(kind, WIDTH - 6, scale=kscale),
+                           kind_color, scale=kscale)
+        y += 5 * kscale + 3
     if line1:
         draw_text_centered(buf, y, fit_text(line1, WIDTH - 6), (235, 238, 245))
         y += 8
@@ -2112,7 +2174,7 @@ class BigMomentSource:
 
     def _set_big_moment(self, kind, line1, line2="", color=None,
                         tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport=None,
-                        scorer=None, shot_xy=None):
+                        scorer=None, shot_xy=None, event_id=None):
         """`kind`/`line1`/`line2` must already be paneltext.panel_text()-
         folded by the caller, same as every other externally-sourced
         string these engines draw. `scorer`, when present, is already a
@@ -2135,7 +2197,8 @@ class BigMomentSource:
         """
         moment = {"kind": kind, "line1": line1, "line2": line2,
                   "color": color or (255, 200, 40), "tier": tier, "system": system,
-                  "sport": sport, "scorer": scorer, "shot_xy": shot_xy}
+                  "sport": sport, "scorer": scorer, "shot_xy": shot_xy,
+                  "event_id": event_id}
         # RECENT EVENTS LOG (events_log.py) -- record every REAL big
         # sports moment right where the celebration text is finalized, so
         # the log shows the SAME real text the celebration itself draws,
@@ -7817,6 +7880,23 @@ class FlightEngine(Browsable, BigMomentSource):
         return cls.ALT_HIGH_COLOR
 
     @staticmethod
+    def _vrate_label(ac):
+        """Signed fpm when this aircraft is really climbing or
+        descending, else None. Uses the same phase threshold as the
+        arrow -- never a +0 from level-flight noise."""
+        if not ac:
+            return None
+        if ac.get("phase") not in (flights.PHASE_CLIMB, flights.PHASE_DESCEND):
+            return None
+        rate = ac.get("vrate_fpm")
+        if not isinstance(rate, (int, float)):
+            return None
+        n = int(round(rate))
+        if n == 0:
+            return None
+        return f"+{n}" if n > 0 else str(n)
+
+    @staticmethod
     def _ac_kind(ac):
         """Which scope icon this real aircraft gets -- from its real
         ADS-B emitter category (flights.CAT_*), plus real ICAO type
@@ -9905,18 +9985,25 @@ class FlightEngine(Browsable, BigMomentSource):
         # it can't fit on the stats row below (see below) -- composed once
         # here so the row is never drawn twice.
         alt_txt = f"{alt:.0f}FT" if isinstance(alt, (int, float)) else (typ or "-")
+        # Real vertical rate (FlightWall's Vr). Only when phase already
+        # classified climb/descend -- same threshold as the arrow, never
+        # a +0 from sensor noise. Rides the hero line so it does not
+        # fight MPH / distance on the stats row. Type yields to feet
+        # and rate -- a truncated "737 MAX 8" with no altitude is a lie.
+        vr = self._vrate_label(ac)
+        if vr and isinstance(alt, (int, float)):
+            with_vr = f"{alt_txt} {vr}"
+            if text_w(with_vr) <= WIDTH - 4:
+                alt_txt = with_vr
 
-        # The type only goes on the stats row if it genuinely fits in the
-        # gap between the two side stats. Centring it unconditionally
-        # overlapped both of them on a wide case (598MPH + 45MI NW) --
-        # caught by rendering, invisible to a code read. It's the least
-        # important of the three, so it yields.
         gap_start = 2 + text_w(left)
         gap_end = WIDTH - 2 - text_w(right)
         gap = gap_end - gap_start
         type_fits_inline = bool(typ) and gap >= text_w(typ) + 6
         if typ and not type_fits_inline and isinstance(alt, (int, float)):
-            alt_txt = f"{typ} {alt:.0f}FT"
+            with_type = f"{typ} {alt_txt}"
+            if text_w(with_type) <= WIDTH - 4:
+                alt_txt = with_type
 
         draw_text_centered(buf, 33, fit_text(alt_txt, WIDTH - 4), col)
         draw_text3x5(buf, 2, 41, left, self.INK_DIM)
@@ -10244,6 +10331,9 @@ class FollowFlightEngine:
 
         icon_col = rim(col, 0.94 + 0.06 * math.sin(time.time() * 2))
         draw_hero_silhouette(buf, WIDTH // 2, 24, kind, icon_col, scale=0.75)
+        phase = ac.get("phase")
+        if phase in (flights.PHASE_CLIMB, flights.PHASE_DESCEND):
+            draw_trend_arrow(buf, 3, 16, phase == flights.PHASE_CLIMB, col)
 
         reg = ac.get("reg") or ac.get("ident") or "-"
         draw_text_centered(buf, 36, fit_text(reg, WIDTH - 4), self.INK)
@@ -10269,6 +10359,12 @@ class FollowFlightEngine:
         right = f"{gs_txt} {hdg_txt}".strip()
         draw_text3x5(buf, 2, 53, left, self.INK_DIM)
         draw_text3x5(buf, WIDTH - 2 - text_w(right), 53, right, self.INK_DIM)
+        vr = FlightEngine._vrate_label(ac)
+        if vr:
+            gap0 = 2 + text_w(left)
+            gap1 = WIDTH - 2 - text_w(right)
+            if gap1 - gap0 >= text_w(vr) + 4:
+                draw_text3x5(buf, gap0 + (gap1 - gap0 - text_w(vr)) // 2, 53, vr, col)
 
         typ = (flights._type_name(ac.get("type")) or "").upper()
         airline = (route or {}).get("airline") if route else None
@@ -10339,6 +10435,8 @@ class DepartureBoardEngine(Browsable):
         self.airport = None
         self.rows = []      # [{status, ac}, ...]
         self.page = 0
+        self._feed_err = None
+        self._feed_age = None
         self._init_scroll()
 
     def has_content(self):
@@ -10365,7 +10463,10 @@ class DepartureBoardEngine(Browsable):
     def tick(self):
         self._scroll_tick()
         self.airport = flights.load_airport()
-        aircraft = (flights.FEED.get() or {}).get("aircraft") or []
+        snap = flights.FEED.get() or {}
+        self._feed_err = snap.get("err")
+        self._feed_age = snap.get("age")
+        aircraft = snap.get("aircraft") or []
         rows = []
         if self.airport:
             for ac in aircraft:
@@ -10392,7 +10493,12 @@ class DepartureBoardEngine(Browsable):
         pages = max(1, -(-n // self.ROWS_PER_PAGE))
         code = (self.airport or {}).get("code") or "HOME"
         tag = f"{self.page + 1}/{pages}" if n else None
-        draw_header(buf, f"{code} BOARD", self.ACCENT, right_tag=tag)
+        feed_age = getattr(self, "_feed_age", None)
+        feed_err = getattr(self, "_feed_err", None)
+        stale = bool((feed_age and feed_age > 60) or feed_err)
+        # LIVE TO/FROM, not a scheduled FIDS. Header name must match
+        # the data: airborne traffic whose route mentions home.
+        draw_header(buf, f"{code} LIVE", self.ACCENT, right_tag=tag, stale=stale)
         draw_divider(buf, 9)
 
         if not self.airport:
@@ -10403,8 +10509,14 @@ class DepartureBoardEngine(Browsable):
             return bytes(buf)
 
         if not n:
-            draw_text_centered(buf, 28, "NOTHING TO/FROM", self.INK_DIM)
-            draw_text_centered(buf, 36, code, self.INK_DIM)
+            if feed_err:
+                draw_text_centered(buf, 24, "NO SIGNAL", self.INK)
+                draw_text_centered(buf, 33, "FROM FEED", self.INK_DIM)
+                draw_text_centered(buf, 46, fit_text(str(feed_err).upper(),
+                                                     WIDTH - 4), self.INK_DIM)
+            else:
+                draw_text_centered(buf, 28, "NOTHING TO/FROM", self.INK_DIM)
+                draw_text_centered(buf, 36, code, self.INK_DIM)
             return bytes(buf)
 
         start = self.page * self.ROWS_PER_PAGE
@@ -10414,7 +10526,7 @@ class DepartureBoardEngine(Browsable):
             ac = r["ac"]
             status = r["status"]
             col = self.DEPARTING_COL if status == "DEPARTING" else self.ARRIVING_COL
-            ident = ac.get("reg") or ac.get("ident") or "UNKNOWN"
+            ident = ac.get("ident") or ac.get("reg") or "UNKNOWN"
             route = ac.get("route") or {}
             # DEPARTING shows where it's headed; ARRIVING shows where it
             # came from -- the informative end, same framing
@@ -11154,6 +11266,8 @@ class SportsEngine(Browsable, BigMomentSource):
         self.universal = []
         self.ucur = 0
         self.detail = None            # event id being shown expanded, or None
+        self._score_lock_id = None    # event a scoring takeover just landed on
+        self._score_lock_ticks = 0
         # Pinned golfer, resolved by the feed each poll.
         self.golf_pinned = None
         self.golf_event = None
@@ -11272,6 +11386,19 @@ class SportsEngine(Browsable, BigMomentSource):
                 ev["atbat_pitches"] = bun["atbat_pitches"]
             if bun.get("line_score"):
                 ev["line_score"] = bun["line_score"]
+        watch = None
+        if self.detail:
+            watch = next((e for e in self.universal if e.get("id") == self.detail), None)
+        if watch is None:
+            watch = self._current_event()
+        if watch and watch.get("sport") == "mma":
+            fight = self._mma_card_fight(watch)
+            card = (mma.FEED.get() or {}).get("card") or {}
+            if fight and fight.get("id"):
+                aids = [x.get("id") for x in (fight.get("fighters") or []) if x.get("id")]
+                if aids:
+                    mma.FEED.want_stats(fight["id"], card.get("id"), fight["id"],
+                                        aids, fight.get("state") == "in")
 
     def _refresh_matchup(self):
         """Read the cached pitcher-vs-batter bundle. ZERO I/O -- the
@@ -11333,21 +11460,46 @@ class SportsEngine(Browsable, BigMomentSource):
             return True
         return False
 
+    SCORE_LOCK_TICKS = 800    # ~40s at ambient 0.05s -- hold the scored game
+
+    def lock_scored_game(self, event_id):
+        """Identity lock after a scoring takeover. Not a list index."""
+        self._score_lock_id = event_id
+        self._score_lock_ticks = self.SCORE_LOCK_TICKS
+        if not event_id:
+            return
+        hit = next((i for i, e in enumerate(self.universal or [])
+                    if e.get("id") == event_id), None)
+        if hit is not None:
+            self.ucur = hit
+            self.detail = event_id
+            self._want_summary_ev(self.universal[hit])
+
     def adopt_live_detail(self, prefer_favorite=True):
         """Point ucur+detail at a live game so ambient shows DETAIL.
 
-        Favorite live game wins. Otherwise keep the current live DETAIL
-        if it is still live, else the first live universal event.
-        Returns True when a live game is now on DETAIL (or the pinned
-        team panel, if the favorite is live but not in the universal
-        list). Returns False when nothing is live -- DETAIL is cleared
-        so we never sit on a finished game's expanded view.
+        A scoring takeover lock wins while it lasts (that is the game
+        that just scored). Else favorite live. Else keep current live
+        DETAIL, else the first live universal event.
         """
+        if self._score_lock_ticks > 0:
+            self._score_lock_ticks -= 1
+            if self._score_lock_ticks <= 0:
+                self._score_lock_id = None
         live_idx = [i for i, e in enumerate(self.universal)
                     if e.get("live") or e.get("state") == "in"]
         target = None
+        lock = self._score_lock_id
+        if lock:
+            hit = next((i for i in live_idx
+                        if self.universal[i].get("id") == lock), None)
+            if hit is not None:
+                target = hit
+            else:
+                self._score_lock_id = None
+                self._score_lock_ticks = 0
         fg = self.data.get("favorite_game") if prefer_favorite else None
-        if fg and fg.get("state") == "in":
+        if target is None and fg and fg.get("state") == "in":
             eid = fg.get("event_id") or fg.get("id")
             if eid:
                 hit = next((i for i in live_idx
@@ -11372,6 +11524,10 @@ class SportsEngine(Browsable, BigMomentSource):
         if target is None:
             if self.detail is not None:
                 self.detail = None
+            # Favorite just ended -- next game is the honest rest face.
+            if self.data.get("favorite_next") and self.PANEL_TEAM in self.panels:
+                self.panel_i = self.panels.index(self.PANEL_TEAM)
+                return True
             return False
         self.ucur = target
         ev = self.universal[target]
@@ -11872,12 +12028,13 @@ class SportsEngine(Browsable, BigMomentSource):
         fg = self.data.get("favorite_game")
         fav = self.data.get("favorite") or {}
 
-        if not fg:
-            nxt = self.data.get("favorite_next")
+        nxt = self.data.get("favorite_next")
+        if (not fg) or (fg.get("state") == "post" and nxt):
             if nxt:
                 return self._frame_next(nxt)
-            sub = f"NO {fav.get('team_abbr','')} GAME TODAY".strip()
-            return self._frame_empty("PINNED TEAM", self._fit(sub, WIDTH - 4) or "NO GAME TODAY")
+            if not fg:
+                sub = f"NO {fav.get('team_abbr','')} GAME TODAY".strip()
+                return self._frame_empty("PINNED TEAM", self._fit(sub, WIDTH - 4) or "NO GAME TODAY")
 
         lg_col = self.LEAGUE_COLOR.get(fg["league"], self.INK_DIM)
         # LIVE is the thing a sports fan is actually scanning for, so it
@@ -11889,8 +12046,8 @@ class SportsEngine(Browsable, BigMomentSource):
                     stale=bool(self.data.get("age") and self.data["age"] > 120),
                     icon=LEAGUE_ICON.get(fg["league"]))
 
-        flash_col = self.FLASH if (self.score_flash > 0 and self.score_flash % 2 == 0) else None
-        self._draw_game_block(buf, fg, 12, big=True, flash_col=flash_col)
+        comps = [fg.get("away") or {}, fg.get("home") or {}]
+        y = draw_scorebug_bars(buf, 12, comps, row_h=8)
 
         # Status line, plus live-state glyphs when the game is actually in
         # progress. Layout gives the glyphs the right edge and lets the
@@ -11898,15 +12055,15 @@ class SportsEngine(Browsable, BigMomentSource):
         # letting the two collide -- "BOT 9TH" plus a diamond plus outs is
         # the whole point of this view, so it has to fit as a unit.
         sit = fg.get("situation") if live else None
-        detail = fg["detail"] or ""
+        detail = fg.get("detail") or ""
         if sit and (sit.get("bases") is not None or sit.get("outs") is not None):
-            detail = fit_text(detail, WIDTH - 26)
-            draw_text3x5(buf, 3, 36, detail, self.LIVE)
-            self._draw_diamond(buf, WIDTH - 20, 34, sit.get("bases"))
-            self._draw_outs(buf, WIDTH - 11, 38, sit.get("outs"))
-        else:
-            draw_text_centered(buf, 36, fit_text(detail, WIDTH - 4),
-                               self.LIVE if live else (86, 94, 116))
+            draw_text3x5(buf, 3, y + 2, fit_text(detail, WIDTH - 26), self.LIVE)
+            self._draw_diamond(buf, WIDTH - 20, y, sit.get("bases"))
+            self._draw_outs(buf, WIDTH - 11, y + 4, sit.get("outs"))
+            y += 10
+        elif detail:
+            y = draw_text_on_empty(buf, y + 2, fit_text(detail, WIDTH - 4),
+                                   self.LIVE if live else (86, 94, 116))
 
         # One secondary line under the status, then the divider BELOW it.
         # (Drawing both at y=44 previously overlapped the text with the
@@ -11922,11 +12079,11 @@ class SportsEngine(Browsable, BigMomentSource):
             if ar and hr:
                 second = f"{ar} / {hr}"
         if second:
-            draw_text_centered(buf, 44, fit_text(second, WIDTH - 4),
-                               (150, 160, 185) if live else (110, 118, 140))
-            draw_divider(buf, 51)
+            y = draw_text_on_empty(buf, y, fit_text(second, WIDTH - 4),
+                                   (150, 160, 185) if live else (110, 118, 140))
+            draw_divider(buf, min(y + 1, 51))
         else:
-            draw_divider(buf, 44)
+            draw_divider(buf, min(y + 1, 44))
 
         win_prob = self.data.get("win_prob")
         if win_prob is not None:
@@ -11959,40 +12116,15 @@ class SportsEngine(Browsable, BigMomentSource):
         away, home = g.get("away") or {}, g.get("home") or {}
         a_abbr = away.get("abbr") or ""
         h_abbr = home.get("abbr") or ""
-        two = (a_abbr and h_abbr
-               and text_w(a_abbr, 2) <= WIDTH - 10
-               and text_w(h_abbr, 2) <= WIDTH - 10)
-        if two:
-            for i, team in enumerate((away, home)):
-                abbr = team.get("abbr") or ""
-                row_y = 12 + i * 16
-                bar_col = team.get("color") or self.INK_DIM
-                for by in range(10):
-                    put_px(buf, 1, row_y + by, bar_col)
-                    put_px(buf, 2, row_y + by, bar_col)
-                draw_text_centered(buf, row_y, abbr, self.INK, scale=2)
-            draw_text_centered(buf, 23, "@", self.INK_DIM)
-            y = 40
-        else:
-            line = f"{a_abbr} @ {h_abbr}".strip(" @")
-            sc = 2 if line and text_w(line, 2) <= WIDTH - 6 else 1
-            draw_text_centered(buf, 16, fit_text(line, WIDTH - 6, sc),
-                               self.INK, scale=sc)
-            y = 32
+        y = self._draw_empty_matchup(buf, g, 12, [away, home])
 
         when = g.get("when") or ""
         if when:
-            draw_text_centered(buf, y, fit_text(when, WIDTH - 4), self.HERO_INK)
-            y += 8
-        ar, hr = away.get("record"), home.get("record")
-        if ar and hr:
-            draw_text_centered(buf, y, fit_text(f"{ar} / {hr}", WIDTH - 4),
-                               (110, 118, 140))
-            y += 8
+            y = draw_text_on_empty(buf, y, fit_text(when, WIDTH - 4), self.HERO_INK)
         sn = g.get("short_name") or ""
         shown = f"{a_abbr} @ {h_abbr}" if a_abbr and h_abbr else ""
-        if sn and y <= 54 and (two or sn != shown):
-            draw_text_centered(buf, 54, fit_text(sn, WIDTH - 4), self.INK_DIM)
+        if sn and y <= 54 and sn != shown:
+            draw_text_centered(buf, min(y, 54), fit_text(sn, WIDTH - 4), self.INK_DIM)
         return bytes(buf)
 
     def _frame_ticker(self):
@@ -12018,13 +12150,16 @@ class SportsEngine(Browsable, BigMomentSource):
                     stale=bool(self.data.get("age") and self.data["age"] > 120),
                     icon=LEAGUE_ICON.get(g["league"]))
 
-        self._draw_game_block(buf, g, 12, big=True)
+        comps = [g.get("away") or {}, g.get("home") or {}]
+        y = draw_scorebug_bars(buf, 12, comps, row_h=8)
 
-        detail = fit_text(g["detail"] or "", WIDTH - 4)
-        draw_text_centered(buf, 36, detail, self.LIVE if live else (86, 94, 116))
+        detail = fit_text(g.get("detail") or "", WIDTH - 4)
+        if detail:
+            y = draw_text_on_empty(buf, y + 2, detail,
+                                   self.LIVE if live else (86, 94, 116))
 
-        draw_dots(buf, 44, len(games), self.cur, on=lg_col, cap=10)
-        draw_divider(buf, 48)
+        draw_dots(buf, min(y + 2, 44), len(games), self.cur, on=lg_col, cap=10)
+        draw_divider(buf, min(y + 6, 48))
 
         parts = [f"{r['away']['abbr']} {self._score_txt(r['away']['score'])} @ "
                  f"{r['home']['abbr']} {self._score_txt(r['home']['score'])} {r['detail']}"
@@ -12511,25 +12646,11 @@ class SportsEngine(Browsable, BigMomentSource):
         draw_trend_arrow(buf, x, y, top, color)
 
     def _draw_scoreline(self, buf, ev, y, accent):
-        """Two team rows with real colours, abbreviation and score. Shared
-        by the team-sport renderers so they stay visually consistent with
-        each other even while their live-state areas differ. Possession
-        (when ESPN sent a real tag) widens that team's colour rail."""
+        """MAIN uses the same scorebug as DETAIL: team-color bar, black
+        cutout name, white reserved for the score."""
         poss = (ev.get("situation") or {}).get("possession")
-        for i, c in enumerate(ev["competitors"][:2]):
-            row = y + i * 12
-            bar = c.get("color") or self.INK_DIM
-            wide = 3 if _comp_matches_tag(c, poss) else 2
-            for by in range(10):
-                for bx in range(1, 1 + wide):
-                    put_px(buf, bx, row + by, bar)
-            sc = c.get("score")
-            sc_txt = "" if sc is None else str(sc)
-            col = self.WIN if c.get("winner") else self.HERO_INK
-            avail = WIDTH - 12 - (text_w(sc_txt, 2) if sc_txt else 0)
-            draw_text3x5(buf, 5, row, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
-            if sc_txt:
-                draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), row, sc_txt, col, scale=2)
+        return draw_scorebug_bars(buf, y, ev.get("competitors"), row_h=8,
+                                  possession=poss)
 
     def _render_baseball(self, buf, ev):
         """MLB. The live state IS the story -- "bottom 9th, 2 outs, runner
@@ -12616,19 +12737,11 @@ class SportsEngine(Browsable, BigMomentSource):
             draw_text_centered(buf, 57, fit_text(bc, WIDTH - 6), self.INK_DIM)
 
     def _render_mma(self, buf, ev):
-        """MMA. A fight is not a score, it is a MATCHUP -- who, at what
-        weight, with what records behind them. So the weight class is a
-        primary line rather than a footnote, and each fighter's record
-        sits with their name instead of being dropped.
-
-        Card position is real structure worth showing: `cardSegment`
-        (MAIN / PRELIMS) plus `matchNumber`. Note the numbering here is
-        the OPPOSITE of the UFC scoreboard used by GAME DAY -- on this
-        feed match number 1 IS the main event, whereas there the main
-        event is last in the list. Verified against a real PFL card.
-
-        Round and finish time come from `period` and `clock`, which carry
-        the same meaning as in mma.py: time ELAPSED in the final round.
+        """MMA MAIN -- same empty card as DETAIL. A fight is a matchup,
+        not a score, so names and records sit on black with a 2px rail.
+        Weight class and MAIN EVENT stay as the kicker; round ticks and
+        the real clock/result sit under the card. No cage on MAIN -- it
+        was the clash.
         """
         accent = self._sport_accent(ev)
         pos, total = self._league_position(ev)
@@ -12636,152 +12749,85 @@ class SportsEngine(Browsable, BigMomentSource):
                     icon=SPORT_ICONS.get(ev.get("sport")))
         self._draw_league_rail(buf, ev)
 
-        # PRIMARY line: weight class, and whether this is the main event.
         seg = ev.get("card_segment") or ""
         num = ev.get("match_number")
         headline = ev.get("class_label") or "MMA"
-        draw_text_centered(buf, 10, fit_text(headline, WIDTH - 6), color_on_dark(accent))
-        tag = "MAIN EVENT" if (num == 1 and seg.startswith("MAIN")) else seg
+        y = draw_text_on_empty(buf, 10, fit_text(headline, WIDTH - 6),
+                               color_on_dark(accent))
+        tag = "MAIN EVENT" if (num == 1 and str(seg).startswith("MAIN")) else seg
         if tag:
-            draw_text_centered(buf, 17, fit_text(tag, WIDTH - 6), self.INK_DIM)
+            y = draw_text_on_empty(buf, y, fit_text(tag, WIDTH - 6), self.INK_DIM)
 
-        # Name on its own row, record beneath it. They shared a row at
-        # first and collided; reserving the record's width instead
-        # truncated "A. COLGAN" to "A.", which loses WHO -- the whole
-        # point of the view. The record is the thing that can afford its
-        # own dimmer line.
-        y = 25
-        live = ev["live"]
-        for i, c in enumerate(ev["competitors"][:2]):
-            won = c.get("winner")
-            col = self.WIN if won else (self.INK if ev["state"] == "post" else self.HERO_INK)
-            draw_text3x5(buf, 6, y, fit_person(c.get("abbr"), WIDTH - 10), col)
-            if won:
-                # A block beside the winner: colour alone is ambiguous on
-                # a fight nobody has won yet, and a "W" column costs more
-                # width at 64px than it earns.
-                for dy in range(2):
-                    for dx in range(2):
-                        put_px(buf, 2 + dx, y + 1 + dy, self.WIN)
-            rec = c.get("record")
-            # Live: drop records so the round ticks have a row. Pre/post
-            # keep them -- they are the stakes / the result's context.
-            if rec and not live:
-                draw_text3x5(buf, 8, y + 6, rec, self.INK_DIM)
-                y += 13
-            else:
-                y += 7
-            if i == 0:
-                draw_text_centered(buf, y, "VS", color_on_dark(accent))
-                y += 8
+        y = self._draw_empty_matchup(buf, ev, y, ev.get("competitors") or [])
 
-        # Result: round and time when it is over, status otherwise.
         rnd, clk = ev.get("period"), ev.get("clock")
         if ev["state"] == "post" and rnd and clk:
             line = f"R{rnd}  {clk}"
+        elif ev["live"] and clk:
+            line = str(clk)
         else:
             line = ev.get("detail") or ""
-        current, total = self._mma_round_pair(ev)
+        current, total_r = self._mma_round_pair(ev)
         if ev["live"]:
-            draw_leverage_glow(buf, 2, 50, WIDTH - 2, 63,
+            draw_leverage_glow(buf, 2, y - 1, WIDTH - 2, min(HEIGHT - 1, y + 14),
                                (255, 180, 40), self.scroll * 0.3)
-            if clk:
-                draw_text_centered(buf, 50, fit_text(str(clk), WIDTH - 6), self.LIVE)
-            draw_round_ticks(buf, WIDTH // 2, 57, current, total,
-                             pulse=0.75 + 0.25 * math.sin(self.scroll * 0.3))
-        elif current or ev.get("total_rounds"):
-            draw_round_ticks(buf, WIDTH // 2, 52, current, total)
-            if line:
-                draw_text_centered(buf, 58, fit_text(line, WIDTH - 6), self.INK)
-        elif line:
-            draw_text_centered(buf, 58, fit_text(line, WIDTH - 6), self.INK)
+        if ev["live"] or current or ev.get("total_rounds"):
+            draw_round_ticks(buf, WIDTH // 2, y, current, total_r,
+                             pulse=0.75 + 0.25 * math.sin(self.scroll * 0.3)
+                             if ev["live"] else 1.0)
+            y += 5
+        if line:
+            y = draw_text_on_empty(
+                buf, y, fit_text(line, WIDTH - 6),
+                self.LIVE if ev["live"] else self.INK_DIM)
 
     def _render_soccer(self, buf, ev):
-        """Soccer. Three things a football scoreboard has that a generic
-        renderer flattens away: FORM (recent results, not just today's
-        score), the clock already carrying stoppage time ("90'+3'" --
-        ESPN pre-formats this, it is not computed here), and a penalty
-        shootout score when a match was decided that way.
-
-        AGGREGATE SCORE (`ev["series"]`, from ESPN's `seriesSummary`) is
-        wired through and rendered if present, but UNVERIFIED: no
-        two-legged tie is live anywhere in today's feed to check it
-        against, the same honest gap football is in for down-and-distance.
-        It will render correctly the day a real one appears; nobody has
-        seen it do so yet.
+        """Soccer MAIN -- same empty-card law as football/hockey.
+        Scorebug owns the names. Live clock sits on black (white only
+        at 85'+). Form is a dim line, never paint under a name. Shootout
+        scores stay the POST headline when ESPN sent them.
         """
         accent = self._sport_accent(ev)
         pos, total = self._league_position(ev)
         draw_header(buf, ev["league_name"] or "SOCCER", accent, right_tag=f"{pos}/{total}",
                     icon=SPORT_ICONS.get(ev.get("sport")))
         self._draw_league_rail(buf, ev)
+        self._draw_scoreline(buf, ev, 11, accent)
 
-        # Laid out with a CURSOR. Fixed offsets put the divider and the
-        # clock straight through the second team's score row -- each team
-        # block is 10px of score PLUS a form line, and the constants below
-        # were written for a block without one. The render audit caught it
-        # ("LOU" overlapping "90'+4'"); it was invisible in a spot check
-        # because the overlapping elements sat in different columns for
-        # the matches I happened to look at.
-        y = 9
-        for c in ev["competitors"][:2]:
-            bar = c.get("color") or self.INK_DIM
-            for by in range(9):
-                for bx in (1, 2):
-                    put_px(buf, bx, y + by, bar)
-            sc = c.get("score")
-            sc_txt = "" if sc is None else str(sc)
-            col = self.WIN if c.get("winner") else self.HERO_INK
-            avail = WIDTH - 12 - (text_w(sc_txt, 2) if sc_txt else 0)
-            draw_text3x5(buf, 5, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
-            if sc_txt:
-                draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
-            y += 11
-            # Form beneath the score row -- most recent result rightmost,
-            # matching how a real match programme lists it.
-            form = c.get("form")
-            if form:
-                draw_text3x5(buf, 5, y, form, self.INK_DIM)
-                y += 6
-            y += 2
-
-        draw_divider(buf, y)
-        y += 3
-
-        shootouts = [c.get("shootout") for c in ev["competitors"][:2]]
+        draw_divider(buf, 36)
+        y = 39
+        scorer = self._last_goal_label(ev.get("last_goal"))
+        shootouts = [c.get("shootout") for c in (ev.get("competitors") or [])[:2]]
         if all(s is not None for s in shootouts):
-            # Decided on penalties: that IS the headline once it happens,
-            # not a footnote under a tied scoreline.
-            draw_text_centered(buf, y, "PENALTIES", self.LIVE)
-            y += 7
+            y = draw_text_on_empty(buf, y, "PENALTIES", self.LIVE)
             pk = "-".join(str(s) for s in shootouts)
-            if y + 10 <= HEIGHT:
-                draw_text_centered(buf, y, pk, self.HERO_INK, scale=2)
-                y += 11
-        else:
-            clock = ev.get("clock") or ""
-            tight = ev["live"] and self._soccer_is_tight_late(ev)
-            if tight:
+            y = draw_text_on_empty(buf, y, pk, (255, 255, 255))
+        elif ev["live"]:
+            if self._soccer_is_tight_late(ev):
                 draw_leverage_glow(buf, 2, y - 1, WIDTH - 2, min(HEIGHT - 1, y + 14),
                                    (255, 200, 40), self.scroll * 0.35)
+            clock = ev.get("clock") or ev.get("detail") or ""
+            y = self._draw_mute_strip(buf, ev, y)
             if clock:
-                draw_text_centered(buf, y, fit_text(clock, WIDTH - 6),
-                                   self.LIVE if ev["live"] else self.INK_DIM)
-                y += 7
-            scorer = self._last_goal_label(ev.get("last_goal"))
-            if scorer and y + 5 <= HEIGHT:
-                draw_text_centered(buf, y, fit_person(scorer, WIDTH - 6), self.INK)
-                y += 7
-            detail = ev.get("detail") or ""
-            if detail and detail != clock and y + 5 <= HEIGHT:
-                draw_text_centered(buf, y, fit_text(detail, WIDTH - 6), self.INK)
-                y += 7
+                y = draw_text_on_empty(buf, y, fit_text(clock, WIDTH - 6),
+                                       self._clock_ink(ev))
+            if scorer:
+                y = draw_text_on_empty(buf, y, fit_person(scorer, WIDTH - 6), self.INK)
+        else:
+            y = draw_text_on_empty(buf, y, fit_text(ev.get("detail") or "", WIDTH - 6),
+                                   self.INK_DIM)
+            if scorer:
+                y = draw_text_on_empty(buf, y, fit_person(scorer, WIDTH - 6), self.INK)
+            if ev.get("state") == "post":
+                y = self._draw_period_line(buf, ev, y)
 
-        # Aggregate when ESPN supplies one -- see docstring on verification
-        # status -- else any match note. Only if a row is actually left.
+        forms = [c.get("form") for c in (ev.get("competitors") or [])[:2] if c.get("form")]
+        if forms and y <= HEIGHT - 5:
+            y = draw_text_on_empty(buf, y, fit_text("  ".join(forms), WIDTH - 6),
+                                   self.INK_DIM)
         extra = ev.get("series") or ev.get("note") or ""
-        if extra and y + 5 <= HEIGHT:
-            draw_text_centered(buf, y, fit_text(extra, WIDTH - 6), self.INK_DIM)
+        if extra and y <= HEIGHT - 5:
+            draw_text_on_empty(buf, y, fit_text(extra, WIDTH - 6), self.INK_DIM)
 
     def _draw_movement(self, buf, x, y, move, color_up, color_dn):
         """Small arrow for leaderboard movement: negative = moved UP
@@ -12852,18 +12898,11 @@ class SportsEngine(Browsable, BigMomentSource):
         draw_text_centered(buf, 59, fit_text(foot, WIDTH - 6), self.INK_DIM)
 
     def _render_tennis(self, buf, ev):
-        """Tennis. Task #19 -- the last sport still on the generic
-        fallback, blocked since 2026-08-01 on "no live match to verify
-        against" until this session pulled real live/finished matches
-        from the dedicated per-tour scoreboard (see sports.py's TENNIS
-        section for the real schema facts -- a completely different
-        nested shape from every team sport this file otherwise parses).
+        """Tennis MAIN -- empty card / scorebug, then the set line.
 
-        The generic renderer's whole reason for the tennis exception in
-        the first place was STRING SCORES TOO WIDE FOR THE SLOT -- a set
-        score drawn at scale 2 is 126px on a 64px panel. This renderer
-        gives the set-by-set line its own row at scale 1, on a y-cursor,
-        rather than trying to squeeze it beside a name.
+        Set scores are too wide for a score box (scale-2 7-6(7-5) is
+        126px). Names sit on the empty card; the set-by-set line and
+        pips are the score. Seed is already on the rail.
         """
         accent = self._sport_accent(ev)
         pos, total = self._league_position(ev)
@@ -12872,51 +12911,34 @@ class SportsEngine(Browsable, BigMomentSource):
         self._draw_league_rail(buf, ev)
 
         comps = ev["competitors"][:2]
-        y = 10
-        for c in comps:
-            col = self.WIN if c.get("winner") else self.HERO_INK
-            name = c.get("abbr") or c.get("full") or ""
-            tag = c.get("seed") if isinstance(c.get("seed"), int) else c.get("rank")
-            if isinstance(tag, int) and tag >= 1:
-                prefix = f"{tag} "
-                draw_text3x5(buf, 4, y, prefix, self.INK_DIM)
-                draw_text3x5(buf, 4 + text_w(prefix), y,
-                             fit_person(name, WIDTH - 8 - text_w(prefix)), col)
-            else:
-                draw_text3x5(buf, 4, y, fit_person(name, WIDTH - 8), col)
-            y += 7
-        y += 2
+        # Live uses the same black-cutout scorebug as DETAIL. PRE/POST
+        # use the empty name/record card (seed already on the rail).
+        if ev["live"]:
+            y = self._draw_scoreline(buf, ev, 10, accent)
+        else:
+            y = self._draw_empty_matchup(buf, ev, 10, comps)
 
-        # Set-by-set score, own line, scale 1 -- never scale 2 (see
-        # docstring above and CLAUDE.md's own layout rule on this exact
-        # sport). Real data only: an unplayed set is simply absent, never
-        # a guessed "0-0". Pips sit under the line -- winner of each
-        # completed set, empty slots only when best_of is real.
         line = self._tennis_set_line(comps)
         deciding = self._tennis_is_deciding(ev)
         if deciding:
             draw_leverage_glow(buf, 2, y - 1, WIDTH - 2, y + 16,
                                (230, 220, 90), self.scroll * 0.35)
         if line:
-            draw_text_centered(buf, y, fit_text(line, WIDTH - 6), self.INK)
-            y += 7
+            y = draw_text_on_empty(buf, y, fit_text(line, WIDTH - 6), (255, 255, 255))
         elif ev["state"] == "pre":
-            draw_text_centered(buf, y, "NOT STARTED", self.INK_DIM)
-            y += 7
+            y = draw_text_on_empty(buf, y, "NOT STARTED", self.INK_DIM)
         if any(c.get("sets") for c in comps) or ev.get("best_of") in (3, 5):
+            fill_plate(buf, 2, y, WIDTH - 2, y + 9)
             draw_tennis_set_pips(buf, y, comps, best_of=ev.get("best_of"))
             y += 10
 
-        # The DRAW (Men's/Women's Singles or Doubles) -- real structure a
-        # generic renderer would have had no room for.
         draw_label = ev.get("class_label") or ""
         if draw_label and y <= HEIGHT - 12:
-            draw_text_centered(buf, y, fit_text(draw_label, WIDTH - 6), self.INK_DIM)
-            y += 6
+            y = draw_text_on_empty(buf, y, fit_text(draw_label, WIDTH - 6), self.INK_DIM)
 
         tag = ev.get("detail") or ""
         if tag and y <= HEIGHT - 5:
-            draw_text_centered(buf, y, fit_text(tag, WIDTH - 6),
+            draw_text_on_empty(buf, y, fit_text(tag, WIDTH - 6),
                                self.LIVE if ev["live"] else self.INK_DIM)
 
     def _render_football(self, buf, ev):
@@ -12960,35 +12982,19 @@ class SportsEngine(Browsable, BigMomentSource):
             period, clock = ev.get("period"), ev.get("clock") or ""
             line = f"Q{period} {clock}".strip() if period else clock
             dd = situation_line(ev)
-            # Drive strip -- turf + optional real yard-line ball + redzone
-            # glow. Text sits ON the strip so the field is the subject,
-            # same way the diamond is baseball's subject.
-            if y <= HEIGHT - 16:
-                draw_football_drive_strip(
-                    buf, 3, y, WIDTH - 5, y + 13,
-                    yard_line=sit.get("yard_line"),
-                    redzone=bool(sit.get("is_redzone")),
-                    phase=self.scroll * 0.3)
-                if line:
-                    draw_text_centered(buf, y + 1, fit_text(line, WIDTH - 8),
-                                       self.LIVE)
-                if dd:
-                    draw_text_centered(buf, y + 7, fit_text(dd, WIDTH - 8),
-                                       FIELD_YARD_LINE)
-                y += 14
-            else:
-                if line:
-                    draw_text_centered(buf, y, fit_text(line, WIDTH - 6), self.LIVE)
-                    y += 7
-                if dd:
-                    draw_text_centered(buf, y, fit_text(dd, WIDTH - 6), self.INK)
-                    y += 7
+            y = self._draw_mute_strip(buf, ev, y)
+            if line:
+                y = draw_text_on_empty(buf, y, fit_text(line, WIDTH - 6),
+                                       self._clock_ink(ev))
+            if dd:
+                y = draw_text_on_empty(buf, y, fit_text(dd, WIDTH - 6), FIELD_YARD_LINE)
             y = self._draw_timeout_pips(buf, ev, y)
             y = self._draw_last_play(buf, ev, y)
         else:
-            draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 6),
-                               self.INK_DIM)
-            y += 7
+            y = draw_text_on_empty(buf, y, fit_text(ev.get("detail") or "", WIDTH - 6),
+                                   self.INK_DIM)
+            if ev.get("state") == "post":
+                y = self._draw_period_line(buf, ev, y)
 
         # Last play is the live story. Records/broadcast only fill the
         # leftover row when there isn't one.
@@ -13046,16 +13052,16 @@ class SportsEngine(Browsable, BigMomentSource):
         if ev["live"]:
             period, clock = ev.get("period"), ev.get("clock") or ""
             line = f"Q{period} {clock}".strip() if period else clock
-            if sit.get("bonus") is True:
-                line = f"{line} BONUS".strip() if line else "BONUS"
+            y = self._draw_mute_strip(buf, ev, y)
             if line:
-                draw_text_centered(buf, y, fit_text(line, WIDTH - 6), self.LIVE)
-                y += 7
+                y = draw_text_on_empty(buf, y, fit_text(line, WIDTH - 6),
+                                       self._clock_ink(ev))
             y = self._draw_timeout_pips(buf, ev, y)
         else:
-            draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 6),
-                               self.INK_DIM)
-            y += 7
+            y = draw_text_on_empty(buf, y, fit_text(ev.get("detail") or "", WIDTH - 6),
+                                   self.INK_DIM)
+            if ev.get("state") == "post":
+                y = self._draw_period_line(buf, ev, y)
 
         foot = ev.get("series") or ""
         if not foot:
@@ -13256,11 +13262,47 @@ class SportsEngine(Browsable, BigMomentSource):
         need = best // 2
         return wa == need and wb == need
 
+    def _draw_empty_matchup(self, buf, ev, y, comps=None):
+        """The MLB PRE card: empty black, 2px team rail, big name,
+        dim record, white reserved for the score. Returns y after."""
+        comps = comps if comps is not None else ev.get("competitors") or []
+        for c in comps[:2]:
+            if y > HEIGHT - 11:
+                break
+            bar = c.get("color") or self.INK_DIM
+            sc = c.get("score")
+            sc_txt = "" if sc is None else str(sc)
+            col = self.WIN if c.get("winner") else self.HERO_INK
+            rec = c.get("record")
+            block_h = 11 + (6 if rec else 0)
+            for by in range(min(block_h, HEIGHT - y)):
+                for bx in (3, 4):
+                    put_px(buf, bx, y + by, bar)
+            nx = 8
+            seed = c.get("seed")
+            if isinstance(seed, int) and 1 <= seed <= 99:
+                stag = str(seed)
+                draw_text3x5(buf, nx, y + 3, stag, self.INK_DIM)
+                nx += text_w(stag) + 2
+            avail = WIDTH - 4 - nx - (text_w(sc_txt, 2) if sc_txt else 0)
+            name = c.get("abbr") or fit_person(c.get("full") or "", avail, 2)
+            draw_text3x5(buf, nx, y, fit_text(name, avail, 2), col, scale=2)
+            if sc_txt:
+                draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y,
+                             sc_txt, (255, 255, 255), scale=2)
+            y += 11
+            if rec and y <= HEIGHT - 5:
+                draw_text3x5(buf, 8, y, fit_text(rec, WIDTH - 12), self.INK_DIM)
+                y += 6
+        return y + 1
+
     def _draw_last_play(self, buf, ev, y):
-        """Last-play tape from a real ESPN lastPlay, or y unchanged."""
+        """Last-play tape from a real ESPN lastPlay, or y unchanged.
+        Always on an empty plate -- never on leftover hero paint."""
         text = (ev.get("situation") or {}).get("last_play")
         if not text or y > HEIGHT - 5:
             return y
+        fill_plate(buf, 2, max(0, y - 1), WIDTH - 2, min(HEIGHT, y + 6))
         if text_w(text) <= WIDTH - 6:
             draw_text_centered(buf, y, text, self.INK)
         else:
@@ -13277,6 +13319,124 @@ class SportsEngine(Browsable, BigMomentSource):
         tag = "T" + ("." * min(at, 3))
         draw_text3x5(buf, WIDTH - 4 - text_w(tag), y, tag, self.INK_DIM)
         return y + 6
+
+    def _event_line_score(self, ev):
+        """Period/inning columns already in the summary worker, or None."""
+        ls = ev.get("line_score")
+        if ls:
+            return ls
+        bun = sports.FEED.get_summary(ev.get("id")) or {}
+        return bun.get("line_score")
+
+    def _draw_period_line(self, buf, ev, y):
+        """Two-row period strip from a real line_score. Omit if missing."""
+        ls = self._event_line_score(ev)
+        if not ls or y > HEIGHT - 12:
+            return y
+        away, home = ls.get("away") or {}, ls.get("home") or {}
+        n = max(len(away.get("innings") or []), len(home.get("innings") or []))
+        if n < 1:
+            return y
+
+        def cell(side, i):
+            inn = side.get("innings") or []
+            if i >= len(inn) or inn[i] is None:
+                return None
+            return str(inn[i])
+
+        for side in (away, home):
+            if y > HEIGHT - 5:
+                break
+            abbr = fit_text(side.get("abbr") or "", 12)
+            draw_text3x5(buf, 2, y, abbr, self.INK_DIM)
+            x = 2 + (text_w(abbr) + 3 if abbr else 0)
+            for i in range(n):
+                txt = cell(side, i)
+                if txt is None:
+                    continue
+                w = text_w(txt)
+                if x + w > WIDTH - 2:
+                    break
+                draw_text3x5(buf, x, y, txt, self.HERO_INK)
+                x += w + 2
+            y += 6
+        return y
+
+    def _draw_win_pct(self, buf, ev):
+        """Pinned-favorite win% only -- same scope as baseball DETAIL."""
+        fav_game = self.data.get("favorite_game")
+        wp = self.data.get("win_prob")
+        if not (fav_game and fav_game.get("event_id") == ev.get("event_id")
+                and isinstance(wp, (int, float))):
+            return
+        draw_text3x5(buf, 3, 59, f"WIN {int(round(wp * 100))}", self.INK_DIM)
+
+    def _clock_is_hot(self, ev):
+        """True when the clock is the one white thing -- clutch, 2:00
+        left in a half/period, or soccer 85'+. Real clock + period only."""
+        if not ev.get("live"):
+            return False
+        sport = ev.get("sport")
+        if sport == "soccer":
+            minute = self._soccer_minute(ev.get("clock") or "")
+            return minute is not None and minute >= 85
+        secs = self._clock_seconds(ev.get("clock") or "")
+        period = ev.get("period")
+        if secs is None or not isinstance(period, int) or secs > 120:
+            return False
+        if sport == "football":
+            return period in (2, 4) or period > 4
+        if sport == "hockey":
+            return period >= 3
+        if sport == "basketball":
+            if self._board_is_clutch(ev):
+                return True
+            last = 2 if ev.get("league") == "NCAAB" else 4
+            return period >= last
+        return False
+
+    def _clock_ink(self, ev):
+        return (255, 255, 255) if self._clock_is_hot(ev) else self.INK_DIM
+
+    def _draw_sit_pips(self, buf, x, y, ev):
+        """2px situation pips. BONUS / PP / RZ -- never words, never a wash."""
+        sit = ev.get("situation") or {}
+        pips = []
+        if sit.get("is_redzone") is True:
+            pips.append((255, 50, 40))
+        if sit.get("power_play") is True:
+            pips.append((80, 160, 255))
+        if sit.get("bonus") is True:
+            pips.append((255, 140, 40))
+        for i, col in enumerate(pips):
+            px = x + i * 3
+            for dy in (0, 1):
+                for dx in (0, 1):
+                    put_px(buf, px + dx, y + dy, col)
+
+    def _draw_mute_strip(self, buf, ev, y):
+        """4px identity strip so the empty card owns the glass. Returns next y."""
+        if y > HEIGHT - 5:
+            return y
+        sport = ev.get("sport")
+        x0, x1, y1 = 3, WIDTH - 3, y + 4
+        sit = ev.get("situation") or {}
+        if sport == "football":
+            draw_football_drive_strip(
+                buf, x0, y, x1, y1,
+                yard_line=sit.get("yard_line"),
+                redzone=False,
+                phase=self.scroll * 0.3)
+        elif sport == "hockey":
+            draw_hockey_rink_hero(buf, x0, y, x1, y1)
+        elif sport == "soccer":
+            draw_soccer_pitch_hero(buf, x0, y, x1, y1)
+        elif sport == "basketball":
+            draw_basketball_court_hero(buf, x0, y, x1, y1)
+        else:
+            return y
+        self._draw_sit_pips(buf, x1 - 8, y + 1, ev)
+        return y1 + 1
 
     def _board_is_clutch(self, ev):
         """Last period (or OT) + <=2:00 + one-possession game.
@@ -13318,28 +13478,19 @@ class SportsEngine(Browsable, BigMomentSource):
         draw_divider(buf, 36)
         y = 39
         sit = ev.get("situation") or {}
-        pp = bool(sit.get("power_play"))
-        if ev["live"] and pp:
-            draw_leverage_glow(buf, 2, y - 1, WIDTH - 2, y + 16,
-                               (80, 160, 255), self.scroll * 0.3)
         if ev["live"]:
             period, clock = ev.get("period"), ev.get("clock") or ""
             line = f"P{period} {clock}".strip() if period else clock
+            y = self._draw_mute_strip(buf, ev, y)
             if line:
-                draw_text_centered(buf, y, fit_text(line, WIDTH - 6), self.LIVE)
-                y += 7
-            tag = sit.get("strength")
-            if pp and not tag:
-                tag = "PP"
-            if tag:
-                draw_text_centered(buf, y, fit_text(tag, WIDTH - 6),
-                                   (180, 210, 255))
-                y += 7
+                y = draw_text_on_empty(buf, y, fit_text(line, WIDTH - 6),
+                                       self._clock_ink(ev))
             y = self._draw_last_play(buf, ev, y)
         else:
-            draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 6),
-                               self.INK_DIM)
-            y += 7
+            y = draw_text_on_empty(buf, y, fit_text(ev.get("detail") or "", WIDTH - 6),
+                                   self.INK_DIM)
+            if ev.get("state") == "post":
+                y = self._draw_period_line(buf, ev, y)
 
         if ev["live"] and sit.get("last_play"):
             return
@@ -13450,7 +13601,8 @@ class SportsEngine(Browsable, BigMomentSource):
         # fallback for a sport without one (golf, MMA).
         color = (255, 200, 40)
         self._set_big_moment(move, name, f"{move} {par}", color,
-                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="golf")
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="golf",
+                             event_id=(self.golf_event or {}).get("id"))
 
     BIG_MOMENT_DETECTORS["golf_move"] = _detect_golf_big_moment
 
@@ -13545,7 +13697,7 @@ class SportsEngine(Browsable, BigMomentSource):
         color = home.get("color") or away.get("color") or (255, 200, 40)
         self._set_big_moment("HOME RUN", line1, newest["text"], color,
                              tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="baseball",
-                             scorer=newest.get("scorer"))
+                             scorer=newest.get("scorer"), event_id=event_id)
 
     BIG_MOMENT_DETECTORS["mlb_hr"] = _detect_mlb_home_run
 
@@ -13595,7 +13747,7 @@ class SportsEngine(Browsable, BigMomentSource):
         color = home.get("color") or away.get("color") or (255, 100, 40)
         self._set_big_moment("TOUCHDOWN", line1, newest["text"], color,
                              tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="football",
-                             scorer=newest.get("scorer"))
+                             scorer=newest.get("scorer"), event_id=event_id)
 
     BIG_MOMENT_DETECTORS["nfl_touchdown"] = _detect_nfl_touchdown
 
@@ -13640,7 +13792,7 @@ class SportsEngine(Browsable, BigMomentSource):
         color = home.get("color") or away.get("color") or (40, 160, 255)
         self._set_big_moment("GOAL", line1, newest["text"], color,
                              tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="hockey",
-                             scorer=newest.get("scorer"))
+                             scorer=newest.get("scorer"), event_id=event_id)
 
     BIG_MOMENT_DETECTORS["nhl_goal"] = _detect_nhl_goal
 
@@ -13710,7 +13862,8 @@ class SportsEngine(Browsable, BigMomentSource):
         color = home.get("color") or away.get("color") or (160, 60, 220)
         self._set_big_moment("CLUTCH", line1, newest["text"], color,
                              tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="basketball",
-                             scorer=newest.get("scorer"), shot_xy=newest.get("shot_xy"))
+                             scorer=newest.get("scorer"), shot_xy=newest.get("shot_xy"),
+                             event_id=event_id)
 
     BIG_MOMENT_DETECTORS["basketball_clutch"] = _detect_basketball_clutch_shot
 
@@ -13775,7 +13928,8 @@ class SportsEngine(Browsable, BigMomentSource):
         line2 = ev.get("class_label") or ""
         color = (winner or {}).get("color") or (255, 200, 40)
         self._set_big_moment(kind, name, line2, color,
-                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="mma")
+                             tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="mma",
+                             event_id=ev.get("id"))
 
     BIG_MOMENT_DETECTORS["mma_finish"] = _detect_mma_finish
 
@@ -13827,36 +13981,7 @@ class SportsEngine(Browsable, BigMomentSource):
         # some have neither), and fixed rows collided the moment content
         # changed -- the second competitor's record landed on the venue
         # line. Advancing a cursor makes overlap impossible by construction.
-        y = 13
-        for c in comps[:2]:
-            bar = c.get("color") or self.INK_DIM
-            sc = c["score"]
-            sc_txt = str(sc) if sc is not None else ""
-            col = self.WIN if c["winner"] else self.HERO_INK
-            wide = bool(sc_txt) and text_w(sc_txt, 2) > 22
-            block_top = y
-            if wide:
-                # Tennis: name, then the full set score beneath at scale 1.
-                # Never truncated -- a clipped set score is wrong, not small.
-                draw_text3x5(buf, 7, y, fit_text(c["abbr"], WIDTH - 14), col)
-                y += 6
-                draw_text3x5(buf, 7, y, fit_text(sc_txt, WIDTH - 11), self.INK)
-                y += 6
-            else:
-                avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
-                draw_text3x5(buf, 7, y, fit_text(c["abbr"], avail, 2), col, scale=2)
-                if sc_txt:
-                    draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
-                y += 11
-            sub = c.get("record") or (f"SEED {c['seed']}" if c.get("seed") else "")
-            if sub:
-                draw_text3x5(buf, 7, y, fit_text(sub, WIDTH - 14), self.INK_DIM)
-                y += 6
-            # Colour bar spans exactly the rows this competitor occupies.
-            for by in range(block_top, min(y, HEIGHT - 3)):
-                for bx in (3, 4):
-                    put_px(buf, bx, by, bar)
-            y += 3
+        y = self._draw_empty_matchup(buf, ev, 13, comps[:2])
 
         # Whatever is left goes below, in priority order, only while rows
         # remain. MLB baserunners come from the EVENT level on this endpoint.
@@ -14056,34 +14181,7 @@ class SportsEngine(Browsable, BigMomentSource):
                 return
             draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
                                color_on_dark(accent), x_min=3)
-            # Real budget, not guessed: two team blocks (17px each: 10px
-            # name/score + 1 gap + 5px record + 1 gap) leave room for a
-            # footer. The first version of this advanced the cursor by
-            # more than the content actually drew (+12 vs a real +6-7
-            # ink extent), pushing y past the footer guard on every live
-            # game -- caught by render_audit's put_px instrumentation
-            # (0 clipped pixels), which is what proved this was a
-            # cursor-accounting bug, not a real overflow.
-            y = 11
-            for c in comps[:2]:
-                bar = c.get("color") or self.INK_DIM
-                for by in range(10):
-                    for bx in (3, 4):
-                        put_px(buf, bx, y + by, bar)
-                sc = c.get("score")
-                sc_txt = "" if sc is None else str(sc)
-                col = self.WIN if c.get("winner") else self.HERO_INK
-                avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
-                draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
-                if sc_txt:
-                    draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
-                y += 11
-                rec = c.get("record")
-                if rec:
-                    draw_text3x5(buf, 8, y, rec, self.INK_DIM)
-                y += 6
-
-            y += 1
+            y = self._draw_empty_matchup(buf, ev, 11, comps)
             draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8), self.INK_DIM)
             y += 8
 
@@ -14146,6 +14244,7 @@ class SportsEngine(Browsable, BigMomentSource):
         pit = m.get("pitcher") or {}
         bat = m.get("batter") or {}
         if pit.get("name"):
+            fill_plate(buf, 2, y - 1, zone_x - 1, y + 6)
             draw_text3x5(buf, 3, y, "P", self.INK_DIM)
             draw_text3x5(buf, 9, y, fit_person(pit["name"], col_w - 6), self.INK)
             y += 6
@@ -14153,15 +14252,18 @@ class SportsEngine(Browsable, BigMomentSource):
                     pit.get("era") or ""]
             line = " ".join(b for b in bits if b)
             if line:
+                fill_plate(buf, 2, y - 1, zone_x - 1, y + 6)
                 draw_text3x5(buf, 9, y, fit_text(line, col_w - 6), self.LIVE)
                 y += 6
         if bat.get("name"):
+            fill_plate(buf, 2, y - 1, zone_x - 1, y + 6)
             draw_text3x5(buf, 3, y, "AB", self.INK_DIM)
             draw_text3x5(buf, 13, y, fit_person(bat["name"], col_w - 10), self.INK)
             y += 6
             bits = [bat.get("avg") or "", bat.get("today") or ""]
             line = " ".join(b for b in bits if b)
             if line:
+                fill_plate(buf, 2, y - 1, zone_x - 1, y + 6)
                 draw_text3x5(buf, 9, y, fit_text(line, col_w - 6), self.LIVE)
                 y += 6
         if pitches:
@@ -14175,6 +14277,7 @@ class SportsEngine(Browsable, BigMomentSource):
                 bits.append(str(last["vel"]))
             label = " ".join(bits)
             if label and y <= 52:
+                fill_plate(buf, 2, y - 1, zone_x - 1, y + 6)
                 draw_text3x5(buf, 3, y, fit_text(label, col_w), self.LIVE)
 
         fav_game = self.data.get("favorite_game")
@@ -14211,44 +14314,17 @@ class SportsEngine(Browsable, BigMomentSource):
             draw_text_centered(buf, 1, fit_text(head, WIDTH - 8), self.LIVE, x_min=3)
             y = draw_scorebug_bars(buf, 7, comps, row_h=8)
             clock = ev.get("clock") or ev.get("detail") or ""
-            if clock and y <= HEIGHT - 16:
-                draw_soccer_pitch_hero(buf, 3, y, WIDTH - 3, y + 16)
-                dim_hero_text_band(buf, 3, y + 3, WIDTH - 3, y + 10)
-                draw_text_centered(buf, y + 2, fit_text(clock, WIDTH - 8), self.LIVE)
-                if scorer:
-                    draw_text_centered(buf, y + 9, fit_person(scorer, WIDTH - 8),
-                                       (230, 230, 220), x_min=3)
-                y += 17
-            elif clock:
-                draw_text_centered(buf, y, fit_text(clock, WIDTH - 8), self.LIVE, x_min=3)
-                y += 7
-                if scorer and y <= HEIGHT - 5:
-                    draw_text_centered(buf, y, fit_person(scorer, WIDTH - 8),
-                                       self.INK, x_min=3)
-                    y += 7
+            y = self._draw_mute_strip(buf, ev, y + 1)
+            if clock:
+                y = draw_text_on_empty(buf, y, fit_text(clock, WIDTH - 8),
+                                       self._clock_ink(ev))
+            if scorer:
+                y = draw_text_on_empty(buf, y, fit_person(scorer, WIDTH - 8), self.INK)
+            y = self._draw_period_line(buf, ev, y)
         else:
             draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
                                color_on_dark(accent), x_min=3)
-            y = 11
-            for c in comps[:2]:
-                bar = c.get("color") or self.INK_DIM
-                for by in range(10):
-                    for bx in (3, 4):
-                        put_px(buf, bx, y + by, bar)
-                sc = c.get("score")
-                sc_txt = "" if sc is None else str(sc)
-                col = self.WIN if c.get("winner") else self.HERO_INK
-                avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
-                draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
-                if sc_txt:
-                    draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
-                y += 11
-                rec = c.get("record")
-                if rec:
-                    draw_text3x5(buf, 8, y, fit_text(rec, WIDTH - 12), self.INK_DIM)
-                y += 6
-
-            y += 1
+            y = self._draw_empty_matchup(buf, ev, 11, comps)
             shootouts = [c.get("shootout") for c in comps[:2]]
             if all(s is not None for s in shootouts):
                 draw_text_centered(buf, y, "PENALTIES", self.LIVE)
@@ -14259,12 +14335,9 @@ class SportsEngine(Browsable, BigMomentSource):
             else:
                 clock = ev.get("clock") or ev.get("detail") or ""
                 if clock:
-                    draw_text_centered(buf, y, fit_text(clock, WIDTH - 8), self.INK_DIM)
-                    y += 7
-                if scorer and y <= HEIGHT - 5:
-                    draw_text_centered(buf, y, fit_person(scorer, WIDTH - 8),
-                                       self.INK, x_min=3)
-                    y += 7
+                    y = draw_text_on_empty(buf, y, fit_text(clock, WIDTH - 8), self.INK_DIM)
+                if scorer:
+                    y = draw_text_on_empty(buf, y, fit_person(scorer, WIDTH - 8), self.INK)
 
         # Odds restored 2026-08-11 (completeness review) -- see
         # basketball's own detail renderer for the full note on why.
@@ -14304,52 +14377,23 @@ class SportsEngine(Browsable, BigMomentSource):
         comps = ev["competitors"]
         sit = ev.get("situation") or {}
         if ev["live"]:
-            if sit.get("power_play"):
-                draw_leverage_glow(buf, 1, 1, WIDTH - 1, 6, (80, 160, 255),
-                                   self.scroll * 0.3)
             draw_text_centered(buf, 1, fit_text(head, WIDTH - 8), self.LIVE, x_min=3)
             y = draw_scorebug_bars(buf, 7, comps, row_h=8)
             period, clock = ev.get("period"), ev.get("clock") or ""
             line = f"P{period} {clock}".strip() if period else clock
-            st = sit.get("strength") or ("PP" if sit.get("power_play") else "")
-            if line and y <= HEIGHT - 16:
-                draw_hockey_rink_hero(buf, 3, y, WIDTH - 3, y + 14)
-                dim_hero_text_band(buf, 3, y + 2, WIDTH - 3, y + 12)
-                draw_text_centered(buf, y + 2, fit_text(line, WIDTH - 8),
-                                   self.LIVE, x_min=3)
-                if st:
-                    draw_text_centered(buf, y + 8, fit_text(st, WIDTH - 8),
-                                       (220, 230, 255), x_min=3)
-                y += 15
-            elif line:
-                draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.LIVE, x_min=3)
-                y += 7
+            y = self._draw_mute_strip(buf, ev, y + 1)
+            if line:
+                y = draw_text_on_empty(buf, y, fit_text(line, WIDTH - 8),
+                                       self._clock_ink(ev))
             y = self._draw_last_play(buf, ev, y)
+            y = self._draw_period_line(buf, ev, y)
         else:
             draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
                                color_on_dark(accent), x_min=3)
-            y = 11
-            for c in comps[:2]:
-                bar = c.get("color") or self.INK_DIM
-                for by in range(10):
-                    for bx in (3, 4):
-                        put_px(buf, bx, y + by, bar)
-                sc = c.get("score")
-                sc_txt = "" if sc is None else str(sc)
-                col = self.WIN if c.get("winner") else self.HERO_INK
-                avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
-                draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
-                if sc_txt:
-                    draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
-                y += 11
-                rec = c.get("record")
-                if rec:
-                    draw_text3x5(buf, 8, y, fit_text(rec, WIDTH - 12), self.INK_DIM)
-                y += 6
-            y += 1
-            draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8),
-                               self.INK_DIM, x_min=3)
-            y += 7
+            y = self._draw_empty_matchup(buf, ev, 11, comps)
+            y = draw_text_on_empty(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8),
+                                   self.INK_DIM)
+            y = self._draw_period_line(buf, ev, y)
 
         odds_line = self._footer_odds_text(ev)
         foot_lines = [x for x in (odds_line, ev.get("series"), ev.get("venue"),
@@ -14380,29 +14424,12 @@ class SportsEngine(Browsable, BigMomentSource):
         headline = ev.get("class_label") or ev.get("league_name") or "MMA"
         draw_text_centered(buf, 5, fit_text(headline, WIDTH - 8), color_on_dark(accent), x_min=3)
         tag = "MAIN EVENT" if (num == 1 and seg.startswith("MAIN")) else seg
+        y = 12
         if tag:
-            draw_text_centered(buf, 12, fit_text(tag, WIDTH - 8), self.INK_DIM, x_min=3)
+            y = draw_text_on_empty(buf, y, fit_text(tag, WIDTH - 8), self.INK_DIM)
 
         comps = ev["competitors"][:2]
-        cx, cy, r = WIDTH // 2, 33, 15
-        draw_octagon_hero(buf, cx, cy, r)
-
-        y = cy - 9
-        for i, c in enumerate(comps):
-            won = c.get("winner")
-            col = self.WIN if won else ((255, 255, 255) if ev["state"] == "post" else self.HERO_INK)
-            name = c.get("full") or c.get("abbr") or ""
-            draw_text_centered(buf, y, fit_person(name, WIDTH - 10), col, x_min=3)
-            y += 6
-            rec = c.get("record")
-            if rec:
-                draw_text_centered(buf, y, fit_text(rec, WIDTH - 10), (220, 200, 200), x_min=3)
-            y += 6
-            if i == 0:
-                draw_text_centered(buf, y, "VS", (255, 255, 255))
-                y += 6
-
-        y = cy + r + 3
+        y = self._draw_empty_matchup(buf, ev, y, comps)
         current, total = self._mma_round_pair(ev)
         if ev["live"] or current or ev.get("total_rounds"):
             if ev["live"]:
@@ -14419,10 +14446,25 @@ class SportsEngine(Browsable, BigMomentSource):
             line = str(clk)
         else:
             line = ev.get("detail") or ""
-        if line and y <= HEIGHT - 5:
-            draw_text_centered(buf, y, fit_text(line, WIDTH - 8),
-                               self.LIVE if ev["live"] else self.INK_DIM, x_min=3)
-            y += 7
+        if line:
+            y = draw_text_on_empty(
+                buf, y, fit_text(line, WIDTH - 8),
+                self.LIVE if ev["live"] else self.INK_DIM)
+
+        fight = self._mma_card_fight(ev)
+        stats = (mma.FEED.get_stats(fight.get("id"))
+                 if fight and fight.get("id") else {})
+        if stats and y <= HEIGHT - 5:
+            fighters = fight.get("fighters") or []
+            left = stats.get(fighters[0]["id"]) if fighters else None
+            right = stats.get(fighters[1]["id"]) if len(fighters) > 1 else None
+            lv = (left or {}).get("sig_landed")
+            rv = (right or {}).get("sig_landed")
+            if lv is not None or rv is not None:
+                a = "-" if lv is None else str(int(lv))
+                b = "-" if rv is None else str(int(rv))
+                y = draw_text_on_empty(buf, y, fit_text(f"SIG {a}-{b}", WIDTH - 8),
+                                       self.INK)
 
         # Odds restored 2026-08-11 (completeness review) -- see
         # basketball's own detail renderer for the full note on why.
@@ -14480,7 +14522,7 @@ class SportsEngine(Browsable, BigMomentSource):
         line1 = f"{away.get('abbr') or ''} {away.get('score')} - {home.get('score')} {home.get('abbr') or ''}"
         self._set_big_moment("GOAL", line1, newest["text"] or newest["type"], color,
                              tier=TIER_INTERRUPT, system=SYSTEM_SPORTS, sport="soccer",
-                             scorer=newest.get("scorer"))
+                             scorer=newest.get("scorer"), event_id=fg.get("event_id"))
 
     BIG_MOMENT_DETECTORS["soccer_goal"] = _detect_soccer_goal
 
@@ -14515,6 +14557,23 @@ class SportsEngine(Browsable, BigMomentSource):
             y += 5
 
         comps = ev["competitors"]
+        lead = next((c for c in comps
+                     if isinstance(c.get("thru"), int)
+                     or isinstance(c.get("hole"), int)
+                     or c.get("tee_time")), None)
+        if lead and y <= HEIGHT - 5:
+            bits = []
+            if isinstance(lead.get("thru"), int):
+                bits.append(f"THRU {lead['thru']}")
+            elif isinstance(lead.get("hole"), int):
+                bits.append(f"HOLE {lead['hole']}")
+            tee = lead.get("tee_time")
+            if tee and not isinstance(lead.get("thru"), int):
+                bits.append(paneltext.panel_text(str(tee)))
+            if bits:
+                draw_text_centered(buf, y, fit_text(" ".join(bits), WIDTH - 8),
+                                   self.INK, x_min=3)
+                y += 7
         rows = min(6, max(1, (HEIGHT - 5 - y - 8) // 6))
         for i, c in enumerate(comps[:rows]):
             pos_txt = str(c.get("place") or i + 1)
@@ -14562,24 +14621,21 @@ class SportsEngine(Browsable, BigMomentSource):
                            self.LIVE if ev["live"] else color_on_dark(accent), x_min=3)
 
         comps = ev["competitors"][:2]
-        y = 13
-        for c in comps:
-            col = self.WIN if c.get("winner") else self.HERO_INK
-            draw_text3x5(buf, 4, y, fit_person(c.get("full") or c.get("abbr") or "", WIDTH - 8), col)
-            y += 7
-        y += 1
+        if ev["live"]:
+            y = draw_scorebug_bars(buf, 13, comps, row_h=8)
+        else:
+            y = self._draw_empty_matchup(buf, ev, 13, comps)
 
         line = self._tennis_set_line(comps)
         if self._tennis_is_deciding(ev):
-            draw_leverage_glow(buf, 2, y - 1, WIDTH - 2, y + 16,
+            draw_leverage_glow(buf, 2, y - 1, WIDTH - 2, y + 8,
                                (230, 220, 90), self.scroll * 0.35)
         if line:
-            draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.INK, x_min=3)
-            y += 7
+            y = draw_text_on_empty(buf, y, fit_text(line, WIDTH - 8), (255, 255, 255))
         elif ev["state"] == "pre":
-            draw_text_centered(buf, y, "NOT STARTED", self.INK_DIM, x_min=3)
-            y += 7
+            y = draw_text_on_empty(buf, y, "NOT STARTED", self.INK_DIM)
         if any(c.get("sets") for c in comps) or ev.get("best_of") in (3, 5):
+            fill_plate(buf, 2, y, WIDTH - 2, y + 9)
             draw_tennis_set_pips(buf, y, comps, best_of=ev.get("best_of"))
             y += 10
 
@@ -14621,46 +14677,22 @@ class SportsEngine(Browsable, BigMomentSource):
         if not ev["live"]:
             draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
                                color_on_dark(accent), x_min=3)
-            y = 11
-            for c in comps[:2]:
-                bar = c.get("color") or self.INK_DIM
-                for by in range(10):
-                    for bx in (3, 4):
-                        put_px(buf, bx, y + by, bar)
-                sc = c.get("score")
-                sc_txt = "" if sc is None else str(sc)
-                col = self.WIN if c.get("winner") else self.HERO_INK
-                avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
-                draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
-                if sc_txt:
-                    draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
-                y += 11
-                rec = c.get("record")
-                if rec:
-                    draw_text3x5(buf, 8, y, fit_text(rec, WIDTH - 12), self.INK_DIM)
-                y += 6
-
-            y += 1
-            draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8),
-                               self.INK_DIM, x_min=3)
-            y += 7
-            # Odds restored 2026-08-11 (completeness review) -- see
-            # basketball's own detail renderer for the full note on why.
+            y = self._draw_empty_matchup(buf, ev, 11, comps)
+            if ev.get("state") == "post":
+                y = self._draw_period_line(buf, ev, y)
+            y = draw_text_on_empty(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8),
+                                   self.INK_DIM)
             odds_line = self._footer_odds_text(ev)
             foot_lines = [x for x in (odds_line, ev.get("series"), ev.get("venue"),
                                       ev.get("broadcast"), ev.get("note")) if x]
             for line in foot_lines:
                 if y > HEIGHT - 5:
                     break
-                draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.INK_DIM, x_min=3)
-                y += 7
+                y = draw_text_on_empty(buf, y, fit_text(line, WIDTH - 8), self.INK_DIM)
             return
 
-        # ---- LIVE: baseball's scorebug chrome, then the drive strip.
+        # ---- LIVE: scorebug on empty, 4px mute strip, clock off the turf.
         sit = ev.get("situation") or {}
-        if sit.get("is_redzone"):
-            draw_leverage_glow(buf, 1, 1, WIDTH - 1, 5, (255, 50, 40),
-                               self.scroll * 0.3)
         draw_text_centered(buf, 1, fit_text(head, WIDTH - 8), self.LIVE, x_min=3)
         y = draw_scorebug_bars(buf, 7, comps, row_h=8,
                                possession=sit.get("possession"))
@@ -14668,30 +14700,17 @@ class SportsEngine(Browsable, BigMomentSource):
         period, clock = ev.get("period"), ev.get("clock") or ""
         line = f"Q{period} {clock}".strip() if period else clock
         dd = situation_line(ev)
-        y += 1
-        if y <= HEIGHT - 16:
-            draw_football_drive_strip(
-                buf, 3, y, WIDTH - 3, y + 14,
-                yard_line=sit.get("yard_line"),
-                redzone=bool(sit.get("is_redzone")),
-                phase=self.scroll * 0.3)
-            if line:
-                draw_text_centered(buf, y + 1, fit_text(line, WIDTH - 8),
-                                   self.LIVE, x_min=3)
-            if dd:
-                draw_text_centered(buf, y + 8, fit_text(dd, WIDTH - 8),
-                                   FIELD_YARD_LINE, x_min=3)
-            y += 15
-        else:
-            if line:
-                draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.LIVE, x_min=3)
-                y += 7
-            if dd:
-                draw_text_centered(buf, y, fit_text(dd, WIDTH - 8), self.INK, x_min=3)
-                y += 7
+        y = self._draw_mute_strip(buf, ev, y + 1)
+        if line:
+            y = draw_text_on_empty(buf, y, fit_text(line, WIDTH - 8),
+                                   self._clock_ink(ev))
+        if dd:
+            y = draw_text_on_empty(buf, y, fit_text(dd, WIDTH - 8), FIELD_YARD_LINE)
 
         y = self._draw_last_play(buf, ev, y)
         y = self._draw_timeout_pips(buf, ev, y)
+        y = self._draw_period_line(buf, ev, y)
+        self._draw_win_pct(buf, ev)
         foot_lines = [x for x in (ev.get("series"), ev.get("venue"),
                                   ev.get("broadcast"), ev.get("note")) if x]
         for line in foot_lines:
@@ -14727,43 +14746,20 @@ class SportsEngine(Browsable, BigMomentSource):
             y = draw_scorebug_bars(buf, 7, comps, row_h=8)
             period, clock = ev.get("period"), ev.get("clock") or ""
             line = f"Q{period} {clock}".strip() if period else clock
-            if (ev.get("situation") or {}).get("bonus") is True:
-                line = f"{line} BONUS".strip() if line else "BONUS"
-            if line and y <= HEIGHT - 16:
-                draw_basketball_court_hero(buf, 3, y, WIDTH - 3, y + 14)
-                dim_hero_text_band(buf, 3, y + 2, WIDTH - 3, y + 12)
-                draw_text_centered(buf, y + 5, fit_text(line, WIDTH - 8),
-                                   self.LIVE, x_min=3)
-                y += 15
-            elif line:
-                draw_text_centered(buf, y, fit_text(line, WIDTH - 8), self.LIVE, x_min=3)
-                y += 7
+            y = self._draw_mute_strip(buf, ev, y + 1)
+            if line:
+                y = draw_text_on_empty(buf, y, fit_text(line, WIDTH - 8),
+                                       self._clock_ink(ev))
             y = self._draw_timeout_pips(buf, ev, y)
+            y = self._draw_last_play(buf, ev, y)
+            y = self._draw_period_line(buf, ev, y)
+            self._draw_win_pct(buf, ev)
         else:
             draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
                                color_on_dark(accent), x_min=3)
-            y = 11
-            for c in comps[:2]:
-                bar = c.get("color") or self.INK_DIM
-                for by in range(10):
-                    for bx in (3, 4):
-                        put_px(buf, bx, y + by, bar)
-                sc = c.get("score")
-                sc_txt = "" if sc is None else str(sc)
-                col = self.WIN if c.get("winner") else self.HERO_INK
-                avail = WIDTH - 14 - (text_w(sc_txt, 2) if sc_txt else 0)
-                draw_text3x5(buf, 8, y, fit_text(c.get("abbr") or "", avail, 2), col, scale=2)
-                if sc_txt:
-                    draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
-                y += 11
-                rec = c.get("record")
-                if rec:
-                    draw_text3x5(buf, 8, y, fit_text(rec, WIDTH - 12), self.INK_DIM)
-                y += 6
-            y += 1
-            draw_text_centered(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8),
-                               self.INK_DIM, x_min=3)
-            y += 7
+            y = self._draw_empty_matchup(buf, ev, 11, comps)
+            y = draw_text_on_empty(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8),
+                                   self.INK_DIM)
 
         # Real bug fixed 2026-08-11 (completeness review): dedicated
         # detail renderers built their own hardcoded footer chain and
@@ -15208,11 +15204,17 @@ class WeatherEngine:
         return 0.15 if self.data.get("conditions") else 0.0
 
     def adopt_ambient_view(self):
-        """AUTO shows the live scope when there are tracks, else conditions."""
+        """AUTO face: live scope when cells exist, else the hourly
+        glance (real next hours), else conditions. Hourly is the
+        useful wall card when the sky is quiet -- current temp is
+        already on the clock."""
         if self.data.get("tracks"):
             if self.view not in ("radar", self.VIEW_DETAIL):
                 self.view = "radar"
-        elif self.view == "radar":
+        elif self.data.get("hourly"):
+            if self.view not in ("hourly", self.VIEW_DETAIL):
+                self.view = "hourly"
+        elif self.view in ("radar", "hourly"):
             self.view = "main"
 
     def _step_view(self, direction):
@@ -16548,29 +16550,23 @@ class BlogEngine(Browsable):
 
 
 class OwnerNoteEngine:
-    """OWNER NOTE -- a persistent, owner-authored message (ownernote.py).
+    """TODAY -- one work sticky. ownernote.py is the store.
 
-    Deliberately styled after `BlogEngine`'s own calm, no-scroll,
-    Vestaboard-style presentation -- same "this earns almost no
-    attention on purpose" design goal -- but simpler: one static note,
-    no rotation, no pulse (there is no "new post arriving" moment to
-    flash on; the owner sets it and it just sits there until changed).
+    Vestaboard, not a notebook: 6×14 glyphs, no scroll, no keyboard.
+    The phone is the capture surface. The panel holds the one line
+    you need to see from across the room.
 
-    No I/O in tick() -- ownernote.py has no FEED/poller (see its own
-    module docstring for why: this is local config the owner PUSHES via
-    the control panel, not something to poll), so tick() reads the
-    config directly, matching dnd.py's own "just read the config
-    file" simplicity for a similarly tiny, locally-owned setting.
+    tick() reads ownernote.load_config()'s mtime cache -- not the disk.
     """
 
     name = "ownernote"
-    tick_rate = 1.0          # no animation at all -- re-reading once a second is plenty
+    tick_rate = 1.0
 
     BG = (0, 0, 0)
     ACCENT = (255, 214, 110)
     BODY = (225, 228, 238)
     INK_DIM = (70, 76, 92)
-    BODY_LINES = 6
+    BODY_LINES = ownernote.LINES
 
     def __init__(self):
         self.score = 0
@@ -16583,7 +16579,7 @@ class OwnerNoteEngine:
         return bool(self.data.get("text"))
 
     def input(self, cmd):
-        pass          # nothing to browse -- one static note
+        pass
 
     def auto(self):
         pass
@@ -16595,7 +16591,10 @@ class OwnerNoteEngine:
     AMBIENT_STYLE = "fade"
 
     def ambient_weight(self):
-        return 0.8    # same quiet weighting as the guestbook it's modeled on
+        return 1.2 if self.has_content() else 0.5
+
+    def ambient_interest(self):
+        return 0.45 if self.has_content() else 0.0
 
     def frame(self):
         buf = blank()
@@ -16603,12 +16602,12 @@ class OwnerNoteEngine:
         text = self.data.get("text")
 
         if not text:
-            draw_header(buf, "NOTE", self.ACCENT)
+            draw_header(buf, "TODAY", self.ACCENT)
             draw_text_centered(buf, 26, "NO NOTE SET", self.INK_DIM)
             draw_text_centered(buf, 34, "YET", self.INK_DIM)
             return bytes(buf)
 
-        draw_header(buf, "NOTE", self.ACCENT)
+        draw_header(buf, "TODAY", self.ACCENT)
         lines = wrap_text(text, WIDTH - 6, self.BODY_LINES)
         total_h = len(lines) * 8
         y = max(14, (HEIGHT - total_h) // 2 + 4)
@@ -16774,28 +16773,19 @@ class AmbientEngine(Browsable):
         "auto": "AUTO", "world": "WORLD", "arcade": "ARCADE", "mix": "MIX",
     }
 
-    # Every glance / data mode that is honest to put on a wall.
-    # WORLD walks this whole list. AUTO walks ACTS, not this tour.
-    # Takeovers (gameday / planewatch / notify) stay out -- they seize
-    # the panel, they do not take a turn.
-    SEQUENCE = (
-        "flights", "satellite", "weather", "sports", "nowplaying",
-        "followflight", "departures", "ticker", "news", "events",
-        "blog", "ownernote", "clock",
-    )
+    # WORLD walk, ARCADE games, night gallery -- one source (catalog.py).
+    SEQUENCE = catalog.sequence()
     # AUTO acts -- look up, then what's happening, then the board,
-    # then one page of reading. Rest is night gallery / quiet clock.
+    # then today's work note (if set), then one page of reading.
+    # Rest is night gallery / quiet clock.
     ACT_SKY = ("flights", "satellite", "weather")
     ACT_PLAY = ("sports", "nowplaying", "followflight")
     ACT_BOARD = ("departures", "ticker")
-    ACT_PAGE = ("news", "events", "blog", "ownernote")
+    ACT_PAGE = ("news", "events", "blog")
     # Night / quiet-world rest faces -- the calm generative ones.
-    GALLERY = ("life", "tunnel", "tron", "powder")
+    GALLERY = catalog.gallery()
     # Every native game that can drive itself. Visually the arcade.
-    ARCADE = (
-        "life", "tunnel", "tron", "powder", "snake", "pong", "breakout",
-        "chase", "flappy", "invaders", "dodge", "tetris", "2048", "brawler",
-    )
+    ARCADE = catalog.arcade()
     MIX_EXTRA = ()
     NIGHT_GALLERY_START = 2
     NIGHT_GALLERY_END = 7
@@ -16950,6 +16940,11 @@ class AmbientEngine(Browsable):
         names = []
         for group in (self.ACT_SKY, self.ACT_PLAY, self.ACT_BOARD):
             names.extend(n for n in group if n in self.engines)
+        # Today's note is a desk, not a newspaper. When it is set it
+        # always gets a glance -- it does not compete with news.
+        note = self.engines.get("ownernote")
+        if note is not None and note.has_content() and "ownernote" not in names:
+            names.append("ownernote")
         page = self._auto_page_name()
         if page and page not in names:
             names.append(page)
@@ -17215,6 +17210,28 @@ class AmbientEngine(Browsable):
         self.hold = 0
         self._cut_hard = hard
 
+    def _land_on_score(self, moment):
+        """After a scoring graphic: the next frame is that sport's DETAIL.
+
+        Celebration draws on top for the hold. When it ends, the wall
+        is already on the game -- a broadcast cut, not a walk back
+        through the ticker."""
+        slots = self._slot_names()
+        if "sports" not in slots:
+            return
+        eng = self.engines.get("sports")
+        if eng is None:
+            return
+        eid = moment.get("event_id")
+        if eid:
+            eng.lock_scored_game(eid)
+        self.idx = slots.index("sports")
+        self.hold = 0
+        self._beat = self.BEAT_FEATURE
+        self._montage_i = 0
+        self._cut_hard = False
+        self._trans_from = None
+
     # ---- input -----------------------------------------------------------
     def _step(self, direction):
         self._advance(direction)
@@ -17318,6 +17335,8 @@ class AmbientEngine(Browsable):
                     self._celebration = best_moment
                     self._celebration_t = TIER_TICKS.get(tier, CELEBRATION_TICKS)
                     started_or_preempted = True
+                    if best_moment.get("system") == SYSTEM_SPORTS:
+                        self._land_on_score(best_moment)
 
         if not started_or_preempted and self._celebration_t > 0:
             self._celebration_t -= 1
@@ -17393,7 +17412,9 @@ class AmbientEngine(Browsable):
         np_eng = self.engines.get("nowplaying")
         np_idx = slots.index("nowplaying") if "nowplaying" in slots else -1
         new_key = np_eng.track_key() if np_eng is not None else None
-        if (not live_locked and new_key and new_key != self._music_key
+        if self._music_key is None:
+            self._music_key = new_key
+        elif (not live_locked and new_key and new_key != self._music_key
                 and self.cycling and self._celebration_t <= 0
                 and self.browse.auto_ok and not dnd.is_enabled()
                 and np_idx >= 0 and np_idx in avail
@@ -17650,39 +17671,8 @@ class MenuEngine:
     # different it feels like a bolted-on second app in the same flat list.
     CART_COLOR = (255, 191, 0)
 
-    # id, label, accent -- same palette as the phone controller, so the two
-    # screens read as one system rather than two different apps.
-    NATIVE_GAMES = [
-        ("snake",    "SNAKE",    (51, 255, 176)),
-        ("tetris",   "TETRIS",   (0, 200, 255)),
-        ("pong",     "PONG",     (143, 255, 199)),
-        ("breakout", "BREAKOUT", (255, 90, 120)),
-        ("tron",     "TRON",     (0, 255, 242)),
-        ("flappy",   "FLAPPY",   (255, 226, 60)),
-        ("invaders", "INVADERS", (255, 51, 200)),
-        ("dodge",    "DODGE",    (255, 210, 60)),
-        ("2048",     "2048",     (176, 96, 255)),
-        ("life",     "LIFE",     (125, 255, 176)),
-        ("brawler",  "BRAWLER",  (80, 235, 130)),
-        ("chase",    "CHASE",    (255, 226, 60)),
-        ("tunnel",   "TUNNEL",   (120, 110, 255)),
-        ("powder",   "POWDER",   (230, 190, 90)),
-        ("ticker",   "TICKER",   (60, 230, 110)),
-        ("satellite", "ISS",     (255, 226, 60)),
-        ("flights",  "FLIGHTS",  (120, 200, 255)),
-        ("followflight", "FOLLOW", (255, 200, 90)),
-        ("departures", "BOARD", (120, 200, 255)),
-        ("nowplaying", "MUSIC", (255, 90, 200)),
-        ("ownernote", "NOTE",   (255, 214, 110)),
-        ("sports",   "SPORTS",   (255, 140, 40)),
-        ("news",     "NEWS",     (255, 226, 60)),
-        ("weather",  "WEATHER",  (90, 190, 255)),
-        ("clock",    "CLOCK",    (120, 200, 255)),
-        ("blog",     "BLOG",     (176, 96, 255)),
-        ("events",   "EVENTS",   (255, 190, 90)),
-        ("ambient",  "AMBIENT",  (176, 96, 255)),
-        ("gameday",  "GAME DAY", GAMEDAY_ACCENT),
-    ]
+    # Shelf comes from catalog.py -- one list, not a second handwritten one.
+    NATIVE_GAMES = catalog.menu_tiles()
 
     def __init__(self):
         self.score = 0
@@ -20081,9 +20071,12 @@ class GameDayEngine(Browsable):
         if g:
             self.score = (g["home"].get("score") or 0) + (g["away"].get("score") or 0)
             self.pulse.note((g["home"].get("score"), g["away"].get("score")))
+            # Live / tonight stay. FINAL starts the exit clock.
             self.done_t = self.done_t + 1 if g["state"] == "post" else 0
         else:
-            self.done_t = 0
+            # No game today -- do not sit on GAME DAY forever. Next-game
+            # (if the feed has one) still gets a glance, then we leave.
+            self.done_t += 1
         self._maybe_exit()
 
     # ---- shared chrome ---------------------------------------------------
@@ -20372,39 +20365,33 @@ class GameDayEngine(Browsable):
         data = self.sports_data or {}
         g = data.get("favorite_game")
         fav = data.get("favorite") or {}
+        nxt = data.get("favorite_next")
 
-        if not g:
-            self._occasion_frame(buf, 0.15)
-            self._kicker(buf, "GAME DAY")
-            draw_text_centered(buf, 26, fit_text(fav.get("team_abbr") or "NO TEAM", WIDTH - 8),
-                               self.HERO, x_min=3)
-            draw_text_centered(buf, 38, "NO GAME TODAY", self.INK_DIM)
-            return bytes(buf)
+        if (not g) or (g.get("state") == "post" and nxt and self.done_t > self.EXPIRE_TICKS // 3):
+            # After a final, or on an off day: the next real game, not
+            # a parked "NO GAME" takeover.
+            if nxt:
+                return self._frame_team_next(nxt)
+            if not g:
+                self._occasion_frame(buf, 0.15)
+                self._kicker(buf, "GAME DAY")
+                draw_text_centered(buf, 26, fit_text(fav.get("team_abbr") or "NO TEAM", WIDTH - 8),
+                                   self.HERO, x_min=3)
+                draw_text_centered(buf, 38, "NO GAME TODAY", self.INK_DIM)
+                return bytes(buf)
 
         live = g["state"] == "in"
         self._occasion_frame(buf, self._intensity(g))
         self._kicker(buf, "LIVE" if live else ("FINAL" if g["state"] == "post" else "TONIGHT"),
                      self.LIVE if live else None)
 
-        # Full panel, maximum detail -- this is the one night it does not
-        # have to share space. Both teams big, with their real colours.
-        flash = (255, 255, 255) if self.pulse.on else None
-        y = 14
-        for team in (g["away"], g["home"]):
-            col = flash or (self.HERO if team.get("winner") or live else self.INK)
-            bar = team.get("color") or self.INK_DIM
-            for by in range(10):
-                for bx in (2, 3):
-                    put_px(buf, bx, y + by, bar)
-            txt = f"{team['abbr']} {team.get('score') if team.get('score') is not None else ''}".strip()
-            draw_text_centered(buf, y, fit_text(txt, WIDTH - 12, 2), col, scale=2, x_min=6)
-            y += 14
+        comps = [g.get("away") or {}, g.get("home") or {}]
+        y = draw_scorebug_bars(buf, 14, comps, row_h=9)
 
         detail = g.get("detail") or ""
         if detail:
-            draw_text_centered(buf, 44, fit_text(detail, WIDTH - 8),
-                               self.LIVE if live else self.INK_DIM, x_min=3)
-        # Sport-specific live state, reusing the work from the context pass.
+            y = draw_text_on_empty(buf, y + 1, fit_text(detail, WIDTH - 8),
+                                   self.LIVE if live else self.INK_DIM)
         sit = g.get("situation") if live else None
         if sit and (sit.get("bases") is not None or sit.get("outs") is not None):
             draw_diamond(buf, WIDTH - 20, 52, sit.get("bases"))
@@ -20415,10 +20402,35 @@ class GameDayEngine(Browsable):
         else:
             line = situation_line(g) if live else ""
             if not line:
-                ar, hr = g["away"].get("record"), g["home"].get("record")
+                ar, hr = (g.get("away") or {}).get("record"), (g.get("home") or {}).get("record")
                 line = f"{ar} / {hr}" if ar and hr else ""
-            if line:
-                draw_text_centered(buf, 53, fit_text(line, WIDTH - 8), self.INK_DIM, x_min=3)
+            if line and y <= HEIGHT - 5:
+                draw_text_on_empty(buf, min(y, 53), fit_text(line, WIDTH - 8), self.INK_DIM)
+        return bytes(buf)
+
+    def _frame_team_next(self, g):
+        """Off-day / post-final: the next real game, empty card."""
+        buf = blank(); fill(buf, self.BG)
+        self._occasion_frame(buf, 0.2)
+        self._kicker(buf, "NEXT", self.GOLD)
+        away, home = g.get("away") or {}, g.get("home") or {}
+        y = 14
+        for team in (away, home):
+            bar = team.get("color") or self.INK_DIM
+            for by in range(10):
+                for bx in (2, 3):
+                    put_px(buf, bx, y + by, bar)
+            name = team.get("abbr") or ""
+            draw_text3x5(buf, 7, y + 2, fit_text(name, WIDTH - 14, 2), self.HERO, scale=2)
+            rec = team.get("record")
+            if rec:
+                draw_text3x5(buf, 7, y + 12, fit_text(rec, WIDTH - 14), self.INK_DIM)
+                y += 18
+            else:
+                y += 13
+        when = g.get("when") or g.get("detail") or ""
+        if when:
+            draw_text_on_empty(buf, min(y + 1, 54), fit_text(when, WIDTH - 8), self.HERO)
         return bytes(buf)
 
     # ---- render ----------------------------------------------------------
@@ -20519,3 +20531,7 @@ ENGINES = {
 }
 
 PLAYABLE = set(ENGINES) - {"menu", "boot"}
+
+_CATALOG_MISSING = catalog.missing_from(ENGINES)
+if _CATALOG_MISSING:
+    raise RuntimeError("catalog names have no engine: " + ", ".join(_CATALOG_MISSING))

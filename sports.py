@@ -2665,9 +2665,8 @@ class SportsFeed:
         win_prob, age, err, standings}. Never blocks.
 
         favorite_game is TODAY only (today's scoreboard). favorite_next is
-        the next future pre game, and only when there is no game today --
-        a today live/final/pre always wins so next-game cannot look like
-        it is happening now.
+        the next future pre game when there is no today game, or when
+        today's game is already FINAL -- last-final hands off to next.
         """
         now = time.time()
         with self._lock:
@@ -2693,7 +2692,8 @@ class SportsFeed:
                 None)
 
         favorite_next = None
-        if favorite and not favorite_game and raw_next:
+        today_blocking = favorite_game and favorite_game.get("state") in ("in", "pre")
+        if favorite and raw_next and not today_blocking:
             # Identity is league + abbr, never a list index. Drop a
             # cached next-game that no longer belongs to the pinned team.
             if (raw_next.get("league") == favorite["league"] and
@@ -3192,8 +3192,7 @@ class SportsFeed:
         """Schedule poll for the pinned favorite's next future pre game.
 
         Only spends a request when a favorite is set AND that team has no
-        game on today's scoreboard. Today's live/final/pre always wins, so
-        next-game is an off-day board, not a second live view.
+        live or upcoming game today. A FINAL today still fetches next.
         """
         if self._espn_http_blocked():
             return
@@ -3213,7 +3212,7 @@ class SportsFeed:
             (g for g in games if g["league"] == favorite["league"] and
              favorite["team_abbr"] in (g["home"]["abbr"], g["away"]["abbr"])),
             None)
-        if today:
+        if today and today.get("state") in ("in", "pre"):
             with self._lock:
                 self._favorite_next = None
             return
