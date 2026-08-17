@@ -442,8 +442,8 @@ def drive_nowplaying(audit):
     generic drive() loop would only cover NO LAST.FM. Sets `.data`
     directly and stubs audio_sync.FEED.get so every honest visual
     branch is driven: Last.fm empty states, named track + marquee,
-    mic-only, peak-only iris/VU/scope, and real 16-band FFT iris/bars
-    /spectrogram. Never relies on live multicast."""
+    mic-only, peak-only classic/center/fall/vu/field, and real 16-band
+    FFT. Never relies on live multicast."""
     frames = [0]
     collisions = []
     stale = {"stale": True, "fft": None, "peak_pct": None, "sample_smth": 0,
@@ -476,7 +476,7 @@ def drive_nowplaying(audit):
     try:
         n = 0
         for data in card:
-            for audio, faces in ((stale, (0,)), (peak, (0, 1, 2)), (loud, (0,)), (fft, (0, 1, 2))):
+            for audio, faces in ((stale, (0,)), (peak, (0,)), (loud, (0,)), (fft, (0,))):
                 for face in faces:
                     engines.audio_sync.FEED.get = lambda a=audio: a
                     eng = engines.NowPlayingEngine.__new__(engines.NowPlayingEngine)

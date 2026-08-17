@@ -2064,6 +2064,34 @@ tick when NWS drops the alert. **Deliberate cost:** this reads
 out (a takeover that only worked while already viewing weather would be
 pointless).
 
+**Home Hub (2026-08-16)** — the glass is a house glance, same language
+as Flights/Hangar. `home.py` is the I/O module (ingest from HA + optional
+token poll). `HomeHubEngine` draws geometric rooms (Hallway, Kitchen,
+Living, Game, beds) from **real HA lights only**. Apollo M-1 is excluded
+(it is the glass, not a lamp). Missing doorbell/door/leak entity ids stay
+**absent** — never a fake sensor. On-since is adopted on first ON we see;
+we do not invent how long a light was on before the hub opened an eye.
+
+Story over telemetry: `3 ON`, `HALLWAY  3H`, `RING  2 TODAY`, `LIGHTS  LATE`.
+House events reuse `/api/notify` + `script.arcade_notify`. `data.kind`
+`doorbell`/`door`/`leak` (or those words in the title) writes a lasting
+fact to `home_log.jsonl` and `events_log` (`kind=home`). Leak is urgent
+(safety). Doorbell is a banner unless HA marks urgent. Late-lights after
+`bedtime_hour` is a **normal banner + story fact**, once per night, not
+a takeover storm.
+
+**No DND for the house.** TV/watching does not hush the board. Sky modes
+and house events share the panel; only severity orders them (severe
+weather still wins the composite). Lamp/board scripts (`arcade_as_lamp` /
+`arcade_as_board`) stay orthogonal — they hand Apollo to WLED as a light.
+
+Ambient: HOME is in WORLD / AUTO `ACT_BOARD`. A 2px amber pip at (61,62)
+when lights are on and the director is not already on HOME or SPORTS.
+
+Attach a doorbell later: HA automation → `script.arcade_notify` with
+`title: RING`, `message: FRONT`, `data.kind: doorbell`. Empty ids in
+`home_config.json` until that entity exists.
+
 **Home Assistant notification pass-through (task #8, 2026-08-08)** — a new
 `POST /api/notify` endpoint lets Home Assistant push arbitrary short text
 onto the panel, mirroring HA's real `notify` service payload shape:

@@ -156,6 +156,7 @@
     border-radius:8px; border:1px solid #3a332a; background:#211d17; color:var(--ink);
     padding:8px 12px;
   }
+  #note .desk button.active{background:var(--accent,#e8c36a); color:#1a1408; border-color:var(--accent,#e8c36a);}
   #note .desk .hint{font-size:10px; color:var(--ink-dim); margin-top:6px; line-height:1.45;}
   #note .desk .count{font-size:10px; letter-spacing:.08em;}
   #note .desk select{
@@ -430,7 +431,7 @@ const GAMES = {
   events:   {name:'EVENTS',    color:'#ffbe5a', axis:'horizontal',
     note:'Left/right pages the log.'},
   nowplaying: {name:'MUSIC',   color:'#ff5ac8', axis:'horizontal',
-    note:'Left/right cycles iris, VU, and scope. Last.fm names the track — set it on the control panel.'},
+    note:'Left/right cycles bars, VU, and scope. Last.fm names the track — set it on the control panel.'},
   ownernote: {name:'TODAY',    color:'#ffd66e',
     note:'Today\'s work sticky. 84 characters. Type it here.'},
   followflight: {name:'FOLLOW', color:'#ffc85a',
@@ -940,16 +941,30 @@ function buildMusicDesk(){
     '<div class="desk">'+
     '<input type="text" id="desk-np-user" placeholder="Last.fm username" autocomplete="off">'+
     '<label class="chk"><input type="checkbox" id="desk-np-mic"> Mic as equalizer</label>'+
+    '<label>Gain</label><input type="range" id="desk-np-gain" min="0.4" max="2.5" step="0.05" value="1">'+
+    '<label>Bass weight</label><input type="range" id="desk-np-bass" min="0.3" max="2.2" step="0.05" value="1">'+
+    '<div class="row" id="desk-np-pals">'+
+      '<button type="button" data-pal="WARM">WARM</button>'+
+      '<button type="button" data-pal="SPECTRUM">SPEC</button>'+
+      '<button type="button" data-pal="COOL">COOL</button>'+
+      '<button type="button" data-pal="MONO">MONO</button></div>'+
     '<div class="row"><button type="button" id="desk-np-save">Save</button></div>'+
     '<div class="hint" id="desk-np-now"></div>'+
-    '<div class="hint">Left/right cycles iris, VU, and scope. The API key stays on the control panel — username here keeps a key that is already set. Mic-only is the room, named only when Last.fm is scrobbling.</div>'+
+    '<div class="hint">One language. Gain is how hard. Bass weight is how heavy.</div>'+
     '</div>';
   const user = $('desk-np-user');
   const mic = $('desk-np-mic');
+  const gain = $('desk-np-gain');
+  const bass = $('desk-np-bass');
   const now = $('desk-np-now');
   const paint = (j) => {
     if (j.user && document.activeElement !== user) user.value = j.user;
     if (document.activeElement !== mic) mic.checked = !!j.mic_only;
+    if (gain && document.activeElement !== gain) gain.value = j.eq_gain ?? 1;
+    if (bass && document.activeElement !== bass) bass.value = j.eq_bass ?? 1;
+    document.querySelectorAll('#desk-np-pals [data-pal]').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.pal === (j.eq_palette || 'WARM'));
+    });
     const m = j.mic || {};
     let line = j.mic_only ? 'Equalizer' : (!j.configured ? 'No Last.fm account'
       : (j.playing ? ('Now: ' + ((j.track && j.track.track) || '?')) : 'Nothing playing'));
@@ -960,10 +975,22 @@ function buildMusicDesk(){
   };
   fetch('/api/nowplaying').then(r => r.json()).then(paint).catch(() => {});
   $('desk-np-save').onclick = async () => {
-    await postJSON('/api/nowplaying', {user: user.value, mic_only: mic.checked});
+    await postJSON('/api/nowplaying', {
+      user: user.value, mic_only: mic.checked,
+      eq_gain: parseFloat(gain.value),
+      eq_bass: parseFloat(bass.value)
+    });
     fetch('/api/nowplaying').then(r => r.json()).then(paint).catch(() => {});
   };
   mic.onchange = () => $('desk-np-save').click();
+  if (gain) gain.onchange = () => $('desk-np-save').click();
+  if (bass) bass.onchange = () => $('desk-np-save').click();
+  document.querySelectorAll('#desk-np-pals [data-pal]').forEach(btn => {
+    btn.onclick = async () => {
+      await postJSON('/api/nowplaying', {eq_palette: btn.dataset.pal});
+      fetch('/api/nowplaying').then(r => r.json()).then(paint).catch(() => {});
+    };
+  });
 }
 
 function buildSportsDesk(){

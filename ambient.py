@@ -5,8 +5,9 @@ Ambient is a DIRECTOR, not a playlist. The owner picks a channel;
 the engine decides what is worth the glass right now.
 
   auto   -- default show. Sky, then what's happening, then one page.
-            Live favorite locks sports DETAIL. New storm / new song
-            take the glass. Night or a quiet world rests on the gallery.
+            Live sports walk every live game in DETAIL. New storm /
+            new song take the glass (not mid-slate). Night or a quiet
+            world rests on the gallery.
             Clock is a quiet-day breath, not a slot every lap.
   world  -- data only (flights, ISS, sports, weather, ...).
   arcade -- self-playing games as living art.

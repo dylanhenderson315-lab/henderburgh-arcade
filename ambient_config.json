@@ -1,5 +1,5 @@
 {
-  "channel": "auto",
+  "channel": "mix",
   "mix": [
     "flights",
     "satellite",

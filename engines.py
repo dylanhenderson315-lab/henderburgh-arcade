@@ -42,6 +42,7 @@ import blog
 import mma
 import gameday
 import notify
+import home
 import skins
 import layout
 import tic80_core
@@ -1624,67 +1625,90 @@ def draw_severe_alert_banner(frame, alert, ticks, place="", n_alerts=1, cur_aler
     return bytes(buf)
 
 
+def _alert_chips(alert):
+    """At most two hobbyist facts NWS actually sent. Never invent."""
+    chips = []
+    hail = alert.get("hail_in")
+    if isinstance(hail, (int, float)) and hail > 0:
+        chips.append(("%sIN HAIL" % (("%0.2f" % hail).rstrip("0").rstrip("."))))
+    gust = alert.get("gust_mph")
+    if isinstance(gust, (int, float)) and gust > 0:
+        chips.append("%dMPH" % int(gust))
+    torn = alert.get("tornado")
+    if torn and len(chips) < 2:
+        chips.append(fit_text(torn, 24))
+    return chips[:2]
+
+
+def _until_line(expires):
+    """UNTIL 9:45P or ENDS 12M. None if NWS sent no expiry."""
+    if not isinstance(expires, (int, float)):
+        return None
+    remain = expires - time.time()
+    if remain <= 0:
+        return None
+    mins = int(remain // 60)
+    if mins < 60:
+        return "ENDS %dM" % mins
+    t = time.localtime(expires)
+    hh = int(time.strftime("%I", t).lstrip("0") or "12")
+    return "UNTIL %d:%s%s" % (hh, time.strftime("%M", t), time.strftime("%p", t)[0])
+
+
 def draw_alert_frame(alert, ticks, place="", n_alerts=1, cur_alert=0):
-    """Full-screen severe-weather alert, including the real storm mini-
-    scope. Used by WeatherEngine's own dedicated `weather` mode view --
-    someone who's actually looking at weather gets the full picture.
-    The GLOBAL cross-mode takeover no longer uses this (see
-    draw_severe_alert_banner()'s own docstring for why it was demoted
-    to a non-blocking banner, 2026-08-10) -- this is weather mode's
-    content now, not a shared takeover screen."""
+    """Storm Desk hero. Watch is a steady stroke. Warning pulses.
+    Geometry and parameters only when NWS sent them."""
     buf = blank()
     fill(buf, (0, 0, 0))
-    col = ALERT_SEVERITY_COLOR.get(alert.get("severity"), ALERT_SEVERITY_COLOR["Unknown"])
-
-    # Pulse: a wall panel has to earn attention from someone who isn't
-    # already looking at it, and motion does that where a static red
-    # screen does not.
-    k = 0.55 + 0.45 * abs(math.sin(ticks * 0.09))
-    pulse = tuple(min(255, int(c * k)) for c in col)
-
+    kind = alert.get("kind") or weather.product_kind(alert.get("event"))
+    col = weather.event_color(alert.get("event"), alert.get("severity"))
+    warning = kind == "WARNING"
+    if warning:
+        k = 0.55 + 0.45 * abs(math.sin(ticks * 0.09))
+        pulse = tuple(min(255, int(c * k)) for c in col)
+        thick = 3
+    else:
+        pulse = rim(col, 0.85)
+        thick = 1
     for x in range(WIDTH):
-        for y in (0, 1, 2):
+        for y in range(thick):
             put_px(buf, x, y, pulse)
-        for y in (HEIGHT - 3, HEIGHT - 2, HEIGHT - 1):
-            put_px(buf, x, y, pulse)
+            put_px(buf, x, HEIGHT - 1 - y, pulse)
     for y in range(HEIGHT):
-        for x in (0, 1):
+        for x in range(thick):
             put_px(buf, x, y, pulse)
-        for x in (WIDTH - 2, WIDTH - 1):
-            put_px(buf, x, y, pulse)
+            put_px(buf, WIDTH - 1 - x, y, pulse)
 
-    draw_text_centered(buf, 6, fit_text(str(alert.get("severity", "")).upper(), WIDTH - 10), pulse)
-
-    # The event name is the thing that matters ("TORNADO WARNING").
-    # Wrapped across up to three lines rather than truncated -- this is
-    # the one view where cutting the message off could actually matter.
-    lines = wrap_text(alert.get("event", ""), WIDTH - 10, max_lines=3)
-    # Vertically centre the wrapped block between the severity label and
-    # the footer, so a 1-line event doesn't sit in the top third with dead
-    # space under it and a 3-line one still fits.
-    band_top, band_bot = 15, HEIGHT - 12
-    block_h = len(lines) * 8 - 2
-    y0 = band_top + max(0, ((band_bot - band_top) - block_h) // 2)
-    for i, ln in enumerate(lines):
-        draw_text_centered(buf, y0 + i * 8, ln, (255, 255, 255))
-
+    kicker = kind or str(alert.get("severity") or "").upper()
     if n_alerts > 1:
-        draw_dots(buf, HEIGHT - 6, n_alerts, cur_alert, on=pulse)
-    elif place:
-        draw_text_centered(buf, HEIGHT - 9, fit_text(place, WIDTH - 10), rim(col, 0.8))
+        kicker = "%s  %d/%d" % (kicker, cur_alert + 1, n_alerts)
+    draw_text_centered(buf, 5, fit_text(kicker, WIDTH - 10), pulse)
 
-    # STORM MINI-SCOPE (2026-08-09) -- real bearing/distance/motion, ONLY
-    # when NWS's own warning carried real geometry (see weather.py's
-    # _parse_storm_motion() note: real polygon warnings like Severe
-    # Thunderstorm/Tornado/Special Marine carry this; the broader zone-
-    # based watches/advisories honestly don't, and this correctly stays
-    # off for those rather than drawing an empty ring that implies data
-    # that doesn't exist). Reuses scope_xy() -- the SAME bearing/radius->
-    # pixel convention the flight radar and satellite dome already use --
-    # tucked in the top-right corner, clear of the severity label (row 6,
-    # centred) and the pulse border (rows/cols 0-2). Deliberately small
-    # and quiet: this screen's job is the life-safety text, the mini-scope
-    # is a supporting fact, not a second focal point.
+    lines = wrap_text(alert.get("event", ""), WIDTH - 10, max_lines=2)
+    y = 14
+    for ln in lines:
+        draw_text_centered(buf, y, ln, (255, 255, 255))
+        y += 8
+
+    rel = alert.get("home_rel")
+    if rel:
+        dist = alert.get("home_dist_nm")
+        chip = rel
+        if rel != "IN" and isinstance(dist, (int, float)) and dist > 0:
+            chip = "%s %dMI" % (rel, int(round(nm_to_mi(dist))))
+        draw_text_centered(buf, y, chip, pulse if rel == "IN" else (245, 248, 255))
+        y += 8
+
+    chips = _alert_chips(alert)
+    if chips:
+        draw_text_centered(buf, y, fit_text("  ".join(chips), WIDTH - 10),
+                           (255, 200, 90))
+        y += 8
+
+    until = _until_line(alert.get("expires"))
+    if until:
+        draw_text_centered(buf, min(y, 52), until, (255, 255, 255) if warning else (200, 200, 210))
+
     brg = alert.get("storm_bearing_deg")
     if brg is not None:
         mcx, mcy, mr = WIDTH - 9, 11, 6
@@ -1692,24 +1716,18 @@ def draw_alert_frame(alert, ticks, place="", n_alerts=1, cur_alert=0):
             a = i / 16 * 2 * math.pi
             put_px(buf, int(round(mcx + mr * math.cos(a))),
                    int(round(mcy + mr * math.sin(a))), rim(col, 0.35))
-        put_px(buf, mcx, mcy, rim(col, 0.6))          # home, at scope centre
+        put_px(buf, mcx, mcy, rim(col, 0.6))
         dist_nm = alert.get("storm_dist_nm") or 0.0
-        # Capped display range -- a storm 100nm out and one 10nm out both
-        # need to fit inside a 6px radius; the RING itself is the real
-        # signal ("something is out there and roughly which direction"),
-        # not a precise ruler. 50nm chosen to match the flight scope's own
-        # RADIUS_NM-family of real-world caps, not an arbitrary round number.
         frac = min(1.0, dist_nm / 50.0)
         sx, sy = scope_xy(brg, frac, cx=mcx, cy=mcy, radius=mr)
         sx, sy = int(round(sx)), int(round(sy))
         put_px(buf, sx, sy, (255, 255, 255))
         motion_dir = alert.get("storm_motion_dir_deg")
         if motion_dir is not None:
-            # Short motion arrow from the storm's own position, same
-            # scope_xy() convention, radius 3 -- real reported motion
-            # direction, not a guess.
             ax, ay = scope_xy(motion_dir, 1.0, cx=sx, cy=sy, radius=3)
             put_px(buf, int(round(ax)), int(round(ay)), (255, 255, 255))
+    elif place and y <= 54:
+        draw_text_centered(buf, 57, fit_text(place, WIDTH - 10), rim(col, 0.7))
     return bytes(buf)
 
 
@@ -7852,6 +7870,7 @@ class FlightEngine(Browsable, BigMomentSource):
     DOT_OFF = (40, 44, 56)
 
     VIEW_TICKS = 240          # ~12s per aircraft at this tick rate
+    HANGAR_PAGE_TICKS = 160   # ~8s between hangar overview and tail sheet
 
     COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 
@@ -8222,6 +8241,8 @@ class FlightEngine(Browsable, BigMomentSource):
         # uses, branched on view exactly like ATC_LOG's paging already is.
         self.hangar_entries = []
         self.hangar_idx = 0
+        self.hangar_page = 0      # 0 overview / 1 tail sheet
+        self.hangar_hold = 0
         # SELECTION MENU cursor. Rebuilt from _menu_entries() every frame
         # rather than cached, because what's genuinely available changes
         # with the live data (a route resolving, the airport being
@@ -8487,6 +8508,8 @@ class FlightEngine(Browsable, BigMomentSource):
         if self.view == self.VIEW_HANGAR:
             if self.hangar_entries:
                 self.hangar_idx = (self.hangar_idx + direction) % len(self.hangar_entries)
+                self.hangar_page = 0
+                self.hangar_hold = 0
             return
         # SELECTION MENU -- real UX bug fixed 2026-08-11 (direct owner
         # report): the menu renders as a VERTICAL stacked list
@@ -8566,6 +8589,13 @@ class FlightEngine(Browsable, BigMomentSource):
                     self.view = entries[self.menu_idx][1]
                 else:
                     self.view = self.VIEW_SCOPE
+            elif self.view == self.VIEW_HANGAR:
+                # Advance the fact page. drop / up still leave.
+                shown = (self.hangar_entries[self.hangar_idx]
+                         if self.hangar_entries else None)
+                n_pages = max(1, len(self._hangar_dossier(shown)["pages"])) if shown else 1
+                self.hangar_page = (self.hangar_page + 1) % n_pages
+                self.hangar_hold = 0
             elif self.view == self.VIEW_SCOPE:
                 # Open the menu on whatever is selected. With nothing
                 # explicitly selected yet, adopt the top of the real list
@@ -8581,12 +8611,8 @@ class FlightEngine(Browsable, BigMomentSource):
             else:
                 # From ANY deeper view, rotate returns to the menu rather
                 # than advancing an unlabelled chain -- one hub, learned
-                # once. VIEW_HANGAR is whole-device rather than
-                # selection-specific, so it goes back to the scope, the
-                # same rule it already followed before the menu existed
-                # (and the same KeyError-avoiding explicit entry).
-                self.view = (self.VIEW_SCOPE if self.view == self.VIEW_HANGAR
-                             else self.VIEW_MENU)
+                # once.
+                self.view = self.VIEW_MENU
             self._auto_detail = False    # manual either way -- see reset()
             self.hold = 0
         elif cmd == "drop":
@@ -8664,6 +8690,16 @@ class FlightEngine(Browsable, BigMomentSource):
         self.hangar_entries = hangar.LOG.get()
         if self.hangar_entries:
             self.hangar_idx %= len(self.hangar_entries)
+            if self.view == self.VIEW_HANGAR:
+                shown = self.hangar_entries[self.hangar_idx]
+                hangar.SHEETS.want(shown.get("reg"))
+                n_pages = max(1, len(self._hangar_dossier(shown)["pages"]))
+                self.hangar_page %= n_pages
+                if self.cycling and self.browse.auto_ok:
+                    self.hangar_hold += 1
+                    if self.hangar_hold >= self.HANGAR_PAGE_TICKS:
+                        self.hangar_hold = 0
+                        self.hangar_page = (self.hangar_page + 1) % n_pages
         # PERSONAL-RIG-ONLY (see atc.py/CLAUDE.md). atc.FEED degrades
         # honestly to an empty list if the worker process has never run
         # or mlx-whisper isn't installed -- reading it costs nothing
@@ -9477,21 +9513,24 @@ class FlightEngine(Browsable, BigMomentSource):
             return f"{m}M {s:02d}S"
         return f"{s}S"
 
+    def _hangar_dossier(self, e):
+        """Zero I/O -- hangar.SHEETS is last-good cache."""
+        sheet = hangar.SHEETS.get(e.get("reg")) if e and e.get("reg") else {}
+        return hangar.dossier(e, self.hangar_entries, sheet)
+
     def _frame_hangar(self):
-        """THE HANGAR -- the persistent collection (hangar.py), paged
-        one aircraft at a time. See hangar.py's own docstring for the
-        identity/retention rules; this method only ever reads
-        self.hangar_entries (refreshed in tick()), never touches
-        hangar.py directly."""
+        """THE HANGAR -- pinned tail + type, facts in pages.
+
+        Same law as UFC live / MLB DETAIL: identity never leaves.
+        Airframe, local rarity, owner sheet, and visit log each get
+        their own page. Rotate walks pages. Left/right walks tails.
+        No punched plates -- black already is the empty card.
+        """
         buf = blank()
         fill(buf, self.BG)
         n = len(self.hangar_entries)
 
         if not n:
-            # Never invents an entry -- an empty collection (device just
-            # set up, or genuinely nothing with a broadcast registration
-            # has passed overhead yet) is shown honestly, same shape as
-            # the ATC log's own empty state.
             draw_header(buf, "HANGAR", self.HANGAR)
             draw_text_centered(buf, 28, "NONE SEEN", self.INK_DIM)
             draw_text_centered(buf, 36, "YET", self.INK_DIM)
@@ -9500,97 +9539,58 @@ class FlightEngine(Browsable, BigMomentSource):
         idx = self.hangar_idx % n
         e = self.hangar_entries[idx]
         is_favorite = bool(e.get("reg")) and e["reg"] in self.favorite_aircraft
-        # FAVORITE (2026-08-09) takes the header's tag slot when set --
-        # same highest-priority-in-the-corner convention the DETAIL card's
-        # own right_tag now uses -- otherwise the existing page counter.
         right_tag = "FAVORITE" if is_favorite else f"{idx + 1}/{n}"
         draw_header(buf, e.get("reg") or "UNKNOWN", self.HANGAR, right_tag=right_tag)
 
-        # HIERARCHY (2026-08-08, extended 2026-08-09): a first sighting had
-        # ZERO visual distinction before this beyond the "FIRST SIGHTING"
-        # text row -- every other "this matters" signal in the project
-        # (the scope's NOTABLE_GLOW_FLOOR/WINDOW_GLOW_FLOOR/
-        # FAVORITE_GLOW_FLOOR, the hero silhouette's breathing glow)
-        # expresses importance as brightness+size, not text alone. Same
-        # ordered-floor language here, just with no sweep to float above:
-        # a REPEAT visitor (the routine case) is the one that dims, via
-        # rim(), so a genuine first sighting reads as brighter/bigger than
-        # the routine baseline rather than the reverse -- consistent with
-        # "important floats up", not "normal floats down and importance is
-        # merely undimmed". A FAVORITE now sits at the top of that same
-        # ordering, same as it does on the scope/DETAIL card -- full color
-        # + the largest scale, outranking even a first sighting, since
-        # (per FAVORITE_GLOW_FLOOR's own note) it is the one signal here
-        # that is entirely the owner's own choice.
-        times = e.get("times_seen") or 1
-        first_sighting = times <= 1
-        if is_favorite:
-            icon_col, icon_scale = self.HANGAR, 1.0
-        elif first_sighting:
-            icon_col, icon_scale = self.HANGAR, 0.95
-        else:
-            icon_col, icon_scale = rim(self.HANGAR, 0.55), 0.85
+        dos = self._hangar_dossier(e)
+        pages = dos.get("pages") or [["NO FACTS YET"]]
+        page_i = self.hangar_page % len(pages)
+        first_sighting = bool(dos.get("first_sighting"))
+        kind = self._hangar_kind(e.get("type"))
+        icon_col = self.HANGAR if (is_favorite or first_sighting) else rim(self.HANGAR, 0.55)
 
-        # HERO TREATMENT (2026-08-08, round 2): this used to call
-        # `_draw_plane_icon`, the thin STROKED sprite (single fuselage
-        # line + wing line + tail line, a dotted ring for the
-        # heading-unknown case) built for the busy radar scope's tight
-        # pixel budget. On a card where exactly one aircraft draws per
-        # frame, that read as a weak glyph next to a wall of text -- the
-        # owner's own complaint. Switched to `draw_hero_silhouette`, the
-        # SAME filled, per-kind-proportioned shape the plane-in-window
-        # takeover and the ceremonial detail card already use (heli gets
-        # a real filled fuselage + rotor disc, not a dotted arc; fixed-
-        # wing kinds get a solid dart with real wing mass, not a cross).
-        # `cy=19`/scale 0.85-0.95 sized so every kind's real span (nose to
-        # tail, or rotor-top to fuselage-bottom for the heli) lands at
-        # ~19-24px -- the owner's requested 18-24px band -- while
-        # clearing the header rule above and the text rows below with
-        # real margin. No heading data persists
-        # in a Hangar entry, so -- same as the silhouette's own
-        # design -- it's always shown facing "up", a portrait/showcase
-        # treatment rather than a heading-oriented radar icon.
-        cy = 19
+        # Kind lives on the left rail -- a pip, not a mural.
+        draw_hero_silhouette(buf, 7, 17, kind, icon_col, scale=0.38)
         if first_sighting:
-            draw_first_sighting_ring(buf, WIDTH // 2, cy, self.HANGAR, phase=self.ticks * 0.08)
-        draw_hero_silhouette(buf, WIDTH // 2, cy, self._hangar_kind(e.get("type")),
-                             icon_col, scale=icon_scale)
+            put_px(buf, 2, 14, self.HANGAR)
+            put_px(buf, 3, 14, self.HANGAR)
+            put_px(buf, 2, 15, self.HANGAR)
+            put_px(buf, 3, 15, self.HANGAR)
 
-        # SPACING (2026-08-08): a Y-CURSOR replaces the old fixed rows
-        # (19/31/38/45/52) -- when airline was absent, 31->45 was a real
-        # unexplained 14px dead zone doing nothing, the exact fixed-offset
-        # trap CLAUDE.md's own docstring on _frame_detail_ceremonial
-        # warns about. Each row now starts immediately after whatever
-        # actually drew before it, not a guessed advance amount. The
-        # bigger hero silhouette (up to ~24px tall, cy=19) reaches
-        # further than the old thin icon did, so the cursor starts lower
-        # to clear it rather than risking a collision.
-        y = 30
+        name = dos.get("name") or "TYPE UNKNOWN"
+        draw_text3x5(buf, 14, 14, fit_text(name, WIDTH - 17), (245, 248, 255))
+        icao = dos.get("icao")
+        if icao and icao != name:
+            draw_text3x5(buf, 14, 21, fit_text(icao, WIDTH - 17), self.INK_DIM)
 
-        # Real, readable type name (flights.ICAO_TYPE_NAMES -- same
-        # static reference table the DETAIL card already uses), falling
-        # back honestly to "TYPE UNKNOWN" for the small real fraction of
-        # aircraft that never broadcast a type code.
-        typ = flights._type_name(e.get("type")) or "TYPE UNKNOWN"
-        draw_text_centered(buf, y, fit_text(typ, WIDTH - 4), self.INK)
-        y += 7
-
-        airline = e.get("airline")
-        if airline:
-            draw_text_centered(buf, y, fit_text(airline, WIDTH - 4), self.INK_DIM)
+        y = 29
+        rows = pages[page_i]
+        for i, row in enumerate(rows[:4]):
+            text = fit_text(row, WIDTH - 6)
+            if i == 0 and page_i == 0:
+                col = (245, 248, 255)
+            elif i == 0:
+                col = self.HANGAR
+            else:
+                col = self.INK
+            if text_w(row) <= WIDTH - 6:
+                draw_text_centered(buf, y, text, col, x_min=3)
+            else:
+                draw_marquee(buf, y, row, col, self.route_scroll)
             y += 7
 
-        # Repeat visitors get the SAME green treatment as an ATC
-        # confidence-match -- "this one's been here before" is the
-        # collection's own version of a confirmed, notable fact.
-        seen_col = self.ATC_MATCH if times > 1 else self.INK_DIM
-        seen_txt = f"SEEN {times}X" if times > 1 else "FIRST SIGHTING"
-        draw_text_centered(buf, y, fit_text(seen_txt, WIDTH - 4), seen_col)
-        y += 7
-
-        age = max(0.0, time.time() - (e.get("first_seen") or 0))
-        draw_text_centered(buf, min(y, HEIGHT - 5), fit_text(f"{self._fmt_age_long(age)} AGO", WIDTH - 4),
-                           (86, 94, 116))
+        # Page pips -- how many fact faces this tail actually has.
+        n_pages = len(pages)
+        if n_pages > 1:
+            w = n_pages * 4 - 1
+            x = (WIDTH - w) // 2
+            for i in range(n_pages):
+                col = self.HANGAR if i == page_i else (40, 44, 56)
+                put_px(buf, x, 59, col)
+                put_px(buf, x + 1, 59, col)
+                put_px(buf, x, 60, col)
+                put_px(buf, x + 1, 60, col)
+                x += 4
         return bytes(buf)
 
     def _frame_atc_log(self):
@@ -10577,15 +10577,17 @@ class NowPlayingEngine:
     Two independently real signals, neither fabricated. Identity comes
     from nowplaying.FEED (Last.fm). The visualizer comes from the
     panel's own I2S mic via audio_sync.py. The 16-band FFT is drawn
-    only when UDP Sound Sync packets actually arrive. Otherwise the
-    glass is an analog envelope instrument of the real HTTP peak --
-    iris, studio VU, or scope. Never 16 invented frequencies from one
-    number.
+    only when UDP Sound Sync packets actually arrive. Otherwise every
+    column is the real envelope through time -- never 16 invented
+    frequencies from one number. No circle. No filled block.
 
-    Left / right cycles three faces of the SAME real sample:
-      IRIS   polar meter (default) -- energy disc, peak ring, history
-      BARS   16-band analyzer, or a studio VU of the one peak
-      SCOPE  envelope history, or a real spectrogram when FFT is live
+    One language. Bass is a mass. Highs are air. Peaks remember.
+    Bands 0-3 (or the slow envelope when FFT is missing) are one
+    body -- own gain, own slow fall. Rise is fast, fall is slower,
+    bass slower still. The field behind only moves on a real jump.
+    Quiet is a centerpiece analog chip. Companion: gain, bass
+    weight, and four palettes (WARM / SPECTRUM / COOL / MONO).
+    Palettes are color, not a 16-mode menu. Never 24 invented bands.
 
     Ambient / music-steal still only dwell on a NAMED track. A live
     mic with no scrobble is a visualizer you open by hand.
@@ -10593,9 +10595,45 @@ class NowPlayingEngine:
 
     name = "nowplaying"
     tick_rate = 0.05
-    FACES = ("IRIS", "BARS", "SCOPE")
+    FACES = ("BODY",)
     HIST = 64
-    FFT_HIST = 40
+    NBAND = 16
+    NCOL = 16
+    NHIGH = 6
+    MAX_DOTS = 48
+    PALETTES = nowplaying.PALETTES
+    BASS_ATK = 0.65
+    BASS_DEC = 0.18
+    HIGH_ATK = 0.72
+    HIGH_DEC = 0.32
+    PEAK_FALL = 0.014
+
+    # WLED's number is an impulse meter. Talking, typing, and a movie
+    # all read 80-100. The glass shows CONTRAST above the room, not
+    # that number. A loud room is a low bed. Hits ride it. 1.0 is
+    # almost unreachable.
+    GATE_DEAD = 0.08
+    RISE_CAP = 0.028
+    WORK_FALL = 0.38
+    BODY_ATK = 0.14
+    BODY_REL = 0.11
+    SHAPE_EXP = 1.35
+    FULL_AT = 1.00
+    SUSTAIN_UP = 32
+    SUSTAIN_NEED = 0.16
+    SUSTAIN_DROP = 5
+    SLOW_ATK = 0.010
+    SLOW_REL = 0.007
+    FAST_ATK = 0.28
+    FAST_REL = 0.20
+    AGC_UP = 0.038
+    AGC_DN = 0.008
+    BED_GAIN = 0.60
+    PUNCH_SPAN = 0.16
+    PUNCH_GAIN = 0.42
+    TICK_GAIN = 0.12
+    SOFT_K = 1.20
+    CREST_WIN = 32
 
     BG = (0, 0, 0)
     INK = (150, 160, 185)
@@ -10603,7 +10641,7 @@ class NowPlayingEngine:
     ACCENT = (255, 90, 200)
     BAR_COLOR = (90, 220, 255)
     HOT = (255, 180, 70)
-    AMBIENT_STYLE = "iris_open"
+    AMBIENT_STYLE = "push_up"
 
     def __init__(self):
         self.score = 0
@@ -10615,15 +10653,45 @@ class NowPlayingEngine:
 
     def _init_viz(self):
         self._env = 0.0
+        self._level = 0.0
         self._hold = 0.0
         self._flash = 0.0
+        self._raw = 0.0
+        self._worked = 0.0
+        self._floor = 0.28
+        self._agc = 0.25
+        self._sustain = 0
+        self._tenure = 0.0
+        self._slow = 0.25
+        self._fast = 0.0
+        self._bed = 0.0
+        self._punch = 0.0
+        self._tick = 0.0
+        self._raw_hist = deque(maxlen=self.CREST_WIN)
         self._hist = deque([0.0] * self.HIST, maxlen=self.HIST)
         self._fft_smooth = [0.0] * 16
         self._fft_peaks = [0.0] * 16
-        self._fft_hist = deque(maxlen=self.FFT_HIST)
+        self._bars = [0.0] * self.NBAND
+        self._peaks = [0.0] * self.NBAND
+        self._band_max = [0.18] * self.NBAND
+        self._band_floor = [0.0] * self.NBAND
+        self._bass = 0.0
+        self._bass_peak = 0.0
+        self._bass_prev = 0.0
+        self._bass_jump = 0.0
+        self._highs = [0.0] * self.NHIGH
+        self._high_peaks = [0.0] * self.NHIGH
+        self._high_hist = deque([0.0] * self.NHIGH, maxlen=self.NHIGH)
+        self._dots = []
+        self._clock = 0
         self._face = 0
+        self._gain = 1.0
+        self._bass_wt = 1.0
+        self._palette = "WARM"
+        self._has_fft = False
         self._last_ingest = 0.0
         self._viz_ready = True
+        self._apply_cfg()
 
     def _ready(self):
         if not getattr(self, "_viz_ready", False):
@@ -10678,13 +10746,29 @@ class NowPlayingEngine:
             return None
         return (name, artist)
 
+    def _apply_cfg(self, adopt_mode=False):
+        try:
+            cfg = nowplaying.FEED.get_config()
+        except Exception:
+            return
+        self._gain = cfg.get("eq_gain", 1.0)
+        self._bass_wt = cfg.get("eq_bass", 1.0)
+        self._palette = nowplaying._eq_palette(cfg.get("eq_palette"), "WARM")
+
     def input(self, cmd):
         self._ready()
-        n = len(self.FACES)
-        if cmd in ("left", "up"):
-            self._face = (self._face - 1) % n
-        elif cmd in ("right", "down", "rotate"):
-            self._face = (self._face + 1) % n
+        # Left/right changes the finish on the fly — AudioRays' palette
+        # knob, not a second geometry.
+        if cmd in ("left", "right"):
+            pals = self.PALETTES
+            cur = self._palette if self._palette in pals else pals[0]
+            step = 1 if cmd == "right" else -1
+            nxt = pals[(pals.index(cur) + step) % len(pals)]
+            try:
+                nowplaying.FEED.set_eq(palette=nxt)
+            except Exception:
+                pass
+            self._palette = nxt
 
     def auto(self):
         pass
@@ -10695,26 +10779,44 @@ class NowPlayingEngine:
         t = self.data.get("track")
         self.pulse.note((t.get("track"), t.get("artist")) if t else None)
         self.scroll += 0.6
+        self._clock += 1
+        self._apply_cfg()
         self._ingest(audio_sync.FEED.get(), hist=True)
 
-    @staticmethod
-    def _band_color(i, n, peak=False):
-        """Warm lows -> cool highs. Real frequency order from the 16-band
-        FFT, not a decorative rainbow. Peak flash lifts toward white."""
-        t = i / float(max(1, n - 1))
-        col = (int(255 * (1 - t) + 80 * t),
-               int(130 * (1 - t) + 220 * t),
-               int(50 * (1 - t) + 255 * t))
-        if peak:
-            return tuple(min(255, c + 70) for c in col)
+    def _body_color(self, v):
+        """Bass mass. Palette is the finish, not a second instrument."""
+        v = clamp(v, 0.0, 1.0)
+        pal = getattr(self, "_palette", "WARM")
+        if pal == "COOL":
+            return (int(8 + 30 * v), int(40 + 150 * v), int(70 + 185 * v))
+        if pal == "MONO":
+            n = int(40 + 200 * v)
+            return (n, n, n)
+        if pal == "SPECTRUM":
+            return (int(50 + 200 * v), int(22 + 70 * v), int(8 + 18 * v))
+        # WARM — vinyl amber. The AudioRays living-room look.
+        return (int(70 + 185 * v), int(22 + 90 * v), int(4 + 18 * v))
+
+    def _air_color(self, v):
+        v = clamp(v, 0.0, 1.0)
+        pal = getattr(self, "_palette", "WARM")
+        if pal == "COOL":
+            return (int(140 + 80 * v), int(190 + 55 * v), int(230 + 25 * v))
+        if pal == "MONO":
+            n = int(90 + 160 * v)
+            return (n, n, int(n * 0.96))
+        if pal == "SPECTRUM":
+            return (int(30 + 50 * v), int(90 + 140 * v), int(140 + 115 * v))
+        return (int(180 + 75 * v), int(110 + 90 * v), int(20 + 40 * v))
+
+    def _pal_color(self, t, v, flash=False):
+        col = self._body_color(v) if t < 0.35 else self._air_color(v)
+        if flash:
+            return lerp_color(col, (255, 255, 255), 0.40)
         return col
 
     def _energy_color(self, v, flash=False):
-        """Cyan at rest, amber when loud, white only on a real transient."""
-        col = lerp_color(self.BAR_COLOR, self.HOT, clamp(v, 0.0, 1.0))
-        if flash:
-            return lerp_color(col, (255, 255, 255), 0.55)
-        return col
+        return self._pal_color(0.2, v, flash=flash)
 
     def _real_level(self, a):
         """0..1 from whatever real field is live. Never invents a spectrum."""
@@ -10739,6 +10841,47 @@ class NowPlayingEngine:
                 return sum(vals) / float(len(vals))
         return 0.0
 
+    def _learn_floor(self, raw):
+        """Quiet-room floor. Never climbs into speech or a soundtrack."""
+        if raw < self._floor:
+            self._floor = self._floor * 0.82 + raw * 0.18
+        elif raw < self._floor + 0.07:
+            self._floor = self._floor * 0.99 + raw * 0.01
+        self._floor = clamp(self._floor, 0.04, 0.28)
+
+    def _shape(self, raw):
+        """How open the gate is, 0..1. Used for tenure, not bar height."""
+        self._learn_floor(raw)
+        if raw > self._worked:
+            self._worked = min(raw, self._worked + self.RISE_CAP)
+        else:
+            self._worked = (self._worked * (1.0 - self.WORK_FALL)
+                            + raw * self.WORK_FALL)
+        excess = self._worked - self._floor - self.GATE_DEAD
+        if excess <= 0:
+            return 0.0
+        span = max(0.35, 0.85 - self._floor - self.GATE_DEAD)
+        return clamp(excess / span, 0.0, 1.0) ** self.SHAPE_EXP
+
+    def _shape_band(self, b):
+        """Same gate/expand on a real FFT bin. Missing bins stay 0."""
+        v = max(0.0, b - 0.16)
+        if v <= 0:
+            return 0.0
+        return clamp(v / 0.84, 0.0, 1.0) ** self.SHAPE_EXP
+
+    def _crest(self):
+        """0..1 how much the recent peak *moves*. A clipped movie bed
+        is loud and flat (near 0). Music and action have range."""
+        xs = list(self._raw_hist)
+        if len(xs) < 8:
+            return 0.30
+        return clamp((max(xs) - min(xs)) / 0.32, 0.0, 1.0)
+
+    def _soft(self, x):
+        """Asymptotic ceiling — a loud bed cannot sit on 1.0."""
+        return 1.0 - math.exp(-max(0.0, x) * self.SOFT_K)
+
     def _bands(self, a):
         """Real 16-band FFT as 0..1, or None. Missing stays missing."""
         fft = (a or {}).get("fft")
@@ -10752,248 +10895,616 @@ class NowPlayingEngine:
                 out.append(0.0)
         return out or None
 
+    def _process_bands(self, bands):
+        """Per-band floor + AGC + perceptual curve. Real FFT only."""
+        out = []
+        n = min(self.NBAND, len(bands))
+        for i in range(n):
+            b = clamp(bands[i], 0.0, 1.0) * self._gain
+            if b < self._band_floor[i]:
+                self._band_floor[i] = self._band_floor[i] * 0.78 + b * 0.22
+            else:
+                self._band_floor[i] = self._band_floor[i] * 0.995 + b * 0.005
+            v = max(0.0, b - self._band_floor[i] - 0.02)
+            if v > self._band_max[i]:
+                self._band_max[i] = v
+            else:
+                self._band_max[i] = max(0.12, self._band_max[i] * 0.996)
+            v = v / (self._band_max[i] + 1e-6)
+            v = v ** 0.70
+            # Tenure, not crest: speech is high-crest and must stay short.
+            v = v * (0.18 + 0.82 * self._tenure)
+            out.append(clamp(v, 0.0, 1.0))
+        while len(out) < self.NBAND:
+            out.append(0.0)
+        return out[:self.NBAND]
+
+    def _time_taps(self):
+        """16 columns of the processed envelope through time. Not a spectrum."""
+        hist = list(self._hist)
+        recent = hist[-self.NBAND:]
+        while len(recent) < self.NBAND:
+            recent.insert(0, 0.0)
+        return [clamp(v, 0.0, 1.0) for v in recent]
+
     def _ingest(self, a, hist=True):
-        """Attack / release / peak-hold / transient of the real sample."""
-        v = self._real_level(a)
+        """Bed + punch, then 16-column attack/decay + peak hold."""
+        if not getattr(self, "_bars", None):
+            self._init_viz()
+        stale = not a or a.get("stale")
+        self._raw = 0.0 if stale else self._real_level(a)
+        self._raw *= self._gain
+        self._raw = clamp(self._raw, 0.0, 1.4)
+        self._raw_hist.append(self._raw)
+        shaped = self._shape(self._raw)
+        if self._worked > self._slow:
+            self._slow = (self._slow * (1.0 - self.SLOW_ATK)
+                          + self._worked * self.SLOW_ATK)
+        else:
+            self._slow = (self._slow * (1.0 - self.SLOW_REL)
+                          + self._worked * self.SLOW_REL)
+        if self._raw > self._fast:
+            self._fast = (self._fast * (1.0 - self.FAST_ATK)
+                          + self._raw * self.FAST_ATK)
+        else:
+            self._fast = (self._fast * (1.0 - self.FAST_REL)
+                          + self._raw * self.FAST_REL)
+        if self._raw > self._agc:
+            self._agc = (self._agc * (1.0 - self.AGC_UP)
+                         + self._raw * self.AGC_UP)
+        else:
+            self._agc = (self._agc * (1.0 - self.AGC_DN)
+                         + self._raw * self.AGC_DN)
+        if self._worked > self._floor + self.SUSTAIN_NEED:
+            self._sustain = min(self.SUSTAIN_UP, self._sustain + 1)
+        else:
+            self._sustain = max(0, self._sustain - self.SUSTAIN_DROP)
+        tenure = (self._sustain / float(self.SUSTAIN_UP)) ** 1.35
+        self._tenure = tenure
+        # Loud room = a low bed. The interesting thing is the crest
+        # above that bed. Speech never holds tenure, so it never opens.
+        # Body is the song (WLED AGC already normalized the mic).
+        # Tenure still keeps speech/clicks from owning the glass.
+        self._bed = (self._worked ** 1.15) * self.BED_GAIN * tenure
+        contrast = max(0.0, self._raw - self._agc)
+        self._punch = (clamp(contrast / self.PUNCH_SPAN, 0.0, 1.0)
+                       * self.PUNCH_GAIN * (0.20 + 0.80 * tenure))
+        self._tick = clamp((self._fast - self._slow) / 0.32, 0.0, 1.0) * self.TICK_GAIN
+        v = self._soft(self._bed + self._punch + self._tick)
+        self._level = v
         prev = self._env
         if v > self._env:
-            self._env = self._env * 0.35 + v * 0.65
+            self._env = self._env * (1.0 - self.BODY_ATK) + v * self.BODY_ATK
         else:
-            self._env = self._env * 0.84 + v * 0.16
+            self._env = self._env * (1.0 - self.BODY_REL) + v * self.BODY_REL
         if v > self._hold:
             self._hold = v
         else:
             self._hold = max(0.0, self._hold - 0.012)
-        if v - prev > 0.14:
+        if self._punch > 0.22 and v > prev + 0.04:
             self._flash = 1.0
         else:
-            self._flash = max(0.0, self._flash - 0.07)
-        bands = self._bands(a)
-        if bands:
-            n = len(bands)
-            if len(self._fft_smooth) != n:
-                self._fft_smooth = [0.0] * n
-                self._fft_peaks = [0.0] * n
-            for i, b in enumerate(bands):
-                self._fft_smooth[i] = self._fft_smooth[i] * 0.55 + b * 0.45
-                if b > self._fft_peaks[i]:
-                    self._fft_peaks[i] = b
-                else:
-                    self._fft_peaks[i] = max(0.0, self._fft_peaks[i] - 0.028)
-            if hist:
-                self._fft_hist.append(list(self._fft_smooth))
+            self._flash = max(0.0, self._flash - 0.06)
+        bands = None if stale else self._bands(a)
+        self._has_fft = bool(bands)
         if hist:
-            self._hist.append(self._env)
+            self._hist.append(getattr(self, "_level", self._env))
+        wt = getattr(self, "_bass_wt", 1.0)
+        if bands:
+            processed = self._process_bands(bands)
+            bass_tgt = (sum(processed[:4]) / 4.0) * wt
+            high_tgts = processed[4:4 + self.NHIGH]
+            while len(high_tgts) < self.NHIGH:
+                high_tgts.append(0.0)
+        else:
+            # Honest split of ONE peak: slow body vs fast residual.
+            # Not 16 invented frequencies.
+            bass_tgt = self._level * wt
+            air = clamp(self._punch + self._tick, 0.0, 1.0)
+            if hist:
+                self._high_hist.append(air)
+            high_tgts = list(self._high_hist)
+            while len(high_tgts) < self.NHIGH:
+                high_tgts.insert(0, 0.0)
+        if bass_tgt > self._bass:
+            self._bass = self._bass * (1.0 - self.BASS_ATK) + bass_tgt * self.BASS_ATK
+        else:
+            self._bass = self._bass * (1.0 - self.BASS_DEC) + bass_tgt * self.BASS_DEC
+        if self._bass > self._bass_peak:
+            self._bass_peak = self._bass
+        else:
+            self._bass_peak = max(self._bass, self._bass_peak - self.PEAK_FALL)
+        for i, t in enumerate(high_tgts[:self.NHIGH]):
+            if t > self._highs[i]:
+                self._highs[i] = self._highs[i] * (1.0 - self.HIGH_ATK) + t * self.HIGH_ATK
+            else:
+                self._highs[i] = self._highs[i] * (1.0 - self.HIGH_DEC) + t * self.HIGH_DEC
+            if self._highs[i] > self._high_peaks[i]:
+                self._high_peaks[i] = self._highs[i]
+            else:
+                self._high_peaks[i] = max(self._highs[i],
+                                          self._high_peaks[i] - self.PEAK_FALL)
+        jump = max(0.0, self._bass - self._bass_prev)
+        self._bass_jump = jump
+        self._bass_prev = self._bass
         self._last_ingest = time.time()
 
-    def _stroke_ring(self, buf, cx, cy, r, color, n=None):
-        if r < 1:
-            return
-        steps = n if n is not None else max(16, int(r * 6))
-        for i in range(steps):
-            a = (i / float(steps)) * 2.0 * math.pi
-            put_px(buf, int(round(cx + r * math.cos(a))),
-                   int(round(cy + r * math.sin(a))), color)
+    def _drive(self):
+        """0..1 visual fill. Already compressed — do not re-amplify."""
+        return clamp(self._env, 0.0, 1.0)
 
-    def _draw_iris(self, buf, cx, cy, max_r, a):
-        """Analog polar meter. Disc = current envelope. Ring = peak hold.
-        History pips are past values of that same number. Spokes only
-        when a real 16-band FFT is live -- never faked from the peak."""
-        face = rim(self.INK_DIM, 0.55)
-        self._stroke_ring(buf, cx, cy, max_r, face)
+    def _draw_mass(self, buf, y0, y1):
+        """Wide warm body in the center. Bass does not share pixels with air."""
+        bar_h = max(1, y1 - y0 - 2)
+        body = clamp(self._bass, 0.0, 1.0)
+        peak = clamp(self._bass_peak, 0.0, 1.0)
+        half = 16
+        cx = 32
+        for dx in range(-half, half + 1):
+            fall = 1.0 - (abs(dx) / float(half)) ** 1.55
+            hh = int(body * fall * bar_h) if body > 0.02 else 0
+            x = cx + dx
+            for k in range(hh):
+                fade = 0.22 + 0.78 * ((k + 1) / float(max(1, hh)))
+                put_px(buf, x, y1 - 2 - k, rim(self._body_color(body), fade))
+        if peak > body + 0.03:
+            py = y1 - 2 - int(peak * bar_h)
+            py = clamp(py, y0, y1 - 2)
+            tick = (230, 236, 255)
+            for dx in range(-5, 6):
+                put_px(buf, cx + dx, py, tick)
+
+    def _draw_air(self, buf, y0, y1):
+        """Thin cool needles on the wings. Faster than the mass."""
+        xs = (2, 5, 8, 55, 58, 61)
+        bar_h = max(1, y1 - y0 - 2)
+        for i, x in enumerate(xs):
+            v = self._highs[i] if i < len(self._highs) else 0.0
+            pk = self._high_peaks[i] if i < len(self._high_peaks) else 0.0
+            hh = int(v * bar_h * 0.82) if v > 0.03 else 0
+            col = self._air_color(max(v, 0.12))
+            for k in range(hh):
+                fade = 0.30 + 0.70 * ((k + 1) / float(max(1, hh)))
+                put_px(buf, x, y1 - 2 - k, rim(col, fade))
+            if pk > v + 0.04:
+                py = y1 - 2 - int(clamp(pk, 0.0, 1.0) * bar_h * 0.82)
+                py = clamp(py, y0, y1 - 2)
+                put_px(buf, x, py, (240, 248, 255))
+
+    def _draw_field_soft(self, buf, y0, y1):
+        """Dim field. Extra motion only on a real bass jump."""
+        body = clamp(self._bass, 0.0, 1.0)
+        jump = self._bass_jump > 0.045
+        n = 14 + (6 if jump else 0)
+        for i in range(n):
+            x = (i * 19 + self._clock // 2) % 64
+            span = max(4, y1 - y0 - 6)
+            y = y0 + 2 + (i * 11 + self._clock // 3) % span
+            # Keep the field out of the bass mass column so it stays behind.
+            if 16 <= x <= 48 and y > y1 - 8:
+                continue
+            v = 0.07 + 0.10 * body + (0.10 if jump else 0.0)
+            self._mix_px(buf, x, y, rim(self._air_color(0.35), v))
+
+    def _paint_col(self, buf, x0, x1, y0, y1, v, t, peak=None):
+        """One column: fill + 1px peak-hold tick. Fade so it is not a brick."""
+        bar_h = max(1, y1 - y0 - 1)
+        h = int(clamp(v, 0.0, 1.0) * bar_h) if v > 0.02 else 0
+        col = self._pal_color(t, max(v, 0.08))
+        for k in range(h):
+            fade = 0.32 + 0.68 * ((k + 1) / float(h))
+            c = rim(col, fade)
+            y = y1 - 2 - k
+            if y < y0:
+                break
+            for x in range(x0, x1 + 1):
+                put_px(buf, x, y, c)
+        if peak is not None and peak > 0.04:
+            py = y1 - 2 - int(clamp(peak, 0.0, 1.0) * bar_h)
+            py = clamp(py, y0, y1 - 2)
+            tick = lerp_color(col, (255, 255, 255), 0.55)
+            for x in range(x0, x1 + 1):
+                put_px(buf, x, py, tick)
+
+    def _draw_classic(self, buf, y0, y1):
+        for i in range(self.NBAND):
+            x0 = i * 4
+            self._paint_col(buf, x0, x0 + 2, y0, y1,
+                            self._bars[i], i / 15.0, peak=self._peaks[i])
+
+    def _draw_center(self, buf, y0, y1):
+        for i in range(self.NBAND):
+            xl0 = 30 - i * 2
+            xr0 = 32 + i * 2
+            t = i / 15.0
+            self._paint_col(buf, xl0, xl0 + 1, y0, y1,
+                            self._bars[i], t, peak=self._peaks[i])
+            self._paint_col(buf, xr0, xr0 + 1, y0, y1,
+                            self._bars[i], t, peak=self._peaks[i])
+
+    def _draw_fall(self, buf, y0, y1):
+        rows = list(self._fft_hist)
+        span = max(1, y1 - y0 - 1)
+        take = rows[-span:]
+        for ry, frame in enumerate(take):
+            y = y1 - 2 - (len(take) - 1 - ry)
+            if y < y0:
+                continue
+            for i in range(min(self.NBAND, len(frame))):
+                v = frame[i]
+                if v < 0.03:
+                    continue
+                col = self._pal_color(i / 15.0, v)
+                x0 = i * 4
+                for x in range(x0, x0 + 3):
+                    put_px(buf, x, y, col)
+
+    def _draw_vu(self, buf, y0, y1):
+        drive = self._drive()
+        hold = clamp(self._hold, 0.0, 1.0)
+        self._paint_col(buf, 22, 41, y0, y1, drive, 0.2, peak=hold)
+        rail = rim(self._pal_color(0.2, 0.4), 0.45)
+        for y in range(y0, y1 - 1):
+            put_px(buf, 21, y, rail)
+            put_px(buf, 42, y, rail)
+        jump = self._bass_jump
+        if jump > 0.045 or self._flash > 0.35:
+            w = int(clamp(self._bass, 0.0, 1.0) * 30)
+            pulse = self._pal_color(0.0, 0.7 + 0.3 * min(1.0, jump * 6), flash=True)
+            y = y1 - 3
+            for x in range(32 - w, 32 + w + 1):
+                put_px(buf, x, y, pulse)
+                put_px(buf, x, y + 1, rim(pulse, 0.55))
+
+    def _draw_field(self, buf, y0, y1):
+        mid_y = (y0 + y1) / 2.0
+        if len(self._dots) < 6:
+            for _ in range(6 - len(self._dots)):
+                self._dots.append({
+                    "x": 8.0 + random.random() * 48.0,
+                    "y": float(y0 + 4 + random.random() * max(4, y1 - y0 - 8)),
+                    "vx": (random.random() - 0.5) * 0.2,
+                    "vy": (random.random() - 0.5) * 0.2,
+                    "life": 80, "v": 0.25, "kind": "field",
+                })
+        jump = self._bass_jump
+        kick = jump > 0.055 or (self._punch > 0.22 and self._flash > 0.4)
+        live = []
+        for p in self._dots:
+            if kick:
+                p["vx"] += (random.random() - 0.5) * (0.9 + jump * 8)
+                p["vy"] += (random.random() - 0.5) * (0.9 + jump * 8)
+                p["v"] = clamp(0.45 + jump * 4 + self._punch, 0.2, 1.0)
+                p["life"] = 80
+            else:
+                p["vx"] *= 0.92
+                p["vy"] *= 0.92
+                p["v"] *= 0.96
+                p["vx"] += (random.random() - 0.5) * 0.04
+                p["vy"] += (random.random() - 0.5) * 0.04
+            p["x"] += p["vx"]
+            p["y"] += p["vy"]
+            if p["x"] < 1:
+                p["x"], p["vx"] = 1.0, abs(p["vx"]) * 0.6
+            if p["x"] > 62:
+                p["x"], p["vx"] = 62.0, -abs(p["vx"]) * 0.6
+            if p["y"] < y0 + 1:
+                p["y"], p["vy"] = float(y0 + 1), abs(p["vy"]) * 0.6
+            if p["y"] > y1 - 3:
+                p["y"], p["vy"] = float(y1 - 3), -abs(p["vy"]) * 0.6
+            p["life"] -= 1
+            if p["life"] < 20:
+                p["life"] = 80
+                p["x"] = 20.0 + random.random() * 24.0
+                p["y"] = mid_y + (random.random() - 0.5) * 8
+            live.append(p)
+            x, y = int(round(p["x"])), int(round(p["y"]))
+            col = self._pal_color(0.15, max(0.18, p["v"]), flash=kick)
+            self._mix_px(buf, x, y, col)
+            self._mix_px(buf, x + 1, y, rim(col, 0.55))
+            self._mix_px(buf, x, y + 1, rim(col, 0.55))
+        self._dots = live[:self.MAX_DOTS]
+
+    def _draw_idle(self, buf, y0, y1):
+        """Centerpiece when the room is quiet. Analog chip in the
+        current palette — looks like furniture, not a dead meter."""
+        phase = 0.28 + 0.18 * (0.5 + 0.5 * math.sin(self._clock * 0.06))
+        floor = rim(self._body_color(0.35), phase * 0.55)
+        for x in range(WIDTH):
+            put_px(buf, x, y1 - 1, floor)
+        cx, cy = 32, (y0 + y1) // 2
+        r = min(13, max(8, (y1 - y0) // 2 - 3))
+        ring = rim(self._body_color(0.55), 0.35 + 0.25 * phase)
+        for i in range(48):
+            a = math.radians(i * 7.5)
+            put_px(buf, int(round(cx + r * math.sin(a))),
+                   int(round(cy - r * math.cos(a))), ring)
+        now = time.localtime()
+        h = (now.tm_hour % 12) + now.tm_min / 60.0
+        m = now.tm_min + now.tm_sec / 60.0
+        s = now.tm_sec
+        hour_col = self._body_color(0.85)
+        min_col = self._air_color(0.75)
+        hx = cx + (r - 5) * math.sin(math.radians(h * 30.0))
+        hy = cy - (r - 5) * math.cos(math.radians(h * 30.0))
+        mx = cx + (r - 2) * math.sin(math.radians(m * 6.0))
+        my = cy - (r - 2) * math.cos(math.radians(m * 6.0))
+        sx = cx + r * math.sin(math.radians(s * 6.0))
+        sy = cy - r * math.cos(math.radians(s * 6.0))
+        draw_line(buf, cx, cy, hx, hy, hour_col)
+        draw_line(buf, cx, cy, mx, my, min_col)
+        put_px(buf, int(round(sx)), int(round(sy)), (230, 236, 255))
+        put_px(buf, cx, cy, (245, 248, 255))
+
+    def _bar_col(self, v, flash=False):
+        return self._energy_color(clamp(v, 0.0, 1.0), flash=flash)
+
+    def _noise(self, x, y):
+        """Value hash — WLED Gravimeter's inoise8 stand-in. No extra dep."""
+        n = (int(x) * 374761393 + int(y) * 668265263) % 2147483647
+        n = (n ^ (n >> 13)) * 1274126177 % 2147483647
+        return (n & 0xFFFF) / 65535.0
+
+    def _mix_px(self, buf, x, y, color):
+        """Max-blend so overlapping motes stay one object, not a smear."""
+        if not (0 <= x < WIDTH and 0 <= y < HEIGHT):
+            return
+        i = (y * WIDTH + x) * 3
+        buf[i] = color[0] if color[0] > buf[i] else buf[i]
+        buf[i + 1] = color[1] if color[1] > buf[i + 1] else buf[i + 1]
+        buf[i + 2] = color[2] if color[2] > buf[i + 2] else buf[i + 2]
+
+    def _col_targets(self, a):
+        """Honest column targets. Real 16-band if UDP arrived. Else the
+        envelope through time — never invented frequencies."""
         bands = self._bands(a)
         if bands:
-            n = len(bands)
-            peaked = bool(a.get("peak"))
-            for i, _b in enumerate(bands):
-                v = self._fft_smooth[i] if i < len(self._fft_smooth) else 0.0
-                ang = -math.pi / 2.0 + (i + 0.5) / float(n) * 2.0 * math.pi
-                inner = 3.0
-                length = inner + v * (max_r - inner - 1)
-                col = self._band_color(i, n, peak=peaked)
-                draw_line(buf,
-                          cx + inner * math.cos(ang),
-                          cy + inner * math.sin(ang),
-                          cx + length * math.cos(ang),
-                          cy + length * math.sin(ang), col)
-                if i < len(self._fft_peaks) and self._fft_peaks[i] > 0.08:
-                    pr = inner + self._fft_peaks[i] * (max_r - inner - 1)
-                    put_px(buf, int(round(cx + pr * math.cos(ang))),
-                           int(round(cy + pr * math.sin(ang))), rim(col, 1.0))
-        env_r = 2.0 + self._env * (max_r - 5)
-        hold_r = 2.0 + self._hold * (max_r - 5)
-        col = self._energy_color(self._env, flash=self._flash > 0.4)
-        if env_r >= 2:
-            fill_disk(buf, cx, cy, max(1, int(env_r)), rim(col, 0.28))
-            fill_disk(buf, cx, cy, max(1, int(env_r * 0.62)), rim(col, 0.62))
-            fill_disk(buf, cx, cy, max(1, int(max(2, env_r * 0.28))), col)
-        if hold_r > env_r + 0.6:
-            self._stroke_ring(buf, cx, cy, hold_r, self._energy_color(self._hold))
-        if self._flash > 0.05:
-            bloom = env_r + self._flash * 7.0
-            self._stroke_ring(buf, cx, cy, min(max_r - 1, bloom),
-                              lerp_color(col, (255, 255, 255), self._flash))
-        # Past envelope around the face -- the same number, through time.
+            n = len(self._fft_smooth)
+            return [clamp(self._fft_smooth[i], 0.0, 1.0) for i in range(n)]
         hist = list(self._hist)
-        hn = len(hist)
-        if hn:
-            for i, hv in enumerate(hist):
-                ang = -math.pi / 2.0 + (i / float(hn)) * 2.0 * math.pi
-                rr = max_r - 1
-                c = rim(self._energy_color(hv), 0.25 + 0.75 * hv)
-                put_px(buf, int(round(cx + rr * math.cos(ang))),
-                       int(round(cy + rr * math.sin(ang))), c)
-        put_px(buf, cx, cy, (255, 255, 255) if self._flash > 0.5 else col)
+        n = self.NCOL
+        if not hist:
+            return [0.0] * n
+        # Newest N samples only — the zero-padded prefix of a fresh
+        # deque is not a quiet room, it is just startup.
+        recent = hist[-n:]
+        while len(recent) < n:
+            recent.insert(0, recent[0])
+        return [clamp(v, 0.0, 1.0) for v in recent]
 
-    def _draw_vu_lamps(self, buf, y0, y1):
-        """Studio LED VU of the ONE real peak. 16 thresholds, not 16 bands."""
-        segs = 16
-        gap = 1
-        avail = y1 - y0
-        seg_h = max(2, (avail - (segs - 1) * gap) // segs)
-        used = segs * seg_h + (segs - 1) * gap
-        top = y1 - used
-        x0, x1 = 22, 42
-        for i in range(segs):
-            thresh = (i + 1) / float(segs)
-            sy1 = y1 - i * (seg_h + gap)
-            sy0 = sy1 - seg_h
-            if sy0 < top:
-                break
-            on = self._env >= thresh - 1e-6
-            hold = self._hold >= thresh - 1e-6 and not on
-            if i < 10:
-                lit = (40, 210, 90)
-            elif i < 13:
-                lit = (230, 200, 50)
+    def _step_grav(self, targets):
+        """WLED Gravimeter / FastLED gravity: snap up, accelerate down.
+        Peak tick hangs, then falls slower than the head."""
+        n = len(targets)
+        if len(self._h) != n:
+            self._h = [0.0] * n
+            self._vel = [0.0] * n
+            self._pk = [0.0] * n
+            self._pk_vel = [0.0] * n
+            self._pk_hang = [0] * n
+        crest = self._crest()
+        clock = self._clock
+        for i, t in enumerate(targets):
+            # Flat bed (a movie) shimmers. Real crests stay precise.
+            spread = 0.028 + 0.070 * (1.0 - crest)
+            wobble = (self._noise(i * 17 + 3, clock * 0.85) - 0.5) * spread
+            tgt = clamp(t + wobble, 0.0, 1.0)
+            if tgt >= self._h[i]:
+                self._h[i] = tgt
+                self._vel[i] = 0.0
             else:
-                lit = (255, 70, 60)
-            if on:
-                col = lit
-            elif hold:
-                col = rim(lit, 0.85)
+                self._vel[i] += 0.011
+                self._h[i] -= self._vel[i]
+                if self._h[i] < tgt:
+                    self._h[i] = tgt
+                    self._vel[i] = 0.0
+            if self._h[i] >= self._pk[i]:
+                self._pk[i] = self._h[i]
+                self._pk_vel[i] = 0.0
+                self._pk_hang[i] = 7
+            elif self._pk_hang[i] > 0:
+                self._pk_hang[i] -= 1
             else:
-                col = (18, 20, 26)
-            for y in range(sy0, sy1):
-                for x in range(x0, x1):
-                    put_px(buf, x, y, col)
-                put_px(buf, x0 - 1, y, rim(col, 0.4))
-                put_px(buf, x1, y, rim(col, 0.4))
+                self._pk_vel[i] += 0.0045
+                self._pk[i] = max(self._h[i], self._pk[i] - self._pk_vel[i])
 
-    def _draw_fft_bars(self, buf, y0, y1):
-        """Real 16-band analyzer. 3px bar + 1px gap = 64. Peak-hold ticks."""
-        n = len(self._fft_smooth)
+    def _floor_line(self, buf, y1):
+        base = rim(self.INK_DIM, 0.50)
+        for x in range(WIDTH):
+            put_px(buf, x, y1 - 1, base)
+
+    def _draw_grav_heads(self, buf, y0, y1, a):
+        """Heads + short trails + peak ticks. Never a filled column.
+        WLED Gravimeter paint, 2D."""
+        targets = self._col_targets(a)
+        self._step_grav(targets)
+        n = len(self._h)
         if n <= 0:
             return
-        bar_h = max(1, y1 - y0)
-        peaked = False
-        a = audio_sync.FEED.get()
-        if a and not a.get("stale"):
-            peaked = bool(a.get("peak"))
-        for i in range(n):
-            v = self._fft_smooth[i]
-            h = max(1, int(v * bar_h)) if v > 0.02 else 0
-            x0 = i * 4
-            x1 = x0 + 2
-            col = self._band_color(i, n, peak=peaked)
+        bar_h = max(1, y1 - y0 - 2)
+        pitch = max(1, WIDTH // n)
+        hot = self._flash > 0.4 and self._drive() > 0.40
+        fft = bool(self._bands(a))
+        for i, hv in enumerate(self._h):
+            x0 = i * pitch
+            x1 = min(WIDTH - 1, x0 + max(1, pitch - 1) - (0 if pitch == 1 else 1))
+            if x1 < x0:
+                x1 = x0
+            col = (self._band_color(i, n, peak=hot and hv > 0.35)
+                   if fft else self._bar_col(hv, flash=hot))
+            py = y1 - 2 - int(round(hv * bar_h))
+            py = clamp(py, y0, y1 - 2)
+            trail = 2 + int(hv * 7)
+            for k in range(trail):
+                y = py + k
+                if y >= y1 - 1:
+                    break
+                fade = 1.0 - (k / float(trail))
+                fade = fade * fade
+                c = rim(col, 0.18 + 0.82 * fade)
+                for x in range(x0, x1 + 1):
+                    self._mix_px(buf, x, y, c)
+            head = lerp_color(col, (255, 255, 255), 0.35 if hot else 0.12)
             for x in range(x0, x1 + 1):
-                for y in range(y1 - h, y1):
-                    fade = 0.40 + 0.60 * ((y1 - y) / float(max(1, h)))
-                    put_px(buf, x, y, tuple(int(c * fade) for c in col))
-            ph = int(self._fft_peaks[i] * bar_h)
-            if ph > 1:
-                py = y1 - ph
+                self._mix_px(buf, x, py, head)
+            pk = self._pk[i]
+            if pk > hv + 0.035:
+                pky = y1 - 2 - int(round(pk * bar_h))
+                pky = clamp(pky, y0, y1 - 2)
                 tick = rim(col, 1.0)
                 for x in range(x0, x1 + 1):
-                    put_px(buf, x, py, tick)
+                    self._mix_px(buf, x, pky, tick)
+        self._floor_line(buf, y1)
+        # Idle motes so a dead room is not a dead glass (WLED Pixels).
+        if self._drive() < 0.16:
+            self._step_idle_motes(y0, y1, rate=0.35)
+            self._paint_dots(buf, y0, y1)
+        else:
+            self._dots = [p for p in self._dots if p.get("kind") != "idle"]
 
-    def _draw_scope(self, buf, y0, y1, a):
-        """Time is the second axis. Spectrogram only when FFT is real."""
-        bands = self._bands(a)
-        if bands and self._fft_hist:
-            rows = list(self._fft_hist)
-            n = len(self._fft_smooth)
-            span = max(1, y1 - y0)
-            for ry, frame in enumerate(rows[-span:]):
-                y = y0 + ry
-                if y >= y1:
-                    break
-                for i in range(n):
-                    v = frame[i] if i < len(frame) else 0.0
-                    col = rim(self._band_color(i, n), 0.20 + 0.80 * v)
-                    x0 = i * 4
-                    for x in range(x0, x0 + 3):
-                        put_px(buf, x, y, col)
-            return
-        hist = list(self._hist)
-        span = max(1, y1 - y0)
-        rows = hist[-span:]
-        mid = (y0 + y1) // 2
-        for ry, hv in enumerate(rows):
-            y = y0 + ry
-            half = int(hv * 30)
-            col = self._energy_color(hv)
-            for x in range(32 - half, 32 + half + 1):
-                put_px(buf, x, y, rim(col, 0.35 + 0.55 * hv))
-        # Envelope oscilloscope of the last 64 real samples.
-        if len(hist) >= 2:
-            prev = None
-            amp = max(4, (y1 - y0) // 2 - 1)
-            line = lerp_color(self.BAR_COLOR, (255, 255, 255),
-                              0.35 if self._flash > 0.3 else 0.0)
-            for x, hv in enumerate(hist[:WIDTH]):
-                y = int(round(mid - (hv - 0.5) * 2.0 * amp))
-                y = clamp(y, y0, y1 - 1)
-                if prev is not None:
-                    draw_line(buf, x - 1, prev, x, y, line)
-                prev = y
+    def _step_idle_motes(self, y0, y1, rate=1.0):
+        """A few living specks. Cool when the room is quiet."""
+        idle = [p for p in self._dots if p.get("kind") == "idle"]
+        other = [p for p in self._dots if p.get("kind") != "idle"]
+        if len(idle) < 10 and (self._clock % 3 == 0 or random.random() < 0.28 * rate):
+            idle.append({
+                "x": random.random() * 63.0,
+                "y": float(y1 - 3 - random.randint(0, 6)),
+                "vx": (random.random() - 0.5) * 0.28,
+                "vy": (random.random() - 0.5) * 0.18,
+                "life": 28 + random.randint(0, 24),
+                "v": 0.12 + random.random() * 0.18,
+                "kind": "idle",
+            })
+        live = []
+        for p in idle:
+            p["x"] += p["vx"]
+            p["y"] += p["vy"]
+            p["vx"] += (random.random() - 0.5) * 0.06
+            p["vy"] += (random.random() - 0.5) * 0.04
+            p["vx"] = clamp(p["vx"], -0.35, 0.35)
+            p["vy"] = clamp(p["vy"], -0.22, 0.22)
+            p["life"] -= 1
+            if 0 <= p["x"] < WIDTH and y0 <= p["y"] < y1 and p["life"] > 0:
+                live.append(p)
+        self._dots = other + live
 
-    def _draw_ribbon(self, buf, y0, y1):
-        """64-wide history of the envelope under the iris."""
-        hist = list(self._hist)
-        h = max(1, y1 - y0)
-        for x, hv in enumerate(hist[:WIDTH]):
-            bh = max(1, int(hv * h)) if hv > 0.02 else 0
-            col = self._energy_color(hv)
-            for y in range(y1 - bh, y1):
-                fade = 0.45 + 0.55 * ((y1 - y) / float(max(1, bh)))
-                put_px(buf, x, y, tuple(int(c * fade) for c in col))
+    def _paint_dots(self, buf, y0, y1):
+        for p in self._dots:
+            x = int(round(p["x"]))
+            y = int(round(p["y"]))
+            if y < y0 or y >= y1:
+                continue
+            v = clamp(p.get("v", 0.4), 0.0, 1.0)
+            col = self._bar_col(v, flash=p.get("kind") == "spark")
+            fade = clamp(p["life"] / 24.0, 0.15, 1.0)
+            self._mix_px(buf, x, y, rim(col, fade))
+            if p.get("kind") in ("rain", "spark"):
+                self._mix_px(buf, x, y - 1, rim(col, fade * 0.45))
+
+    def _draw_rain(self, buf, y0, y1):
+        """WLED Matripix — volume spawns falling pixels. Idle drip when quiet."""
+        drive = self._drive()
+        punch = self._punch
+        live = []
+        for p in self._dots:
+            if p.get("kind") == "idle":
+                continue
+            p["y"] += p["vy"]
+            p["vy"] += 0.16
+            p["life"] -= 1
+            if p["y"] < y1 and p["life"] > 0:
+                live.append(p)
+        self._dots = live
+        n_spawn = 0
+        if punch > 0.10:
+            n_spawn = 1 + int(punch * 10) + (2 if self._flash > 0.5 else 0)
+        elif drive > 0.20:
+            n_spawn = 1 if self._clock % 2 == 0 else 0
+        elif self._clock % 5 == 0:
+            n_spawn = 1
+        room = self.MAX_DOTS - len(self._dots)
+        for _ in range(min(n_spawn, max(0, room))):
+            fall = 0.18 + drive * 0.70 + random.random() * 0.20
+            self._dots.append({
+                "x": float(random.randint(0, WIDTH - 1)),
+                "y": float(y0 + random.randint(0, 2)),
+                "vx": 0.0,
+                "vy": fall,
+                "life": 48 if drive < 0.16 else 36,
+                "v": max(drive, 0.18 + punch),
+                "kind": "rain" if punch < 0.28 else "spark",
+            })
+        self._paint_dots(buf, y0, y1)
+        self._floor_line(buf, y1)
+
+    def _draw_dust(self, buf, y0, y1):
+        """WLED Pixels / fountain. Punch launches. Quiet is brownian dust."""
+        drive = self._drive()
+        punch = self._punch
+        floor = float(y1 - 2)
+        live = []
+        for p in self._dots:
+            p["vy"] += 0.14
+            p["x"] += p["vx"]
+            p["y"] += p["vy"]
+            p["life"] -= 1
+            if p["y"] >= floor:
+                if p.get("kind") == "spark" and p["life"] > 8:
+                    p["y"] = floor
+                    p["vy"] *= -0.35
+                    p["kind"] = "dust"
+                else:
+                    continue
+            if 0 <= p["x"] < WIDTH and y0 <= p["y"] < y1 and p["life"] > 0:
+                live.append(p)
+        self._dots = live
+        n_spawn = 0
+        if punch > 0.12 or self._flash > 0.4:
+            n_spawn = 2 + int(punch * 12)
+        elif drive > 0.22:
+            n_spawn = 1 if self._clock % 3 == 0 else 0
+        else:
+            n_spawn = 1 if self._clock % 4 == 0 else 0
+        room = self.MAX_DOTS - len(self._dots)
+        launch = 0.55 + drive * 1.15 + punch * 1.4
+        for _ in range(min(n_spawn, max(0, room))):
+            self._dots.append({
+                "x": 31.5 + (random.random() - 0.5) * (18.0 + drive * 28.0),
+                "y": floor - 0.5,
+                "vx": (random.random() - 0.5) * (0.55 + punch),
+                "vy": -(launch * (0.55 + random.random() * 0.55)),
+                "life": 22 + int(drive * 18),
+                "v": max(drive, punch, 0.20),
+                "kind": "spark" if punch > 0.16 else "dust",
+            })
+        self._paint_dots(buf, y0, y1)
+        self._floor_line(buf, y1)
 
     def _draw_pips(self, buf, y):
-        draw_dots(buf, y, len(self.FACES), self._face,
-                  on=self.BAR_COLOR, off=(32, 36, 46))
+        # Four palette pips — the finish, not a mode menu.
+        pals = self.PALETTES
+        cur = self._palette if self._palette in pals else pals[0]
+        idx = pals.index(cur)
+        on = self._body_color(0.85)
+        off = (32, 36, 46)
+        draw_dots(buf, y, len(pals), idx, on=on, off=off)
 
     def _draw_viz(self, buf, y0, y1, a):
-        """Instrument in [y0, y1). Keeps the empty-card law: energy is
-        the bright thing, no header smash, no invented bands."""
+        """One language in [y0, y1). Idle is designed presence."""
         if y1 - y0 < 8:
             return
-        if a.get("stale"):
-            cx, cy = WIDTH // 2, (y0 + y1) // 2
-            self._stroke_ring(buf, cx, cy, min(18, (y1 - y0) // 2 - 1),
-                              rim(self.INK_DIM, 0.5))
-            mid = max(y0 + 2, cy - 6)
-            draw_text_centered(buf, mid, "NO AUDIO", self.INK_DIM)
-            draw_text_centered(buf, mid + 8, "SIGNAL", self.INK_DIM)
-            return
-        face = self.FACES[self._face % len(self.FACES)]
-        if face == "BARS":
-            if self._bands(a):
-                self._draw_fft_bars(buf, y0, y1)
-            else:
-                self._draw_vu_lamps(buf, y0, y1)
-            return
-        if face == "SCOPE":
-            self._draw_scope(buf, y0, y1, a)
-            return
-        # IRIS -- default. Polar, same language as the flight scope.
-        ribbon = 7 if (y1 - y0) >= 28 else 0
-        body_bot = y1 - ribbon
-        cx, cy = WIDTH // 2, (y0 + body_bot) // 2
-        max_r = max(6, min(cx - 2, cy - y0 - 1, body_bot - cy - 1, 24))
-        self._draw_iris(buf, cx, cy, max_r, a)
-        if ribbon:
-            self._draw_ribbon(buf, body_bot + 1, y1)
+        if not hasattr(self, "_highs"):
+            self._init_viz()
+        stale = bool((a or {}).get("stale"))
+        quiet = (not stale) and self._bass < 0.04 and self._drive() < 0.05
+        if stale or quiet:
+            self._draw_idle(buf, y0, y1)
+            if stale:
+                return
+        self._draw_field_soft(buf, y0, y1)
+        self._draw_mass(buf, y0, y1)
+        self._draw_air(buf, y0, y1)
 
     def frame(self):
         self._ready()
@@ -11459,6 +11970,7 @@ class SportsEngine(Browsable, BigMomentSource):
     }
 
     VIEW_TICKS = 200          # ~10s per view at this tick rate
+    LIVE_DETAIL_TICKS = 160   # ~8s per live game — long enough to read DETAIL
     TRANSITION_TICKS = 8      # ~0.4s slide between PINNED and TICKER
     DETAIL_TRANSITION_TICKS = 14  # ~0.7s -- a little longer than the panel
                                    # slide above; entering a game's detail
@@ -11747,6 +12259,40 @@ class SportsEngine(Browsable, BigMomentSource):
             self.detail = event_id
             self._want_summary_ev(self.universal[hit])
 
+    def _live_indices(self):
+        """Every genuinely live event, favorite first. Not pre/post."""
+        idxs = [i for i, e in enumerate(self.universal or [])
+                if e.get("live") or e.get("state") == "in"]
+        fg = self.data.get("favorite_game") or {}
+        if fg.get("state") == "in":
+            eid = fg.get("event_id") or fg.get("id")
+            if eid:
+                hit = next((i for i in idxs
+                            if self.universal[i].get("id") == eid), None)
+                if hit is not None:
+                    idxs = [hit] + [i for i in idxs if i != hit]
+        return idxs
+
+    def adopt_live_slate(self):
+        """Park on EVENTS + DETAIL for the live slate. First-read adopts.
+        Does not pin the cursor every tick — tick() walks every live game."""
+        live = self._live_indices()
+        if not live:
+            return False
+        if self.PANEL_EVENTS in self.panels:
+            self.panel_i = self.panels.index(self.PANEL_EVENTS)
+        if self.detail:
+            stay = next((i for i in live
+                         if self.universal[i].get("id") == self.detail), None)
+            if stay is not None:
+                self.ucur = stay
+                return True
+        self.ucur = live[0]
+        ev = self.universal[self.ucur]
+        self.detail = ev.get("id")
+        self._want_summary_ev(ev)
+        return True
+
     def adopt_live_detail(self, prefer_favorite=True):
         """Point ucur+detail at a live game so ambient shows DETAIL.
 
@@ -11754,12 +12300,7 @@ class SportsEngine(Browsable, BigMomentSource):
         that just scored). Else favorite live. Else keep current live
         DETAIL, else the first live universal event.
         """
-        if self._score_lock_ticks > 0:
-            self._score_lock_ticks -= 1
-            if self._score_lock_ticks <= 0:
-                self._score_lock_id = None
-        live_idx = [i for i, e in enumerate(self.universal)
-                    if e.get("live") or e.get("state") == "in"]
+        live_idx = self._live_indices()
         target = None
         lock = self._score_lock_id
         if lock:
@@ -12058,14 +12599,17 @@ class SportsEngine(Browsable, BigMomentSource):
     def _cycle_indices(self):
         """Indices the AUTO-cycle is allowed to visit.
 
-        Scheduled games are deliberately excluded: a board that spends its
-        time showing things that have not happened yet is a schedule, not a
-        scoreboard. Manual browsing still reaches them (see _step), which
-        is the case where looking up a start time is genuinely useful.
+        Live games own the walk when any exist. Scheduled games stay
+        off the auto-cycle: a board that spends its time showing things
+        that have not happened yet is a schedule, not a scoreboard.
+        Manual browsing still reaches pre/post (see _step).
 
-        Falls back to everything if nothing has started, so the panel shows
-        the day's fixtures rather than going blank.
+        Falls back to started, then everything, so an off night still
+        shows the day's fixtures rather than going blank.
         """
+        live = self._live_indices()
+        if live:
+            return live
         started = [i for i, e in enumerate(self.universal) if self._started(e)]
         return started or list(range(len(self.universal)))
 
@@ -12195,32 +12739,54 @@ class SportsEngine(Browsable, BigMomentSource):
 
         self._detect_big_moments()
 
-        # Auto-advance is suspended while EXPANDED: having deliberately
-        # opened one event, having it slide away on a timer is the exact
-        # push-only behaviour the browse control exists to escape.
-        # Auto-advance is suspended while EXPANDED (see above).
-        if self.cycling and self._browse_auto_ok and self.detail is None and self.panels:
-            self.hold += 1
-            on_events = self._panel() == self.PANEL_EVENTS
-            limit = self.SPOTLIGHT_TICKS if on_events else self.VIEW_TICKS
-            if self.hold >= limit:
-                self.hold = 0
-                if not on_events:
-                    # A pinned panel shows once, then hands on.
-                    self.panel_i = (self.panel_i + 1) % len(self.panels)
+        # Live slate owns the walk. DETAIL stays open so every live
+        # game is the in-depth card, not a ticker row. Drop/rotate
+        # still pauses via cycling / _browse_auto_ok. Off nights keep
+        # the old panel tour (pinned, standings, started games).
+        if self._score_lock_ticks > 0:
+            self._score_lock_ticks -= 1
+            if self._score_lock_ticks <= 0:
+                self._score_lock_id = None
+        live = self._live_indices()
+        locked = bool(self._score_lock_id and self._score_lock_ticks > 0)
+        if self.cycling and self._browse_auto_ok and self.panels and not locked:
+            walking_live = bool(live)
+            if walking_live or self.detail is None:
+                self.hold += 1
+                if walking_live:
+                    if self.PANEL_EVENTS in self.panels:
+                        self.panel_i = self.panels.index(self.PANEL_EVENTS)
+                    if self.detail is None or self.ucur not in live:
+                        self.ucur = live[0] if self.ucur not in live else self.ucur
+                        ev = self.universal[self.ucur]
+                        self.detail = ev.get("id")
+                        self._want_summary_ev(ev)
+                    limit = self.LIVE_DETAIL_TICKS
+                    if self.hold >= limit:
+                        self.hold = 0
+                        pos = live.index(self.ucur) if self.ucur in live else -1
+                        self.ucur = live[(pos + 1) % len(live)]
+                        ev = self.universal[self.ucur]
+                        self.detail = ev.get("id")
+                        self._want_summary_ev(ev)
                 else:
-                    order = self._cycle_indices()
-                    if order:
-                        # Step to the next STARTED event; when the lap
-                        # completes, hand the turn to the next panel.
-                        nxt = [i for i in order if i > self.ucur]
-                        if nxt:
-                            self.ucur = nxt[0]
+                    on_events = self._panel() == self.PANEL_EVENTS
+                    limit = self.SPOTLIGHT_TICKS if on_events else self.VIEW_TICKS
+                    if self.hold >= limit:
+                        self.hold = 0
+                        if not on_events:
+                            self.panel_i = (self.panel_i + 1) % len(self.panels)
                         else:
-                            self.ucur = order[0]
-                            if len(self.panels) > 1:
-                                self.panel_i = (self.panel_i + 1) % len(self.panels)
-        self.score = len(self.universal) or len(games)
+                            order = self._cycle_indices()
+                            if order:
+                                nxt = [i for i in order if i > self.ucur]
+                                if nxt:
+                                    self.ucur = nxt[0]
+                                else:
+                                    self.ucur = order[0]
+                                    if len(self.panels) > 1:
+                                        self.panel_i = (self.panel_i + 1) % len(self.panels)
+        self.score = len(live) or len(self.universal) or len(games)
 
     # ---- render --------------------------------------------------------
     @staticmethod
@@ -12526,6 +13092,10 @@ class SportsEngine(Browsable, BigMomentSource):
             if self._board_is_clutch(ev) or self._soccer_is_tight_late(ev):
                 score += 0.2
             best = max(best, score)
+        # A full live slate is the night. Don't let one quiet early
+        # game hide six others from the director.
+        if len(evs) >= 2:
+            best = max(best, min(0.88, 0.48 + 0.05 * len(evs)))
         if self.favorite_live():
             best += 0.25
         return clamp(best, 0.0, 1.0)
@@ -15389,12 +15959,12 @@ class WeatherEngine:
 
     VIEW_TICKS = 220
 
-    # THREE AXIS VIEWS + DETAIL. up/down walks main/hourly/radar.
-    # rotate on radar opens DETAIL of the selected track (same select
-    # language flights uses). Zone-only advisories have no point and
-    # live on DETAIL only.
-    VIEWS = ["main", "hourly", "radar"]
+    # AXIS + DETAIL. up/down walks the desk. Alert is a page when
+    # NWS has one -- it no longer locks the whole weather app (you
+    # cannot watch a barometer if the mural ate the glass).
+    VIEWS = ["main", "met", "hourly", "radar"]
     VIEW_DETAIL = "detail"
+    VIEW_ALERT = "alert"
 
     # Flights-class polar scope. Storms sit farther out than local
     # ADS-B, so the rim is 80nm (not flights' 40). Same sqrt scale so
@@ -15481,22 +16051,49 @@ class WeatherEngine:
         return 0.15 if self.data.get("conditions") else 0.0
 
     def adopt_ambient_view(self):
-        """AUTO face: live scope when cells exist, else the hourly
-        glance (real next hours), else conditions. Hourly is the
-        useful wall card when the sky is quiet -- current temp is
-        already on the clock."""
-        if self.data.get("tracks"):
+        """During a warning the desk owns the glass. Watch/outlook
+        stays on hourly or met. Quiet sky is hourly, not a temp card."""
+        alerts = self.data.get("alerts") or []
+        warning = next((a for a in alerts if a.get("kind") == "WARNING"), None)
+        if warning and (warning.get("polygon") or warning.get("cells")):
+            if self.view not in ("radar", self.VIEW_DETAIL, self.VIEW_ALERT):
+                self.view = "radar"
+        elif warning:
+            if self.view not in (self.VIEW_ALERT, "radar"):
+                self.view = self.VIEW_ALERT
+        elif self.data.get("tracks"):
             if self.view not in ("radar", self.VIEW_DETAIL):
                 self.view = "radar"
+        elif self.data.get("all_clear"):
+            # After-chapter. Don't walk hourly as if nothing happened.
+            if self.view in (self.VIEW_ALERT, self.VIEW_DETAIL, "stack", "radar"):
+                self.view = "main"
+            elif self.view not in ("main", "log", "met", "hourly"):
+                self.view = "main"
         elif self.data.get("hourly"):
-            if self.view not in ("hourly", self.VIEW_DETAIL):
+            if self.view not in ("hourly", self.VIEW_DETAIL, "met"):
                 self.view = "hourly"
         elif self.view in ("radar", "hourly"):
             self.view = "main"
 
+    def _axis(self):
+        views = ["main"]
+        if self.data.get("alerts"):
+            views.append(self.VIEW_ALERT)
+        views.extend(["met", "hourly", "radar"])
+        if len(self._tracks()) > 1:
+            views.append("stack")
+        if self.data.get("storm_log") or self.data.get("all_clear"):
+            views.append("log")
+        return views
+
     def _step_view(self, direction):
-        i = self.VIEWS.index(self.view)
-        self.view = self.VIEWS[(i + direction) % len(self.VIEWS)]
+        views = self._axis()
+        cur = self.view
+        if cur not in views:
+            cur = "radar" if cur == self.VIEW_DETAIL else "main"
+        i = views.index(cur)
+        self.view = views[(i + direction) % len(views)]
 
     def _tracks(self):
         return list(self.data.get("tracks") or [])
@@ -15541,7 +16138,7 @@ class WeatherEngine:
             hourly = self.data.get("hourly") or []
             if hourly:
                 self.hourly_i = min(max(0, len(hourly) - self.HOURLY_PAGE), self.hourly_i + 1)
-        elif cmd in ("left", "right") and self.view in ("radar", self.VIEW_DETAIL):
+        elif cmd in ("left", "right") and self.view in ("radar", self.VIEW_DETAIL, "stack"):
             self._step_track(-1 if cmd == "left" else 1)
             self._auto_detail = False
         elif cmd == "left" and alerts:
@@ -15551,7 +16148,7 @@ class WeatherEngine:
             self.cur_alert = (self.cur_alert + 1) % len(alerts)
             self.hold = 0
         elif cmd == "rotate":
-            if self.view == "radar" and self._tracks():
+            if self.view in ("radar", "stack") and self._tracks():
                 self.view = self.VIEW_DETAIL
                 self._auto_detail = False
             elif self.view == self.VIEW_DETAIL:
@@ -15587,13 +16184,17 @@ class WeatherEngine:
         alerts = self.data.get("alerts") or []
         if alerts:
             self.cur_alert %= len(alerts)
-        if self.cycling and len(ids) > 1 and self.view in ("radar", self.VIEW_DETAIL):
+        elif self.view in (self.VIEW_ALERT, self.VIEW_DETAIL, "stack"):
+            # Products died under us -- don't leave a NO CELLS / empty
+            # DETAIL mural up as if the storm is still the subject.
+            self.view = "main"
+        if self.cycling and len(ids) > 1 and self.view in ("radar", self.VIEW_DETAIL, "stack"):
             self.hold += 1
             if self.hold >= self.VIEW_TICKS:
                 self.hold = 0
                 self._step_track(1)
                 self._auto_detail = True
-        elif self.cycling and len(alerts) > 1 and self.view == "main":
+        elif self.cycling and len(alerts) > 1 and self.view in ("main", self.VIEW_ALERT):
             self.hold += 1
             if self.hold >= self.VIEW_TICKS:
                 self.hold = 0
@@ -15685,11 +16286,27 @@ class WeatherEngine:
                 draw_text3x5(buf, 2, y + 7, fit_text("  ".join(sub_parts), WIDTH - 4),
                             self.INK_DIM)
             y += row_h
+        self._draw_pop_spark(buf, 3, 57, 58, 6, hourly)
         if len(hourly) > self.HOURLY_PAGE:
             draw_dots(buf, HEIGHT - 4,
                      -(-len(hourly) // self.HOURLY_PAGE),
                      self.hourly_i // self.HOURLY_PAGE, on=self.ACCENT)
         return bytes(buf)
+
+    @staticmethod
+    def _draw_pop_spark(buf, x, y, width, height, hourly):
+        """FlightTracker steal: 24h-style chance chart from real NWS POP."""
+        vals = []
+        for h in (hourly or [])[:width]:
+            p = h.get("precip_pct")
+            vals.append(p if isinstance(p, (int, float)) else 0)
+        if not vals or max(vals) <= 0:
+            return
+        for i, p in enumerate(vals):
+            hgt = max(1, int(round((max(0.0, min(100.0, p)) / 100.0) * height)))
+            col = (70, 140, 200) if p < 40 else ((90, 170, 230) if p < 70 else (255, 200, 70))
+            for dy in range(hgt):
+                put_px(buf, x + i, y + height - 1 - dy, col)
 
     @staticmethod
     def _hour_label(iso):
@@ -15745,8 +16362,11 @@ class WeatherEngine:
         on_scope = [t for t in tracks if t.get("on_scope")]
         sel = self._sel_track()
         n = len(tracks)
-        draw_header(buf, "RADAR", self.pulse.mix(self.ACCENT),
-                    right_tag=(f"{n}" if n else None),
+        after = bool(self.data.get("all_clear") and not tracks)
+        rel_tag = (sel or {}).get("home_rel") if sel else None
+        hdr = (60, 180, 90) if after else self.pulse.mix(self.ACCENT)
+        draw_header(buf, "RADAR", hdr,
+                    right_tag=("CLEAR" if after else (rel_tag or (f"{n}" if n else None))),
                     stale=bool(self.data.get("age") and self.data["age"] > 900))
 
         if not self.data.get("configured"):
@@ -15771,8 +16391,46 @@ class WeatherEngine:
                     draw_line(buf, a[0], a[1], b[0], b[1], (18, 28, 40))
 
         draw_scope_crosshair(buf, color=(22, 34, 50), cx=cx, cy=cy, radius=r)
-        draw_scope_sweep(buf, self.sweep, color=self.SWEEP_COLOR,
+        sweep_col = (22, 48, 80) if after else self.SWEEP_COLOR
+        draw_scope_sweep(buf, self.sweep, color=sweep_col,
                          cx=cx, cy=cy, radius=r)
+
+        echo_col = {1: (22, 48, 88), 2: (28, 100, 64),
+                    3: (190, 180, 46), 4: (210, 70, 38)}
+        echo_k = 0.38 if after else 1.0
+        frames = self.data.get("echo_frames") or []
+        frame = frames[(self.ticks // 16) % len(frames)] if frames else None
+        echoes = (frame or {}).get("echoes") if frame else (self.data.get("echoes") or [])
+        overhead = (frame or {}).get("overhead")
+        for echo in (echoes or []):
+            brg, dist, lvl = echo.get("bearing_deg"), echo.get("dist_nm"), echo.get("level")
+            frac = self._scope_r_frac(dist)
+            if frac is None or brg is None:
+                continue
+            ex, ey = scope_xy(brg, frac, cx=cx, cy=cy, radius=r)
+            raw = echo_col.get(int(lvl or 1), (22, 48, 88))
+            put_px(buf, int(round(ex)), int(round(ey)),
+                   tuple(int(c * echo_k) for c in raw))
+
+        poly_src = sel if sel and sel.get("polygon") else None
+        if poly_src is None:
+            poly_src = next((t for t in tracks if t.get("polygon")), None)
+        if poly_src and poly_src.get("polygon"):
+            pcol = weather.event_color(poly_src.get("event"), poly_src.get("severity"))
+            warning = poly_src.get("kind") == "WARNING"
+            verts = []
+            for brg, nm in poly_src["polygon"]:
+                frac = self._scope_r_frac(nm)
+                verts.append(scope_xy(brg, frac, cx=cx, cy=cy, radius=r)
+                             if frac is not None else None)
+            solid = [v for v in verts if v is not None]
+            if warning and len(solid) >= 3:
+                _fill_poly(buf, solid, rim(pcol, 0.22))
+            stroke = self.pulse.mix(pcol) if warning else rim(pcol, 0.75)
+            ring = verts + verts[:1]
+            for a, b in zip(ring, ring[1:]):
+                if a is not None and b is not None:
+                    draw_line(buf, a[0], a[1], b[0], b[1], stroke)
 
         for t in on_scope:
             brg = t.get("bearing_deg")
@@ -15781,8 +16439,7 @@ class WeatherEngine:
                 continue
             x, y = scope_xy(brg, frac, cx=cx, cy=cy, radius=r)
             is_sel = sel is not None and t.get("id") == sel.get("id")
-            col = self.SEVERITY_COLOR.get(t.get("severity"),
-                                          self.SEVERITY_COLOR["Unknown"])
+            col = weather.event_color(t.get("event"), t.get("severity"))
             glow = scope_glow(brg, self.sweep)
             mark = (255, 255, 255) if is_sel else col
             draw_scope_target(buf, x, y, mark, glow=glow, big=is_sel)
@@ -15792,27 +16449,40 @@ class WeatherEngine:
                                   cy=int(round(y)), radius=3)
                 put_px(buf, int(round(ax)), int(round(ay)), mark)
 
-        draw_scope_home(buf, cx=cx, cy=cy)
+        if overhead and not after:
+            wash = echo_col.get(int(overhead), (22, 48, 88))
+            draw_scope_home(buf, color=self.pulse.mix(wash), cx=cx, cy=cy)
+        else:
+            draw_scope_home(buf, cx=cx, cy=cy)
 
-        if sel and sel.get("on_scope"):
-            dist = sel.get("dist_nm")
-            brg = sel.get("bearing_deg")
-            where = ""
-            if isinstance(dist, (int, float)):
-                where = f"{nm_to_mi(dist):.0f}MI"
-            compass = self._compass(brg)
-            if compass:
-                where = (where + " " + compass).strip()
-            ev = fit_text(sel.get("event") or "", WIDTH - 4)
-            if where:
-                draw_text_centered(buf, 54, fit_text(where, WIDTH - 4),
-                                   (255, 255, 255))
+        hero = sel or (tracks[0] if tracks else None)
+        if hero:
+            rel = hero.get("home_rel")
+            bits = []
+            if rel:
+                bits.append(rel)
+                hd = hero.get("home_dist_nm")
+                if rel != "IN" and isinstance(hd, (int, float)) and hd > 0:
+                    bits.append("%dMI" % int(round(nm_to_mi(hd))))
+            elif hero.get("on_scope") and isinstance(hero.get("dist_nm"), (int, float)):
+                bits.append("%dMI" % int(round(nm_to_mi(hero["dist_nm"]))) )
+                c = self._compass(hero.get("bearing_deg"))
+                if c:
+                    bits.append(c)
+            chips = _alert_chips(hero)
+            if chips:
+                bits.append(chips[0])
+            line = "  ".join(bits) if bits else fit_text(hero.get("event") or "", WIDTH - 4)
+            col = weather.event_color(hero.get("event"), hero.get("severity"))
+            draw_text_centered(buf, 54, fit_text(line, WIDTH - 4), (255, 255, 255))
+            ev = fit_text(hero.get("event") or "", WIDTH - 4)
             if ev:
-                draw_text_centered(buf, 59, ev, self.INK_DIM)
-        elif tracks:
-            ev = fit_text((sel or tracks[0]).get("event") or "ADVISORY",
-                          WIDTH - 4)
-            draw_text_centered(buf, 59, ev, self.INK_DIM)
+                draw_text_centered(buf, 59, ev, col)
+        elif self.data.get("all_clear"):
+            line = self._ended_line(self.data.get("session_peak") or self.data.get("last_ended"))
+            if line:
+                draw_text_centered(buf, 54, line, (160, 170, 180))
+            draw_text_centered(buf, 59, "ALL CLEAR", (60, 180, 90))
         else:
             draw_text_centered(buf, 59, "CLEAR", (46, 50, 62))
         return bytes(buf)
@@ -15847,6 +16517,14 @@ class WeatherEngine:
                            (255, 255, 255))
 
         y = 20
+        rel = t.get("home_rel")
+        if rel:
+            chip = rel
+            hd = t.get("home_dist_nm")
+            if rel != "IN" and isinstance(hd, (int, float)) and hd > 0:
+                chip = "%s  %dMI" % (rel, int(round(nm_to_mi(hd))))
+            draw_text_centered(buf, y, chip, col)
+            y += 8
         dist = t.get("dist_nm")
         brg = t.get("bearing_deg")
         if isinstance(dist, (int, float)):
@@ -15863,6 +16541,11 @@ class WeatherEngine:
             move = f"MOVING {self._compass(mdir)}"
             if isinstance(mspd, (int, float)):
                 move = f"{move} {kt_to_mph(mspd):.0f}MPH"
+            eta = t.get("eta_min")
+            if t.get("approach") == "IN" and isinstance(eta, int):
+                move = f"{move}  {eta}M"
+            elif t.get("approach") == "AWAY":
+                move = f"{move} AWAY"
             draw_text_centered(buf, y, fit_text(move, WIDTH - 4), self.INK)
             y += 8
 
@@ -15873,9 +16556,13 @@ class WeatherEngine:
         gust = t.get("gust_mph")
         if isinstance(gust, (int, float)):
             extras.append(f"GUST {gust:.0f}MPH")
+        threat = t.get("hail_threat") or t.get("wind_threat")
         if extras:
             draw_text_centered(buf, y, fit_text("  ".join(extras), WIDTH - 4),
                                (255, 200, 90))
+            y += 8
+        if threat:
+            draw_text_centered(buf, y, fit_text(threat, WIDTH - 4), (255, 200, 90))
             y += 8
         torn = t.get("tornado")
         if torn:
@@ -15947,7 +16634,62 @@ class WeatherEngine:
     NIGHT_STARS = ((5, 6), (13, 4), (22, 8), (34, 5), (44, 9),
                   (52, 6), (59, 3), (9, 15), (48, 14), (28, 2))
 
+    def _ended_line(self, entry):
+        """SPS 50MPH / FLA -- peak of the session, never invented."""
+        if not entry:
+            return None
+        tag = weather.event_short(entry.get("event")) or \
+            fit_text(entry.get("event") or "", 16)
+        if not tag:
+            return None
+        hail = entry.get("hail_in")
+        gust = entry.get("gust_mph")
+        chip = None
+        if isinstance(hail, (int, float)) and hail > 0:
+            chip = ("%0.2f" % hail).rstrip("0").rstrip(".") + "IN"
+        elif isinstance(gust, (int, float)) and gust > 0:
+            chip = "%dMPH" % int(gust)
+        if chip:
+            return fit_text("%s  %s" % (tag, chip), WIDTH - 4)
+        return tag
+
+    def _frame_after(self):
+        """POST card. Products gone. ALL CLEAR is the one thing."""
+        buf = blank()
+        fill(buf, self.BG)
+        cond = self.data.get("conditions") or {}
+        stale = bool(self.data.get("age") and self.data["age"] > 3600)
+        draw_header(buf, self.data.get("place", "WEATHER"), (60, 180, 90),
+                    right_tag="CLEAR", stale=stale)
+        temp_c = cond.get("temp_c")
+        if temp_c is not None:
+            draw_text_centered(buf, 12, f"{c_to_f(temp_c):.0f}F",
+                               (168, 158, 128), scale=2)
+        else:
+            draw_text_centered(buf, 14, "--F", self.INK_DIM, scale=2)
+        draw_text_centered(buf, 28, "ALL CLEAR", (60, 180, 90))
+        peak = self.data.get("session_peak") or self.data.get("last_ended")
+        line = self._ended_line(peak)
+        if line:
+            draw_text_centered(buf, 38, line, (245, 248, 255))
+        ended = self.data.get("last_ended") or {}
+        try:
+            ago = time.time() - float(ended.get("ts") or 0)
+        except (TypeError, ValueError):
+            ago = -1
+        if ended and ago >= 0:
+            draw_text_centered(buf, 46, self._storm_ago(ago), self.INK_DIM)
+        text = cond.get("text") or ""
+        # ALL CLEAR already owns the empty-sky word. Only print the
+        # condition when the air is still doing something (rain, fog).
+        sky = text.upper()
+        if text and not any(k in sky for k in ("CLEAR", "FAIR", "SUNNY")):
+            draw_text_centered(buf, 58, fit_text(text, WIDTH - 4), self.INK_DIM)
+        return bytes(buf)
+
     def _frame_conditions(self):
+        if self.data.get("all_clear") and not (self.data.get("alerts") or self._tracks()):
+            return self._frame_after()
         buf = blank()
         fill(buf, self.BG)
         cond = self.data.get("conditions")
@@ -15988,9 +16730,9 @@ class WeatherEngine:
             temp_f = c_to_f(temp_c) if isinstance(temp_c, (int, float)) else None
             if temp_f is None or round(fl_f) != round(temp_f):
                 fl_tag = f"FL {fl_f:.0f}F"
-        n_tracks = len(self._tracks())
-        if fl_tag is None and n_tracks:
-            fl_tag = f"{n_tracks}" if n_tracks > 1 else "1"
+        n_prod = len(self.data.get("alerts") or []) or len(self._tracks())
+        if fl_tag is None and n_prod:
+            fl_tag = f"{n_prod}"
         draw_header(buf, self.data.get("place", "WEATHER"), self.ACCENT,
                     right_tag=fl_tag, stale=stale)
 
@@ -16044,16 +16786,10 @@ class WeatherEngine:
         if gust is not None:
             label, val = "GUST", f"{kmh_to_mph(gust):.0f}MPH"
         elif hum is not None:
-            # "HUM", not "HUMIDITY": the long form pushed its block left
-            # far enough to collide with the wind value ("10MPH N62%").
             label, val = "HUM", f"{hum:.0f}%"
         else:
             label = val = None
         if label:
-            # Right-align label and value independently against the right
-            # edge, and only draw if there's a real gap from the wind
-            # block -- a shared left-edge block for the widest of the two
-            # is what let the narrow value creep into the wind text.
             lx = WIDTH - 2 - text_w(label)
             vx = WIDTH - 2 - text_w(val)
             if min(lx, vx) > 2 + text_w(wtxt) + 3:
@@ -16061,22 +16797,231 @@ class WeatherEngine:
                 draw_text3x5(buf, vx, 47, val, self.INK)
 
         draw_divider(buf, 55)
-        # Next sun event beats a static "NO ALERTS": the absence of an
-        # alert is already implied by this view being on screen at all,
-        # whereas "sunset in 2h" is a real, changing thing worth glancing
-        # at. Falls back to the alert-state line if sun times are
-        # unavailable (polar latitudes -- see weather.sun_times).
-        sun = self._sun_line()
-        if sun:
-            draw_text_centered(buf, 58, sun, (255, 200, 120))
+        alerts = self.data.get("alerts") or []
+        if alerts:
+            a = alerts[self.cur_alert % len(alerts)]
+            col = weather.event_color(a.get("event"), a.get("severity"))
+            tag = a.get("kind") or a.get("event") or "ALERT"
+            until = _until_line(a.get("expires"))
+            if until:
+                tag = "%s  %s" % (tag, until)
+            elif len(alerts) > 1:
+                tag = "%d/%d %s" % (self.cur_alert + 1, len(alerts), tag)
+            draw_text_centered(buf, 58, fit_text(tag, WIDTH - 4), col)
+        elif self.data.get("all_clear"):
+            draw_text_centered(buf, 58, "ALL CLEAR", (60, 180, 90))
         else:
-            n = len(self._tracks())
-            if n:
-                label = "1 STORM" if n == 1 else f"{n} STORMS"
-                draw_text_centered(buf, 58, label, (255, 170, 80))
+            sun = self._sun_line()
+            if sun:
+                draw_text_centered(buf, 58, sun, (255, 200, 120))
             else:
-                draw_text_centered(buf, 58, "NO ALERTS", (60, 110, 70))
+                n = len(self._tracks())
+                if n:
+                    label = "1 STORM" if n == 1 else f"{n} STORMS"
+                    draw_text_centered(buf, 58, label, (255, 170, 80))
+                else:
+                    draw_text_centered(buf, 58, "NO ALERTS", (60, 110, 70))
         return bytes(buf)
+
+    def _frame_stack(self):
+        """Multi-cell browser -- severity stack, one selected, no map."""
+        buf = blank()
+        fill(buf, self.BG)
+        tracks = self._tracks()
+        sel = self._sel_track()
+        n = len(tracks)
+        idx = 0
+        if sel:
+            keys = [t.get("id") for t in tracks]
+            try:
+                idx = keys.index(sel.get("id"))
+            except ValueError:
+                idx = 0
+        draw_header(buf, "STACK", self.ACCENT,
+                    right_tag=("%d/%d" % (idx + 1, n) if n else None))
+        if not tracks:
+            draw_text_centered(buf, 28, "NO CELLS", self.INK_DIM)
+            return bytes(buf)
+        y = 12
+        window = tracks[max(0, idx - 1):][:5]
+        start = max(0, idx - 1)
+        for i, t in enumerate(window):
+            if y > 52:
+                break
+            abs_i = start + i
+            on = t.get("id") == (sel or {}).get("id")
+            col = weather.event_color(t.get("event"), t.get("severity"))
+            tag = weather.event_short(t.get("event")) or "CELL"
+            rel = t.get("home_rel") or ("SCOPE" if t.get("on_scope") else "ZONE")
+            mark = ">" if on else " "
+            draw_text3x5(buf, 2, y, mark, (255, 255, 255) if on else self.INK_DIM)
+            draw_text3x5(buf, 8, y, fit_text(tag, 16),
+                         (255, 255, 255) if on else col)
+            extra = rel
+            hd = t.get("home_dist_nm")
+            if rel not in ("IN", "ZONE", "SCOPE") and isinstance(hd, (int, float)) and hd > 0:
+                extra = "%s %d" % (rel, int(round(nm_to_mi(hd))))
+            draw_text3x5(buf, WIDTH - 2 - text_w(fit_text(extra, 28)), y,
+                         fit_text(extra, 28), col if on else self.INK_DIM)
+            y += 8
+        chips = _alert_chips(sel or {})
+        if chips and y <= 59:
+            draw_text_centered(buf, 59, fit_text("  ".join(chips), WIDTH - 4),
+                               (255, 200, 90))
+        return bytes(buf)
+
+    def _frame_storm_log(self):
+        """After the cell: what fired, peak severity, when it died."""
+        buf = blank()
+        fill(buf, self.BG)
+        rows = self.data.get("storm_log") or []
+        draw_header(buf, "LOG", (60, 180, 90) if self.data.get("all_clear") else self.ACCENT,
+                    right_tag=("CLEAR" if self.data.get("all_clear") else
+                               (str(len(rows)) if rows else None)))
+        if not rows:
+            if self.data.get("all_clear"):
+                draw_text_centered(buf, 28, "ALL CLEAR", (60, 180, 90))
+            else:
+                draw_text_centered(buf, 28, "NO STORMS", self.INK_DIM)
+                draw_text_centered(buf, 36, "LOGGED", self.INK_DIM)
+            return bytes(buf)
+        y = 12
+        now = time.time()
+        for e in rows[:6]:
+            if y > 56:
+                break
+            phase = e.get("phase") or ""
+            ev = e.get("event") or e.get("summary") or ""
+            col = (90, 230, 120) if phase == "EXPIRED" else \
+                weather.event_color(ev, e.get("severity"))
+            mark = "END" if phase == "EXPIRED" else "NEW"
+            tag = weather.event_short(ev) or fit_text(ev, 16)
+            draw_text3x5(buf, 2, y, mark, col)
+            draw_text3x5(buf, 16, y, fit_text(tag, 24), (245, 248, 255))
+            ago = now - float(e.get("ts") or now)
+            if ago >= 0:
+                short = self._storm_ago_short(ago)
+                draw_text3x5(buf, WIDTH - 2 - text_w(short), y, short, self.INK_DIM)
+            y += 8
+        return bytes(buf)
+
+    @staticmethod
+    def _storm_ago(secs):
+        secs = max(0, int(secs))
+        if secs < 60:
+            return "%dS AGO" % secs
+        if secs < 3600:
+            return "%dM AGO" % (secs // 60)
+        return "%dH AGO" % (secs // 3600)
+
+    @staticmethod
+    def _storm_ago_short(secs):
+        secs = max(0, int(secs))
+        if secs < 60:
+            return "%dS" % secs
+        if secs < 3600:
+            return "%dM" % (secs // 60)
+        return "%dH" % (secs // 3600)
+
+    def _frame_met(self):
+        """Meteorologist desk -- dewpoint, spread, pressure trend, vis,
+        clouds. Only real station fields. This is the storm-watch card."""
+        buf = blank()
+        fill(buf, self.BG)
+        cond = self.data.get("conditions") or {}
+        stale = bool(self.data.get("age") and self.data["age"] > 900)
+        st = cond.get("station") or "MET"
+        draw_header(buf, "MET", self.ACCENT, right_tag=st, stale=stale)
+
+        if not self.data.get("configured"):
+            draw_text_centered(buf, 28, "SET LOCATION", self.INK_DIM)
+            return bytes(buf)
+        if not cond:
+            draw_text_centered(buf, 28, "LOADING", self.INK_DIM)
+            return bytes(buf)
+
+        y = 12
+        dew = cond.get("dewpoint_c")
+        temp = cond.get("temp_c")
+        if isinstance(dew, (int, float)):
+            draw_text3x5(buf, 2, y, "DEW", self.INK_DIM)
+            draw_text3x5(buf, WIDTH - 2 - text_w(f"{c_to_f(dew):.0f}F"), y,
+                         f"{c_to_f(dew):.0f}F", (245, 248, 255))
+            y += 7
+            if isinstance(temp, (int, float)):
+                spread = c_to_f(temp) - c_to_f(dew)
+                draw_text3x5(buf, 2, y, "SPREAD", self.INK_DIM)
+                draw_text3x5(buf, WIDTH - 2 - text_w(f"{spread:.0f}F"), y,
+                             f"{spread:.0f}F", self.INK)
+                y += 7
+        hum = cond.get("humidity")
+        if isinstance(hum, (int, float)) and y <= 40:
+            draw_text3x5(buf, 2, y, "HUM", self.INK_DIM)
+            draw_text3x5(buf, WIDTH - 2 - text_w(f"{hum:.0f}%"), y,
+                         f"{hum:.0f}%", self.INK)
+            y += 7
+
+        inhg = weather.pa_to_inhg(cond.get("pressure_pa"))
+        if isinstance(inhg, (int, float)):
+            ptxt = f"{inhg:.2f}"
+            trend = self.data.get("pressure_trend")
+            draw_text3x5(buf, 2, y, "SLP", self.INK_DIM)
+            draw_text3x5(buf, WIDTH - 2 - text_w(ptxt), y, ptxt, (245, 248, 255))
+            y += 7
+            if trend:
+                tcol = (255, 90, 70) if trend == "FALLING" else (
+                    (90, 230, 120) if trend == "RISING" else self.INK_DIM)
+                draw_text_centered(buf, y, trend, tcol)
+                y += 7
+            self._draw_hist_spark(buf, 4, min(y, 42), 56, 5,
+                                  self.data.get("pressure_hist") or [],
+                                  (180, 190, 210))
+            y += 7
+
+        wtrend = self.data.get("wind_trend")
+        if wtrend and wtrend != "STEADY":
+            wcol = (255, 90, 70) if wtrend == "WIND UP" else (90, 230, 120)
+            draw_text_centered(buf, y, wtrend, wcol)
+            y += 7
+        if self.data.get("wind_hist") and y <= 52:
+            self._draw_hist_spark(buf, 4, min(y, 50), 56, 5,
+                                  self.data.get("wind_hist") or [],
+                                  (90, 170, 230))
+            y += 7
+
+        vis = cond.get("visibility_m")
+        if isinstance(vis, (int, float)) and y <= 52:
+            miles = vis / 1609.34
+            vtxt = "10MI+" if miles >= 9.5 else f"{miles:.0f}MI"
+            draw_text3x5(buf, 2, y, "VIS", self.INK_DIM)
+            draw_text3x5(buf, WIDTH - 2 - text_w(vtxt), y, vtxt, self.INK)
+            y += 7
+
+        clouds = cond.get("clouds") or []
+        layer = next((c for c in clouds if c.get("base_ft") is not None),
+                     clouds[0] if clouds else None)
+        if layer and y <= 55:
+            amt = layer.get("amount") or ""
+            base = layer.get("base_ft")
+            cld = amt if base is None else f"{amt} {base // 100:03d}"
+            draw_text_centered(buf, min(y, 59), fit_text(cld, WIDTH - 4), self.INK_DIM)
+        return bytes(buf)
+
+    @staticmethod
+    def _draw_hist_spark(buf, x, y, width, height, hist, color):
+        pts = [p for _t, p in (hist or []) if isinstance(p, (int, float))]
+        if len(pts) < 2:
+            return
+        pts = pts[-width:]
+        lo, hi = min(pts), max(pts)
+        span = hi - lo if hi > lo else 0.01
+        for i, p in enumerate(pts):
+            hgt = int(round(((p - lo) / span) * (height - 1)))
+            put_px(buf, x + i, y + height - 1 - hgt, color)
+
+    @staticmethod
+    def _draw_pressure_spark(buf, x, y, width, height, hist):
+        WeatherEngine._draw_hist_spark(buf, x, y, width, height, hist, (180, 190, 210))
 
     AMBIENT_STYLE = "fade"          # atmospheric: weather dissolves in
 
@@ -16113,10 +17058,16 @@ class WeatherEngine:
             return self._frame_hourly()
         if self.view == "radar":
             return self._frame_radar()
+        if self.view == "met":
+            return self._frame_met()
+        if self.view == "stack":
+            return self._frame_stack()
+        if self.view == "log":
+            return self._frame_storm_log()
         if self.view == self.VIEW_DETAIL:
             return self._frame_detail()
         alerts = self.data.get("alerts") or []
-        if alerts:
+        if self.view == self.VIEW_ALERT and alerts:
             return self._frame_alert(alerts[self.cur_alert % len(alerts)])
         return self._frame_conditions()
 
@@ -16935,8 +17886,9 @@ class EventsLogEngine(Browsable):
         "plane": (120, 200, 255),   # same family as the flights mode's blue
         "sports": (255, 140, 40),   # same family as the sports mode's orange
         "notify": (176, 96, 255),   # same family as blog's violet (an HA "message")
+        "home": (255, 186, 90),
     }
-    KIND_TAG = {"plane": "PLANE", "sports": "SPORT", "notify": "NOTIFY"}
+    KIND_TAG = {"plane": "PLANE", "sports": "SPORT", "notify": "NOTIFY", "home": "HOME"}
 
     # Two lines per event (kind/age, then summary), 15px per row --
     # y=12,27,42 leaves the last summary line at y=48+6=54, safely inside
@@ -17017,13 +17969,175 @@ class EventsLogEngine(Browsable):
         return bytes(buf)
 
 
+class HomeHubEngine:
+    """House glance. Geometric rooms. What's on, how long, what just happened.
+
+    Zero I/O. Reads home.FEED. Missing sensors are absent, not errors.
+    Rotate flips MAIN / LOG. No DND. Sky and house share the glass;
+    severity elsewhere decides who interrupts.
+    """
+
+    name = "home"
+    tick_rate = 0.05
+
+    BG = (0, 0, 0)
+    INK = (150, 160, 185)
+    INK_DIM = (70, 76, 92)
+    ACCENT = (255, 186, 90)
+    ON = (255, 186, 90)
+    OFF = (28, 30, 36)
+    STALE = (255, 170, 40)
+    STORY = (245, 248, 255)
+
+    ROOM_BOX = {
+        "hallway": (2, 11, 60, 10),
+        "kitchen": (2, 23, 29, 16),
+        "living": (33, 23, 29, 16),
+        "game": (2, 41, 29, 14),
+        "beds": (33, 41, 29, 14),
+    }
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.data = {"rooms": [], "on_count": 0, "stories": [], "age": None, "err": None}
+        self.view = "main"
+        self.ticks = 0
+        self.pulse = Pulse()
+
+    def has_content(self):
+        # ALL OFF is still a true glance once HA has spoken.
+        return bool(self.data.get("rooms")) or self.data.get("age") is not None
+
+    def ambient_weight(self):
+        n = int(self.data.get("on_count") or 0)
+        if self.data.get("late"):
+            return 2.2
+        if n:
+            return 1.6
+        return 0.9 if self.has_content() else 0.4
+
+    def ambient_interest(self):
+        if self.data.get("late"):
+            return 0.55
+        n = int(self.data.get("on_count") or 0)
+        if n >= 3:
+            return 0.40
+        if n:
+            return 0.28
+        return 0.12 if self.has_content() else 0.0
+
+    def input(self, cmd):
+        if cmd in ("rotate", "drop", "up", "down"):
+            self.view = "log" if self.view == "main" else "main"
+
+    def auto(self):
+        pass
+
+    def tick(self):
+        self.ticks += 1
+        self.data = home.FEED.get()
+        self.pulse.note((self.data.get("on_count"), self.data.get("story")))
+        self.score = int(self.data.get("on_count") or 0)
+
+    AMBIENT_STYLE = "fade"
+
+    def _draw_room(self, buf, room):
+        box = self.ROOM_BOX.get(room.get("id"))
+        if not box:
+            return
+        x, y, w, h = box
+        on = int(room.get("on") or 0)
+        total = int(room.get("total") or 0)
+        fill_c = self.OFF
+        if on:
+            t = clamp(on / float(max(1, total)), 0.25, 1.0)
+            fill_c = rim(self.ON, 0.35 + 0.65 * t)
+        for yy in range(y, y + h):
+            for xx in range(x, x + w):
+                put_px(buf, xx, yy, fill_c)
+        ink = (20, 16, 10) if on else self.INK_DIM
+        label = fit_text(room.get("label") or "", w - 4)
+        if label:
+            draw_text3x5(buf, x + 2, y + 2, label, ink)
+        if total:
+            mark = "%d" % on if on else ""
+            if on and total > 1:
+                mark = "%d/%d" % (on, total)
+            if mark:
+                draw_text3x5(buf, x + 2, y + h - 7, mark, ink)
+
+    def _frame_main(self):
+        buf = blank()
+        fill(buf, self.BG)
+        n = int(self.data.get("on_count") or 0)
+        tag = "ALL OFF" if n == 0 else ("%d ON" % n)
+        stale = bool(self.data.get("age") and self.data["age"] > 90)
+        hdr = self.pulse.mix(self.ACCENT) if n else self.INK_DIM
+        draw_header(buf, "HOME", hdr, right_tag=tag, stale=stale)
+        rooms = self.data.get("rooms") or []
+        if not rooms:
+            if self.data.get("err") and self.data.get("age") is None:
+                draw_text_centered(buf, 28, "NO SIGNAL", self.INK_DIM)
+                draw_text_centered(buf, 36, "FROM HOUSE", self.INK_DIM)
+            elif self.data.get("age") is not None:
+                draw_text_centered(buf, 28, "ALL OFF", self.INK_DIM)
+            else:
+                draw_text_centered(buf, 28, "LOOKING", self.INK_DIM)
+            return bytes(buf)
+        for r in rooms:
+            self._draw_room(buf, r)
+        story = self.data.get("story")
+        if not story and int(self.data.get("rings_today") or 0):
+            story = "RING  %d TODAY" % int(self.data["rings_today"])
+        if self.data.get("late") and not story:
+            story = "LIGHTS  LATE"
+        if story:
+            draw_text_centered(buf, 58, fit_text(story, WIDTH - 4), self.STORY)
+        return bytes(buf)
+
+    def _frame_log(self):
+        buf = blank()
+        fill(buf, self.BG)
+        draw_header(buf, "HOME", self.ACCENT, right_tag="LOG")
+        rows = self.data.get("stories") or []
+        if not rows:
+            draw_text_centered(buf, 28, "NO HOUSE", self.INK_DIM)
+            draw_text_centered(buf, 36, "EVENTS YET", self.INK_DIM)
+            return bytes(buf)
+        y = 12
+        now = time.time()
+        for e in rows[:6]:
+            if y > 56:
+                break
+            kind = (e.get("kind") or "").upper()
+            mark = {"RING": "RING", "DOOR": "DOOR", "LEAK": "LEAK",
+                    "LATE": "LATE"}.get(kind, "HOME")
+            ago = home.fmt_age(now - float(e.get("ts") or now)) or ""
+            draw_text3x5(buf, 2, y, mark, self.ACCENT)
+            draw_text3x5(buf, WIDTH - 2 - text_w(ago), y, ago, self.INK_DIM)
+            y += 7
+            draw_text3x5(buf, 2, y, fit_text(e.get("summary") or "", WIDTH - 4),
+                         self.STORY)
+            y += 8
+        return bytes(buf)
+
+    def frame(self):
+        if self.view == "log":
+            return self._frame_log()
+        return self._frame_main()
+
+
 class AmbientEngine(Browsable):
     """Director, not a playlist. Four channels, one glass.
 
     AUTO is a SHOW: sky, then what's happening, then one page, then
-    rest. A live favorite locks sports DETAIL. A new storm or a new
-    song takes the glass. Clock is the empty-state fallback and a
-    daytime-quiet breath -- not a slot every lap.
+    rest. Live sports walk every live game in DETAIL. A new storm or
+    a new song takes the glass (not mid-slate). Clock is the
+    empty-state fallback and a daytime-quiet breath -- not a slot
+    every lap.
     WORLD -- every glance mode, including the analog clock.
     ARCADE -- self-playing games as living art.
     MIX -- the owner's own shortlist (ambient_config.json).
@@ -17057,7 +18171,7 @@ class AmbientEngine(Browsable):
     # Rest is night gallery / quiet clock.
     ACT_SKY = ("flights", "satellite", "weather")
     ACT_PLAY = ("sports", "nowplaying", "followflight")
-    ACT_BOARD = ("departures", "ticker")
+    ACT_BOARD = ("home", "departures", "ticker")
     ACT_PAGE = ("news", "events", "blog")
     # Night / quiet-world rest faces -- the calm generative ones.
     GALLERY = catalog.gallery()
@@ -17305,7 +18419,17 @@ class AmbientEngine(Browsable):
         except Exception:                  # noqa: BLE001
             w = 1.0
         w = max(0.5, min(3.0, w))
-        return int(clamp(self.DWELL_TICKS * w, self.DWELL_MIN, self.DWELL_MAX))
+        ticks = int(clamp(self.DWELL_TICKS * w, self.DWELL_MIN, self.DWELL_MAX))
+        if getattr(eng, "name", None) == "sports":
+            n_live = 0
+            try:
+                n_live = len(eng._live_indices())
+            except Exception:
+                n_live = 0
+            if n_live:
+                ticks = max(ticks, min(self.DWELL_MAX * 2,
+                                       n_live * SportsEngine.LIVE_DETAIL_TICKS))
+        return ticks
 
     def _interest(self, name):
         """0..1 for a slot. An engine without ambient_interest() falls
@@ -17386,7 +18510,19 @@ class AmbientEngine(Browsable):
         # A genuinely gripping feature earns real extra time on screen;
         # a quiet one still gets a full unhurried minimum.
         span = self.FEATURE_MAX_TICKS - self.FEATURE_MIN_TICKS
-        return int(self.FEATURE_MIN_TICKS + span * self._interest(showing))
+        ticks = int(self.FEATURE_MIN_TICKS + span * self._interest(showing))
+        if showing == "sports":
+            sports_eng = self.engines.get("sports")
+            n_live = 0
+            if sports_eng is not None:
+                try:
+                    n_live = len(sports_eng._live_indices())
+                except Exception:
+                    n_live = 0
+            if n_live:
+                ticks = max(ticks, min(self.FEATURE_MAX_TICKS + 600,
+                                       n_live * SportsEngine.LIVE_DETAIL_TICKS))
+        return ticks
 
     def _slot_ready(self, name):
         """AUTO uses ambient_ready() when a mode has one (sports: a
@@ -17634,40 +18770,37 @@ class AmbientEngine(Browsable):
         showing_sports = self.idx == sports_idx
         sports_eng = self.engines.get("sports")
 
-        # LIVE DETAIL -- the whole point of this overhaul. When sports
-        # is on screen and a game is live, open the in-depth card
-        # (K-zone, diamond, hockey MAIN, football strip), not the
-        # ticker row every other board ships.
+        # LIVE SLATE -- when sports is on, walk every live game in
+        # DETAIL. A favorite leads the slate. It does not freeze it.
+        # Music/storm must not steal mid-slate; the director may leave
+        # after dwell so the rest of the house still gets air.
         live_locked = False
+        slate_on = False
         if sports_eng is not None and sports_idx >= 0:
+            any_live = bool(sports_eng._live_indices())
             fav_live = sports_eng.favorite_live()
-            if showing_sports:
-                sports_eng.adopt_live_detail(prefer_favorite=True)
-            # AUTO: a live favorite OWNS the glass. Jump now, stay there,
-            # do not let a song or a 20s dwell pull you off the pitch.
-            if (self.channel == "auto" and fav_live
-                    and self.cycling and self._celebration_t <= 0
-                    and self.browse.auto_ok and sports_idx in avail):
-                if not showing_sports:
-                    self._jump_to("sports", hard=True)
-                    avail = self._available()
-                    showing_sports = True
-                    sports_eng.adopt_live_detail(prefer_favorite=True)
-                live_locked = True
-            elif (self.cycling and self._celebration_t <= 0
-                  and self.browse.auto_ok and not showing_sports
-                  and sports_idx in avail and fav_live):
-                # WORLD/MIX: sticky recall still pulls a live favorite
-                # back, just not as a lock.
+            if showing_sports and any_live:
+                sports_eng.adopt_live_slate()
+                slate_on = True
+            if (self.cycling and self._celebration_t <= 0
+                    and self.browse.auto_ok and not showing_sports
+                    and sports_idx in avail and (fav_live or any_live)):
                 self._sticky_recall_hold += 1
-                if self._sticky_recall_hold >= self.STICKY_RECALL_TICKS:
+                recall_at = (self.STICKY_RECALL_TICKS
+                             if fav_live else self.STICKY_RECALL_TICKS * 2)
+                if self._sticky_recall_hold >= recall_at:
                     self._sticky_recall_hold = 0
                     self._jump_to("sports", hard=True)
                     avail = self._available()
                     showing_sports = True
-                    sports_eng.adopt_live_detail(prefer_favorite=True)
+                    if any_live:
+                        sports_eng.adopt_live_slate()
+                        slate_on = True
             else:
-                self._sticky_recall_hold = 0
+                if showing_sports:
+                    self._sticky_recall_hold = 0
+                elif not (fav_live or any_live):
+                    self._sticky_recall_hold = 0
         else:
             self._sticky_recall_hold = 0
 
@@ -17691,7 +18824,7 @@ class AmbientEngine(Browsable):
         new_key = np_eng.track_key() if np_eng is not None else None
         if self._music_key is None:
             self._music_key = new_key
-        elif (not live_locked and new_key and new_key != self._music_key
+        elif (not slate_on and new_key and new_key != self._music_key
                 and self.cycling and self._celebration_t <= 0
                 and self.browse.auto_ok and not dnd.is_enabled()
                 and np_idx >= 0 and np_idx in avail
@@ -17706,7 +18839,7 @@ class AmbientEngine(Browsable):
         new_storms = wx_eng.storm_key() if wx_eng is not None else None
         if self._storm_key is None:
             self._storm_key = new_storms
-        elif (not live_locked and new_storms
+        elif (not slate_on and new_storms
               and set(new_storms) - set(self._storm_key or ())
               and self.cycling and self._celebration_t <= 0
               and self.browse.auto_ok and not dnd.is_enabled()
@@ -17781,10 +18914,28 @@ class AmbientEngine(Browsable):
                 self._trans_from = None
         # Rotate holds the scene. A 2px pip is the only chrome -- the
         # AUTO header used to stamp over the card for 1.4s.
+        buf = None
         if not self.cycling:
             buf = bytearray(frame)
             put_px(buf, 1, 62, self.ACCENT)
             put_px(buf, 2, 62, rim(self.ACCENT, 0.45))
+        # Tiny house pip when lights are on and we are not already
+        # looking at HOME — one cell, not a second UI.
+        slots = self._slot_names()
+        showing = slots[self.idx % len(slots)] if slots else None
+        if showing not in ("home", "sports"):
+            hub = self.engines.get("home")
+            n = 0
+            if hub is not None:
+                try:
+                    n = int((getattr(hub, "data", None) or {}).get("on_count") or 0)
+                except (TypeError, ValueError):
+                    n = 0
+            if n:
+                buf = bytearray(buf if buf is not None else frame)
+                put_px(buf, 61, 62, (255, 186, 90))
+                put_px(buf, 62, 62, rim((255, 186, 90), 0.5))
+        if buf is not None:
             frame = bytes(buf)
         return frame
 
@@ -18249,6 +19400,13 @@ class MenuEngine:
             block(2, 3, 5, 1, c)
             put_px(buf, x0 + 1, y0 + 7, c)
             put_px(buf, x0 + 7, y0 + 7, c)
+        elif gid == "home":
+            # A house: roof + body. The glance for what's on inside.
+            put_px(buf, x0 + 4, y0 + 1, c)
+            block(2, 2, 6, 1, c)
+            block(1, 3, 8, 1, c)
+            block(2, 4, 6, 5, c)
+            block(4, 6, 2, 3, w)
         elif gid == "clock":
             # A clock face: ring plus two hands. The most literal icon in
             # the set, deliberately -- this is the resting state and should
@@ -20127,12 +21285,17 @@ class GameDayEngine(Browsable):
     Pure, like every other engine here: no I/O, reads whatever the feeds
     have already cached.
 
-    UFC VIEWS. A card is a night with a shape, so the mode tracks where
-    the night stands rather than showing one static thing:
-      * CARD      -- how far through the card we are (N of M), always
-                     available so there is a sense of the night's arc
-      * UPCOMING  -- who is about to fight, with records. The main event
-                     gets its own treatment.
+    UFC VIEWS. A live fight owns the glass the way MLB DETAIL owns a
+    live game -- every real ESPN field that fits, nothing invented.
+      * SIT       -- pinned clock + names. Walkouts show tape.
+                     Once the fight is on, SIG/TD/CTRL stay up and
+                     every other real stat slides under them.
+      * STATS     -- SIG TOTAL TD CTRL KD SUB REV SLAM ADV
+      * SPLITS    -- HEAD BODY LEG DIST CLINCH GROUND as landed/att
+      * TAPE      -- height, reach, weight, stance, age, country
+      * UPCOMING  -- who is next, records, weight, scheduled rounds
+      * CARD      -- night arc (N of M). Not auto-rotated while a
+                     fight is LIVE -- that would steal the companion.
       * RESULT    -- a fight just ended. This is the payoff and it
                      preempts everything else.
 
@@ -20163,6 +21326,7 @@ class GameDayEngine(Browsable):
 
     RESULT_TICKS = 440       # ~22s holding a finish
     VIEW_TICKS = 260         # ~13s per rotating view otherwise
+    VIEW_TICKS_LIVE = 150    # ~7.5s -- live stats pages should turn over
     EXPIRE_TICKS = 1200      # ~60s on the final result, then hand the panel back
 
     def __init__(self):
@@ -20298,17 +21462,17 @@ class GameDayEngine(Browsable):
         else:
             self.pulse.note(("card", (card or {}).get("done")))
 
-        # Declare fight-statistics interest for whatever fight is ON
-        # SCREEN, and only while it's live or just finished -- a fight
-        # that hasn't started yet has nothing but honest zeros ESPN
-        # itself hasn't started counting, so there's no call worth making
-        # for it. See mma.UfcFeed.want_stats().
+        # Stats only once ESPN is actually counting (live/post). Bios
+        # (height/reach/stance) are the tale of the tape -- worth a
+        # PRE fetch so the walkout already has the card.
         disp = self._displayed_index()
         df = next((x for x in fights if x["index"] == disp), None)
-        if df and df["state"] in ("in", "post") and card:
+        if df and card:
             aids = [fr.get("id") for fr in df.get("fighters") or []]
-            mma.FEED.want_stats(df["id"], card["id"], df["id"], aids,
-                                live=(df["state"] == "in"))
+            mma.FEED.want_bios(df["id"], aids)
+            if df["state"] in ("in", "post"):
+                mma.FEED.want_stats(df["id"], card["id"], df["id"], aids,
+                                    live=(df["state"] == "in"))
 
         # Event over -> start the exit clock.
         if card and card.get("completed"):
@@ -20317,18 +21481,18 @@ class GameDayEngine(Browsable):
             self.done_t = 0
         self._maybe_exit()
 
-        # Rotate the non-result views on the normal cadence, unless the
-        # viewer is browsing (universal scroll control pauses auto-advance).
-        # Order is deliberate: UPCOMING first (who's fighting, the thing
-        # you'd want on arrival), then STATS (how it's going, once there's
-        # something to say), then CARD (where the night stands overall,
-        # the "zoom out" view) -- a natural drill-down/pull-back rhythm
-        # rather than an arbitrary index order.
+        # Live fight: cycle SIT / STATS / TAPE. Never auto-cut to CARD
+        # while someone is fighting -- that's the companion law.
         if self.result_t <= 0 and self.browse.auto_ok and self.sel is None:
             self.hold += 1
-            if self.hold >= self.VIEW_TICKS:
+            cur = self._current()
+            pages = self._pages(cur)
+            n = max(1, len(pages))
+            dwell = (self.VIEW_TICKS_LIVE
+                     if cur and cur.get("state") == "in" else self.VIEW_TICKS)
+            if self.hold >= dwell:
                 self.hold = 0
-                self.view = (self.view + 1) % 3
+                self.view = (self.view + 1) % n
 
     def _maybe_exit(self):
         """Hand the panel back once the event is over.
@@ -20375,6 +21539,132 @@ class GameDayEngine(Browsable):
         return scale
 
     # ---- UFC views -------------------------------------------------------
+    def _corners(self, f):
+        fighters = (f or {}).get("fighters") or []
+        left = fighters[0] if fighters else None
+        right = fighters[1] if len(fighters) > 1 else None
+        return left, right
+
+    def _fight_stats(self, f):
+        left, right = self._corners(f)
+        raw = mma.FEED.get_stats(f.get("id")) if f and f.get("id") else {}
+        ls = raw.get(left["id"]) if left and left.get("id") else None
+        rs = raw.get(right["id"]) if right and right.get("id") else None
+        return left, right, ls, rs
+
+    def _fight_bios(self, f):
+        left, right = self._corners(f)
+        raw = mma.FEED.get_bios(f.get("id")) if f and f.get("id") else {}
+        lb = raw.get(left["id"]) if left and left.get("id") else None
+        rb = raw.get(right["id"]) if right and right.get("id") else None
+        return left, right, lb, rb
+
+    def _has_stats(self, f):
+        _, _, ls, rs = self._fight_stats(f)
+        return ls is not None or rs is not None
+
+    def _has_splits(self, f):
+        _, _, ls, rs = self._fight_stats(f)
+        for st in (ls, rs):
+            if not st:
+                continue
+            for k in ("head_landed", "dist_landed", "clinch_landed", "ground_landed"):
+                if st.get(k) is not None:
+                    return True
+        return False
+
+    def _tape_ready(self, f):
+        _, _, lb, rb = self._fight_bios(f)
+        if lb or rb:
+            return True
+        left, right = self._corners(f)
+        return bool((left or {}).get("country") or (right or {}).get("country"))
+
+    def _pages(self, f):
+        """Which companion faces this fight can honestly show."""
+        if not f:
+            return ("card",)
+        if f.get("state") == "in":
+            # One watching face. The body is the ticker -- rotating
+            # away to TAPE mid-round would hide the clock.
+            return ("sit",)
+        if f.get("state") == "post":
+            pages = ["result"]
+            if self._has_stats(f):
+                pages.append("stats")
+            if self._has_splits(f):
+                pages.append("splits")
+            return tuple(pages)
+        pages = ["upcoming"]
+        if self._tape_ready(f):
+            pages.append("tape")
+        if self.sel is None:
+            pages.append("card")
+        return tuple(pages)
+
+    def _clock_line(self, f):
+        """R2 1:38 from real period + ESPN clock. Walkouts is not R0 -."""
+        rnd, clk = f.get("period"), f.get("clock")
+        if f.get("state") == "post":
+            rnd = f.get("final_round") or rnd
+            clk = f.get("final_time") or clk
+        if isinstance(rnd, int) and rnd > 0 and clk:
+            return f"R{rnd} {clk}"
+        if clk:
+            return str(clk)
+        detail = f.get("detail") or ""
+        if detail and detail not in ("IN PROGRESS", "FINAL", "SCHEDULED"):
+            return detail.replace(",", "")
+        if isinstance(rnd, int) and rnd > 0:
+            return f"R{rnd}"
+        plays = mma.FEED.get_plays(f.get("id")) if f and f.get("id") else {}
+        return plays.get("phase") or f.get("phase") or ""
+
+    @staticmethod
+    def _frac(landed, att):
+        if landed is None and att is None:
+            return None
+        if landed is None:
+            return "-"
+        if att is None:
+            return str(int(landed))
+        return "%d/%d" % (int(landed), int(att))
+
+    @staticmethod
+    def _stat_txt(v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return v
+        if isinstance(v, float) and v != int(v):
+            return str(int(v))
+        return str(int(v)) if isinstance(v, (int, float)) else str(v)
+
+    def _surname(self, fr):
+        if not fr:
+            return ""
+        return fr.get("last") or (str(fr.get("name") or "").split()[-1:] or [""])[0]
+
+    def _pair_row(self, buf, y, label, lv, rv, step=7):
+        """L  LABEL  R -- skip the row if both sides are missing."""
+        if lv is None and rv is None:
+            return y
+        lt = "-" if lv is None else str(lv)
+        rt = "-" if rv is None else str(rv)
+        lab = fit_text(label, 16)
+        lt_w, rt_w, lab_w = text_w(lt), text_w(rt), text_w(lab)
+        lab_x = (WIDTH - lab_w) // 2
+        # Label yields if it would sit on a value.
+        if (3 + lt_w + 2 > lab_x) or (WIDTH - 3 - rt_w < lab_x + lab_w):
+            draw_text3x5(buf, 3, y, fit_text(lt, 30), self.HERO)
+            draw_text3x5(buf, WIDTH - 3 - text_w(fit_text(rt, 30)), y,
+                         fit_text(rt, 30), self.HERO)
+        else:
+            draw_text_centered(buf, y, lab, self.INK_DIM)
+            draw_text3x5(buf, 3, y, lt, self.HERO)
+            draw_text3x5(buf, WIDTH - 3 - rt_w, y, rt, self.HERO)
+        return y + step
+
     def _frame_result(self, f):
         """A finish, as a highlight rather than a stat line.
 
@@ -20442,93 +21732,378 @@ class GameDayEngine(Browsable):
         y = 14
         for i, fr in enumerate(fighters[:2]):
             self._name(buf, y, fr.get("name"), self.HERO, big_ok=False)
-            if fr.get("record"):
-                draw_text_centered(buf, y + 7, fr["record"], self.INK_DIM)
+            bits = [x for x in (fr.get("record"), fr.get("country")) if x]
+            if bits:
+                draw_text_centered(buf, y + 7, fit_text("  ".join(bits), WIDTH - 8),
+                                   self.INK_DIM, x_min=3)
             y += 16
             if i == 0:
                 draw_text_centered(buf, y - 4, "VS", color_on_dark(self.ACCENT))
                 y += 4
 
         wt = f.get("weight")
-        if wt:
-            draw_text_centered(buf, 54, fit_text(wt, WIDTH - 8), self.INK_DIM, x_min=3)
+        rnds = f.get("rounds")
+        extra = ("%d RNDS" % rnds) if isinstance(rnds, int) and rnds else ""
+        if wt and extra and text_w("%s  %s" % (wt, extra)) <= WIDTH - 8:
+            foot = "%s  %s" % (wt, extra)
+        else:
+            foot = wt or extra
+        if foot:
+            draw_text_centered(buf, 54, fit_text(foot, WIDTH - 8), self.INK_DIM, x_min=3)
+        return bytes(buf)
+
+    def _live_action_line(self, f):
+        """Newest real action. Plays add ESPN's round + clock when present."""
+        plays = mma.FEED.get_plays(f.get("id")) if f and f.get("id") else {}
+        acts = plays.get("actions") or []
+        if acts:
+            a = acts[0]
+            bits = [a.get("label") or ""]
+            if a.get("round"):
+                bits.append("R%d" % int(a["round"]))
+            if a.get("clock"):
+                bits.append(str(a["clock"]))
+            line = " ".join(x for x in bits if x)
+            return line or None
+        return f.get("last_action") or None
+
+    @staticmethod
+    def _is_zero_stat(v):
+        if v is None:
+            return True
+        s = str(v).strip()
+        return s in ("0", "0/0", "0:00", "0.0", "0-0", "-")
+
+    def _live_stat_rows(self, ls, rs, fighting):
+        """Every real ESPN pair that can fit a ticker row. Missing stays off."""
+        def g(d, k):
+            return (d or {}).get(k)
+
+        rows = []
+
+        def add(lab, lv, rv, always=False):
+            if lv is None and rv is None:
+                return
+            if not always and self._is_zero_stat(lv) and self._is_zero_stat(rv):
+                return
+            rows.append((lab, lv, rv))
+
+        add("SIG",
+            self._frac(g(ls, "sig_landed"), g(ls, "sig_att")),
+            self._frac(g(rs, "sig_landed"), g(rs, "sig_att")),
+            always=fighting)
+        add("TOTAL",
+            self._frac(g(ls, "tot_landed"), g(ls, "tot_att")),
+            self._frac(g(rs, "tot_landed"), g(rs, "tot_att")),
+            always=fighting)
+        add("TD",
+            self._frac(g(ls, "td_landed"), g(ls, "td_att")),
+            self._frac(g(rs, "td_landed"), g(rs, "td_att")),
+            always=fighting)
+        add("CTRL",
+            self._stat_txt(g(ls, "control_time")),
+            self._stat_txt(g(rs, "control_time")),
+            always=fighting)
+        add("KD", self._stat_txt(g(ls, "knockdowns")),
+            self._stat_txt(g(rs, "knockdowns")), always=fighting)
+        add("SUB", self._stat_txt(g(ls, "submissions")),
+            self._stat_txt(g(rs, "submissions")), always=fighting)
+        add("HEAD",
+            self._frac(g(ls, "head_landed"), g(ls, "head_att")),
+            self._frac(g(rs, "head_landed"), g(rs, "head_att")))
+        add("BODY",
+            self._frac(g(ls, "body_landed"), g(ls, "body_att")),
+            self._frac(g(rs, "body_landed"), g(rs, "body_att")))
+        add("LEG",
+            self._frac(g(ls, "leg_landed"), g(ls, "leg_att")),
+            self._frac(g(rs, "leg_landed"), g(rs, "leg_att")))
+        add("DIST",
+            self._frac(g(ls, "dist_landed"), g(ls, "dist_att")),
+            self._frac(g(rs, "dist_landed"), g(rs, "dist_att")))
+        add("CLINCH",
+            self._frac(g(ls, "clinch_landed"), g(ls, "clinch_att")),
+            self._frac(g(rs, "clinch_landed"), g(rs, "clinch_att")))
+        add("GROUND",
+            self._frac(g(ls, "ground_landed"), g(ls, "ground_att")),
+            self._frac(g(rs, "ground_landed"), g(rs, "ground_att")))
+        add("REV", self._stat_txt(g(ls, "reversals")),
+            self._stat_txt(g(rs, "reversals")))
+        add("ADV", self._stat_txt(g(ls, "advances")),
+            self._stat_txt(g(rs, "advances")))
+        add("SLAM", self._stat_txt(g(ls, "slams")),
+            self._stat_txt(g(rs, "slams")))
+        add("HALF", self._stat_txt(g(ls, "adv_half")),
+            self._stat_txt(g(rs, "adv_half")))
+        add("SIDE", self._stat_txt(g(ls, "adv_side")),
+            self._stat_txt(g(rs, "adv_side")))
+        add("MOUNT", self._stat_txt(g(ls, "adv_mount")),
+            self._stat_txt(g(rs, "adv_mount")))
+        add("BACK", self._stat_txt(g(ls, "adv_back")),
+            self._stat_txt(g(rs, "adv_back")))
+        return rows
+
+    def _slide_rows(self, rows, hold, window=3):
+        """Rotate the extra ticker rows. SIG/TD/CTRL stay pinned above."""
+        if len(rows) <= window:
+            return rows
+        start = (max(0, int(hold)) // 70) % len(rows)
+        out = []
+        for i in range(window):
+            out.append(rows[(start + i) % len(rows)])
+        return out
+
+    def _frame_live(self, f):
+        """Watching face: clock never leaves. Body is tape or live ticker."""
+        buf = blank(); fill(buf, self.BG)
+        self._occasion_frame(buf, 0.55)
+        clock = self._clock_line(f)
+        fighting = isinstance(f.get("period"), int) and f.get("period") > 0
+        white_clock = bool(fighting and clock)
+        self._kicker(buf, clock or "LIVE",
+                     (255, 255, 255) if white_clock else self.LIVE)
+
+        left, right, ls, rs = self._fight_stats(f)
+        current = f.get("period") or 0
+        total = f.get("rounds")
+        if fighting and (total or current):
+            draw_round_ticks(buf, WIDTH // 2, 12,
+                             current, total or current,
+                             pulse=0.75 + 0.25 * math.sin(self.scroll * 0.3))
+
+        if fighting:
+            lname = fit_text(self._surname(left), 28)
+            rname = fit_text(self._surname(right), 28)
+            draw_text3x5(buf, 3, 17, lname, self.HERO)
+            if rname:
+                draw_text3x5(buf, WIDTH - 3 - text_w(rname), 17, rname, self.HERO)
+            lrec = fit_text((left or {}).get("record") or "", 28)
+            rrec = fit_text((right or {}).get("record") or "", 28)
+            if lrec:
+                draw_text3x5(buf, 3, 24, lrec, self.INK_DIM)
+            if rrec:
+                draw_text3x5(buf, WIDTH - 3 - text_w(rrec), 24, rrec, self.INK_DIM)
+            y = 31
+            act = self._live_action_line(f)
+            if act:
+                y = draw_text_on_empty(buf, y, fit_text(act, WIDTH - 8), self.GOLD)
+            rows = self._live_stat_rows(ls, rs, fighting=True)
+            pin = [r for r in rows if r[0] in ("SIG", "TD", "CTRL")]
+            extra = [r for r in rows if r[0] not in ("SIG", "TD", "CTRL")]
+            for lab, lv, rv in pin:
+                if y > 55:
+                    break
+                y = self._pair_row(buf, y, lab, lv, rv, step=7)
+            if extra and y <= 55:
+                shown = self._slide_rows(extra, self.ticks, window=1)
+                for lab, lv, rv in shown:
+                    y = self._pair_row(buf, y, lab, lv, rv, step=7)
+            return bytes(buf)
+
+        # Walkouts / tape / staredown: names + tale of the tape, not 0-0.
+        y = 14
+        for fr in (left, right):
+            if not fr:
+                continue
+            rec = fr.get("record")
+            rec_txt = fit_text(rec, 28) if rec else ""
+            name_budget = WIDTH - 8 - (text_w(rec_txt) + 2 if rec_txt else 0)
+            draw_text3x5(buf, 3, y, fit_text(fr.get("name") or "", name_budget), self.HERO)
+            if rec_txt:
+                draw_text3x5(buf, WIDTH - 3 - text_w(rec_txt), y, rec_txt, self.INK_DIM)
+            y += 7
+        wt = f.get("weight")
+        rnds = f.get("rounds")
+        extra = ("%d RNDS" % rnds) if isinstance(rnds, int) and rnds else ""
+        if wt and extra and text_w("%s  %s" % (wt, extra)) <= WIDTH - 8:
+            foot = "%s  %s" % (wt, extra)
+        else:
+            foot = wt or extra
+        if foot and y <= 42:
+            y = draw_text_on_empty(buf, y, fit_text(foot, WIDTH - 8), self.INK)
+        _, _, lb, rb = self._fight_bios(f)
+
+        def side(fr, bio, key, fallback=None):
+            if bio and bio.get(key) is not None:
+                v = bio.get(key)
+                return str(v) if not isinstance(v, str) else v
+            if fallback:
+                return (fr or {}).get(fallback)
+            return None
+
+        if lb or rb:
+            y = self._pair_row(buf, y, "HT",
+                               side(left, lb, "height"), side(right, rb, "height"))
+            y = self._pair_row(buf, y, "RCH",
+                               side(left, lb, "reach"), side(right, rb, "reach"))
+            if y <= 55:
+                y = self._pair_row(buf, y, "WT",
+                                   side(left, lb, "weight"), side(right, rb, "weight"))
+            if y <= 55:
+                y = self._pair_row(buf, y, "STN",
+                                   side(left, lb, "stance"), side(right, rb, "stance"))
         return bytes(buf)
 
     def _frame_stats(self, f):
-        """Fight statistics, laid out the way the real UFC broadcast
-        graphic shows them: two named columns, one stat per row down the
-        middle -- sig. strikes landed, takedowns landed, control time.
-
-        Source is mma.FEED.want_stats()/get_stats(): a genuinely more
-        expensive call than the rest of the card (two per-fighter
-        requests, no batched form), which is why tick() only ever
-        requests it for the fight actually on screen, and only once it's
-        live or finished -- see the comment there.
-
-        A fight with nothing fetched yet (just switched to it, or the
-        background poll hasn't landed) shows the matchup instead of a row
-        of zeros that would look exactly like a real 0-0 fight -- the
-        same "never invent a number" rule as every other feed here.
-        """
-        buf = blank(); fill(buf, self.BG)
-        self._occasion_frame(buf, 0.5 if f.get("state") == "in" else 0.3)
-
-        fighters = f.get("fighters") or []
-        stats = mma.FEED.get_stats(f.get("id")) if f.get("id") else {}
-        left = stats.get(fighters[0]["id"]) if fighters else None
-        right = stats.get(fighters[1]["id"]) if len(fighters) > 1 else None
-        if not fighters or (left is None and right is None):
-            # Bail out to the matchup view BEFORE drawing anything of our
-            # own -- the kicker used to be drawn here first, which meant
-            # "FIGHT STATS" got recorded (by render_audit.py's draw
-            # instrumentation) immediately before _frame_upcoming's own
-            # "MAIN EVENT"/"CO-MAIN EVENT" kicker, both centered at the
-            # same y=6 box. The stray draw never reached a real panel (this
-            # buf is discarded in favor of _frame_upcoming's own fresh
-            # buffer), but it produced a real, intermittent COLLISION
-            # report every time a fight had no stats fetched yet -- exactly
-            # the "FIGHT STATS overlaps MAIN EVENT" failure seen in
-            # render_audit.py gameday runs. Drawing the kicker only once we
-            # know we're keeping this frame removes the phantom draw.
+        """Broadcast graphic of the real per-fighter statistics
+        resource. Missing fields stay off the glass -- a row of zeros
+        is only drawn when ESPN sent zeros."""
+        left, right, ls, rs = self._fight_stats(f)
+        if not left or (ls is None and rs is None):
+            if f.get("state") == "in":
+                return self._frame_live(f)
             return self._frame_upcoming(f)
-        self._kicker(buf, "FIGHT STATS", self.GOLD)
-
-        # Last name only -- both corners plus the row labels have to
-        # share 64px, and the font can always fit a single surname.
-        def surname(full):
-            parts = str(full or "").split()
-            return parts[-1] if parts else ""
-        lname = fit_text(surname(fighters[0]["name"]), 28)
-        rname = fit_text(surname(fighters[1]["name"]) if len(fighters) > 1 else "", 28)
-        # y=13, NOT y=8: the kicker occupies rows 6-10, and names at y=8
-        # collided with it -- visible only by rendering the frame and
-        # looking at the pixels, which is why that check is mandatory here.
+        buf = blank(); fill(buf, self.BG)
+        self._occasion_frame(buf, 0.45 if f.get("state") == "in" else 0.25)
+        clock = self._clock_line(f) if f.get("state") == "in" else "STATS"
+        self._kicker(buf, clock or "STATS",
+                     self.LIVE if f.get("state") == "in" else self.GOLD)
+        lname = fit_text(self._surname(left), 28)
+        rname = fit_text(self._surname(right), 28)
         draw_text3x5(buf, 3, 13, lname, self.HERO)
-        draw_text3x5(buf, WIDTH - 3 - text_w(rname), 13, rname, self.HERO)
+        if rname:
+            draw_text3x5(buf, WIDTH - 3 - text_w(rname), 13, rname, self.HERO)
 
-        def row(y, label, lv, rv):
-            draw_text_centered(buf, y, fit_text(label, 30), self.INK_DIM)
-            lt = "-" if lv is None else str(int(lv))
-            rt = "-" if rv is None else str(int(rv))
-            draw_text3x5(buf, 3, y + 7, lt, self.HERO)
-            draw_text3x5(buf, WIDTH - 3 - text_w(rt), y + 7, rt, self.HERO)
-
-        def val(d, k):
+        def g(d, k):
             return (d or {}).get(k)
 
-        # Three 14px groups (label + values 7px below) stacked from y=20,
-        # so the last value row ends at y=59 clear of the y=62 border.
-        row(20, "SIG STR", val(left, "sig_landed"), val(right, "sig_landed"))
-        row(34, "TAKEDOWNS", val(left, "td_landed"), val(right, "td_landed"))
+        y = 20
+        y = self._pair_row(buf, y, "SIG",
+                           self._frac(g(ls, "sig_landed"), g(ls, "sig_att")),
+                           self._frac(g(rs, "sig_landed"), g(rs, "sig_att")),
+                           step=6)
+        y = self._pair_row(buf, y, "TOTAL",
+                           self._frac(g(ls, "tot_landed"), g(ls, "tot_att")),
+                           self._frac(g(rs, "tot_landed"), g(rs, "tot_att")),
+                           step=6)
+        y = self._pair_row(buf, y, "TD",
+                           self._frac(g(ls, "td_landed"), g(ls, "td_att")),
+                           self._frac(g(rs, "td_landed"), g(rs, "td_att")),
+                           step=6)
+        y = self._pair_row(buf, y, "CTRL",
+                           self._stat_txt(g(ls, "control_time")),
+                           self._stat_txt(g(rs, "control_time")),
+                           step=6)
+        # Zeros are real ESPN zeros -- show them. Missing stays off.
+        y = self._pair_row(buf, y, "KD",
+                           self._stat_txt(g(ls, "knockdowns")),
+                           self._stat_txt(g(rs, "knockdowns")),
+                           step=6)
+        y = self._pair_row(buf, y, "SUB",
+                           self._stat_txt(g(ls, "submissions")),
+                           self._stat_txt(g(rs, "submissions")),
+                           step=6)
+        if y <= 55:
+            y = self._pair_row(buf, y, "REV",
+                               self._stat_txt(g(ls, "reversals")),
+                               self._stat_txt(g(rs, "reversals")),
+                               step=6)
+        return bytes(buf)
 
-        # Control time is already a formatted "M:SS" string (see
-        # mma._parse_stats), not a number, so it gets its own row rather
-        # than going through row()'s int() formatting.
-        ctl = val(left, "control_time") or "-"
-        ctr = val(right, "control_time") or "-"
-        draw_text_centered(buf, 48, "CONTROL", self.INK_DIM)
-        draw_text3x5(buf, 3, 55, ctl, self.HERO)
-        draw_text3x5(buf, WIDTH - 3 - text_w(ctr), 55, ctr, self.HERO)
+    def _frame_splits(self, f):
+        """Location and position -- the rest of the 43-stat payload."""
+        left, right, ls, rs = self._fight_stats(f)
+        if not left or (ls is None and rs is None):
+            return self._frame_stats(f)
+        buf = blank(); fill(buf, self.BG)
+        self._occasion_frame(buf, 0.4 if f.get("state") == "in" else 0.25)
+        clock = self._clock_line(f) if f.get("state") == "in" else "SPLITS"
+        self._kicker(buf, clock or "SPLITS",
+                     self.LIVE if f.get("state") == "in" else self.GOLD)
+        lname = fit_text(self._surname(left), 28)
+        rname = fit_text(self._surname(right), 28)
+        draw_text3x5(buf, 3, 13, lname, self.HERO)
+        if rname:
+            draw_text3x5(buf, WIDTH - 3 - text_w(rname), 13, rname, self.HERO)
+
+        def g(d, k):
+            return (d or {}).get(k)
+
+        y = 20
+        y = self._pair_row(buf, y, "HEAD",
+                           self._frac(g(ls, "head_landed"), g(ls, "head_att")),
+                           self._frac(g(rs, "head_landed"), g(rs, "head_att")),
+                           step=6)
+        y = self._pair_row(buf, y, "BODY",
+                           self._frac(g(ls, "body_landed"), g(ls, "body_att")),
+                           self._frac(g(rs, "body_landed"), g(rs, "body_att")),
+                           step=6)
+        y = self._pair_row(buf, y, "LEG",
+                           self._frac(g(ls, "leg_landed"), g(ls, "leg_att")),
+                           self._frac(g(rs, "leg_landed"), g(rs, "leg_att")),
+                           step=6)
+        y = self._pair_row(buf, y, "DIST",
+                           self._frac(g(ls, "dist_landed"), g(ls, "dist_att")),
+                           self._frac(g(rs, "dist_landed"), g(rs, "dist_att")),
+                           step=6)
+        y = self._pair_row(buf, y, "CLINCH",
+                           self._frac(g(ls, "clinch_landed"), g(ls, "clinch_att")),
+                           self._frac(g(rs, "clinch_landed"), g(rs, "clinch_att")),
+                           step=6)
+        if y <= 55:
+            y = self._pair_row(buf, y, "GROUND",
+                               self._frac(g(ls, "ground_landed"), g(ls, "ground_att")),
+                               self._frac(g(rs, "ground_landed"), g(rs, "ground_att")),
+                               step=6)
+        return bytes(buf)
+
+    @staticmethod
+    def _hbl(st):
+        """HEAD/BODY/LEG landed as 10-1-0, or None if any piece missing."""
+        if not st:
+            return None
+        h, b, l = st.get("head_landed"), st.get("body_landed"), st.get("leg_landed")
+        if h is None or b is None or l is None:
+            return None
+        return "%d-%d-%d" % (int(h), int(b), int(l))
+
+    def _frame_tape(self, f):
+        """Tale of the tape. Scoreboard country is free. Height / reach
+        / stance / age / career KO-SUB come from the athlete profile
+        when that fetch has landed -- never guessed."""
+        left, right, lb, rb = self._fight_bios(f)
+        if not left:
+            return self._frame_upcoming(f)
+        buf = blank(); fill(buf, self.BG)
+        self._occasion_frame(buf, 0.3)
+        self._kicker(buf, "TAPE", self.GOLD)
+        lname = fit_text(self._surname(left), 28)
+        rname = fit_text(self._surname(right), 28)
+        draw_text3x5(buf, 3, 13, lname, self.HERO)
+        if rname:
+            draw_text3x5(buf, WIDTH - 3 - text_w(rname), 13, rname, self.HERO)
+        y = 21
+
+        def side(fr, bio, key, fallback=None):
+            if bio and bio.get(key) is not None:
+                v = bio.get(key)
+                return str(v) if not isinstance(v, str) else v
+            if fallback:
+                return (fr or {}).get(fallback)
+            return None
+
+        y = self._pair_row(buf, y, "HT",
+                           side(left, lb, "height"), side(right, rb, "height"),
+                           step=6)
+        y = self._pair_row(buf, y, "RCH",
+                           side(left, lb, "reach"), side(right, rb, "reach"),
+                           step=6)
+        y = self._pair_row(buf, y, "WT",
+                           side(left, lb, "weight"), side(right, rb, "weight"),
+                           step=6)
+        y = self._pair_row(buf, y, "STN",
+                           side(left, lb, "stance"), side(right, rb, "stance"),
+                           step=6)
+        y = self._pair_row(buf, y, "AGE",
+                           side(left, lb, "age"), side(right, rb, "age"),
+                           step=6)
+        y = self._pair_row(buf, y, "FROM",
+                           side(left, lb, "country", "country"),
+                           side(right, rb, "country", "country"),
+                           step=6)
+        if y <= 55:
+            y = self._pair_row(buf, y, "STYLE",
+                               side(left, lb, "style"), side(right, rb, "style"),
+                               step=6)
         return bytes(buf)
 
     def _frame_card(self):
@@ -20568,8 +22143,16 @@ class GameDayEngine(Browsable):
             # is fighting, which is the one thing this line is for.
             draw_marquee(buf, 48, billing, self.INK, self.scroll, gap="   -   ")
         where = card.get("city")
-        if where:
-            draw_text_centered(buf, 55, fit_text(where, WIDTH - 8), self.INK_DIM, x_min=3)
+        st = card.get("state_abbr")
+        loc = " ".join(x for x in (where, st) if x)
+        bc = card.get("broadcast")
+        foot = loc
+        if bc and loc:
+            foot = "%s  %s" % (loc, bc)
+        elif bc:
+            foot = bc
+        if foot:
+            draw_text_centered(buf, 55, fit_text(foot, WIDTH - 8), self.INK_DIM, x_min=3)
         return bytes(buf)
 
     def _frame_waiting(self):
@@ -20728,21 +22311,19 @@ class GameDayEngine(Browsable):
         f = self._current()
         if f is None:
             return self._frame_waiting()
-        # A fight already fought shows its result; one still to come shows
-        # the matchup. That makes browsing the card coherent: you scroll
-        # back through results and forward into what is still to happen.
-        if f["state"] == "post" and (self.sel is not None or self.view == 1):
-            return self._frame_result(f)
-        # STATS is part of the auto-rotation only (view == 2, not while
-        # browsing): a manually browsed fight keeps the existing
-        # post->result / pre->upcoming contract, since stats for a fight
-        # several positions away from the live one is rarely what a
-        # browsing viewer is after, and tick() only actually fetches
-        # stats for the fight on screen -- browsing straight to view 2
-        # would just show "no data yet" for most of the card.
-        if self.sel is None and self.view == 2 and f["state"] in ("in", "post"):
+        pages = self._pages(f)
+        page = pages[self.view % len(pages)]
+        if page == "sit":
+            return self._frame_live(f)
+        if page == "stats":
             return self._frame_stats(f)
-        if self.sel is not None or self.view == 0:
+        if page == "splits":
+            return self._frame_splits(f)
+        if page == "tape":
+            return self._frame_tape(f)
+        if page == "result":
+            return self._frame_result(f)
+        if page == "upcoming":
             return self._frame_upcoming(f)
         return self._frame_card()
 
@@ -20787,6 +22368,7 @@ ENGINES = {
     "clock": ClockEngine,
     "blog": BlogEngine,
     "events": EventsLogEngine,
+    "home": HomeHubEngine,
     "ambient": AmbientEngine,
     "gameday": GameDayEngine,
     # PLANE-IN-WINDOW takeover -- same shape as "gameday": registered so

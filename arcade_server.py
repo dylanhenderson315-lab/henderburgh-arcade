@@ -56,6 +56,7 @@ import dnd
 import skins
 import layout
 import notify
+import home
 import nowplaying
 import ownernote
 import paneltext
@@ -358,7 +359,7 @@ class Arcade:
                 self._bg_capture_needed = False
         return True
 
-    def trigger_notify(self, priority, title, message):
+    def trigger_notify(self, priority, title, message, respect_dnd=True):
         """Home Assistant notification pass-through (task #8). `title`/
         `message` must already be paneltext.panel_text()-folded by the
         caller (do_POST's /api/notify handler) -- this method just routes
@@ -389,11 +390,13 @@ class Arcade:
                 # "a real event happened, whether or not the panel was
                 # awake to show it" reasoning that module's own docstring
                 # states.
-                if not dnd.is_enabled():
+                if (not respect_dnd) or (not dnd.is_enabled()):
                     # Lightweight composite overlay -- see
                     # _notify_banner_frame(). No mode swap, no input
                     # capture; whatever's running keeps running untouched
-                    # underneath it.
+                    # underneath it. House facts (doorbell, leak, late
+                    # lights) pass respect_dnd=False — TV watching does
+                    # not hush the hub.
                     self._notify_banner = {
                         "title": title, "message": message, "color": color,
                         "expires": time.time() + NOTIFY_BANNER_SECONDS,
@@ -950,6 +953,17 @@ class Arcade:
                             with self.lock:
                                 mode, eng = self.mode, self.engine
 
+                # Late-lights story: a normal banner, not a takeover.
+                # House facts are not DND-gated — TV watching does not
+                # hush the hub.
+                late = home.FEED.pop_late()
+                if late:
+                    self.trigger_notify(
+                        "normal",
+                        paneltext.panel_text(late.get("title") or "LIGHTS"),
+                        paneltext.panel_text(late.get("message") or "LATE"),
+                        respect_dnd=False)
+
                 # Pause DDP and sample the real Apollo effect into a loop cache
                 # so game underlays are exact (Polar_Waves ≠ Fire, Yves exact, …).
                 # Never capture during pure ambient — native FX already is exact.
@@ -1340,6 +1354,26 @@ class Handler(BaseHTTPRequestHandler):
                 cfg["event"] = {"game": g["short_name"] if g else None,
                                 "state": g["state"] if g else None}
             self._json(cfg)
+        elif path == "/api/home":
+            cfg = home.load_config()
+            live = home.FEED.get()
+            self._json({
+                "ha_url": cfg.get("ha_url"),
+                "has_token": bool(cfg.get("ha_token")),
+                "bedtime_hour": cfg.get("bedtime_hour"),
+                "rooms": cfg.get("rooms"),
+                "doorbell": cfg.get("doorbell"),
+                "door": cfg.get("door"),
+                "leak": cfg.get("leak"),
+                "on_count": live.get("on_count"),
+                "rooms_live": live.get("rooms"),
+                "story": live.get("story"),
+                "rings_today": live.get("rings_today"),
+                "late": live.get("late"),
+                "age": live.get("age"),
+                "err": live.get("err"),
+                "slots": live.get("slots"),
+            })
         elif path == "/api/weather/current":
             # Read-only: weather has no config of its own -- it reuses the
             # ISS/flights home location via /api/satellite/location.
@@ -1371,6 +1405,10 @@ class Handler(BaseHTTPRequestHandler):
                         "has_key": bool(cfg["api_key"]), "mic_only": cfg["mic_only"],
                         "playing": s["playing"],
                         "track": s["track"], "age": s["age"], "err": s["err"],
+                        "eq_gain": cfg.get("eq_gain", 1.0),
+                        "eq_bass": cfg.get("eq_bass", 1.0),
+                        "eq_palette": cfg.get("eq_palette", "WARM"),
+                        "eq_palettes": list(nowplaying.PALETTES),
                         "mic": {"stale": mic.get("stale"), "path": mic.get("path"),
                                 "peak_pct": mic.get("peak_pct"),
                                 "source": mic.get("source_name"),
@@ -1595,6 +1633,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "callsign": cs})
             except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/home/ingest":
+            try:
+                j = json.loads(body or b"{}")
+                n = home.FEED.ingest(j.get("lights") or [])
+                self._json({"ok": True, "n": n, **{k: home.FEED.get()[k]
+                    for k in ("on_count", "age", "err")}})
+            except (ValueError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/home":
+            try:
+                j = json.loads(body or b"{}")
+                cfg = home.save_config(j)
+                self._json({"ok": True, "bedtime_hour": cfg.get("bedtime_hour"),
+                            "doorbell": cfg.get("doorbell"),
+                            "door": cfg.get("door"),
+                            "leak": cfg.get("leak")})
+            except (ValueError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/notify":
             # HOME ASSISTANT NOTIFICATION PASS-THROUGH (task #8). Payload
             # mirrors HA's real `notify` service shape: {title, message,
@@ -1602,22 +1658,29 @@ class Handler(BaseHTTPRequestHandler):
             # real auth check -- see notify.py's module docstring for why
             # a spoofable notify endpoint is worth the exception to the
             # project's usual trusted-LAN no-auth posture.
-            if not notify.check_token(self.headers.get("X-Arcade-Token")):
+            if not notify.check_token(notify.token_from_headers(self.headers)):
                 self._json({"ok": False, "error": "unauthorized"}, 401)
                 return
             try:
                 j = json.loads(body or b"{}")
-                title = j["title"]
-                if not isinstance(title, str) or not title.strip():
-                    raise ValueError("title required")
+                # Home Assistant's notify service often sends only
+                # `message`. Title is preferred when present; never invent
+                # a sentence — fall back to HOME so the banner still has
+                # a 3x5 header.
+                title = j.get("title")
                 message = j.get("message", "")
+                if not isinstance(title, str) or not title.strip():
+                    title = "HOME"
+                if not isinstance(message, str):
+                    message = "" if message is None else str(message)
                 # Same "malformed values fall back to defaults" convention
                 # /api/brightness already uses: anything other than the
                 # two recognized values -- missing, wrong type, a typo --
                 # falls back to "normal" rather than rejecting the request
-                # or guessing which tier was meant.
-                data = j.get("data") or {}
-                priority = data.get("priority") if isinstance(data, dict) else None
+                # or guessing which tier was meant. HA may put priority
+                # on the body or inside data.
+                data = j.get("data") if isinstance(j.get("data"), dict) else {}
+                priority = data.get("priority", j.get("priority"))
                 if priority not in ("normal", "urgent"):
                     priority = "normal"
                 # Fold at the boundary -- the one place external text
@@ -1626,6 +1689,14 @@ class Handler(BaseHTTPRequestHandler):
                 # fabricated.
                 title_f = paneltext.panel_text(title)
                 message_f = paneltext.panel_text(message)
+                house_kind = home.classify_notify(
+                    title_f, message_f, data.get("kind") if isinstance(data, dict) else None)
+                if house_kind:
+                    story = title_f if not message_f else ("%s  %s" % (title_f, message_f))
+                    home.FEED.record_event(house_kind, story)
+                    events_log.LOG.record("home", story)
+                    if house_kind == "leak":
+                        priority = "urgent"
                 # RECENT EVENTS LOG (events_log.py) -- record right after
                 # the fold, using the same real folded title/message the
                 # banner/takeover itself will draw. Recorded regardless of
@@ -1635,7 +1706,9 @@ class Handler(BaseHTTPRequestHandler):
                 # whether the panel happened to be awake to show it.
                 summary = f"{title_f}: {message_f}" if message_f else title_f
                 events_log.LOG.record("notify", summary)
-                ok = ARCADE.trigger_notify(priority, title_f, message_f)
+                ok = ARCADE.trigger_notify(
+                    priority, title_f, message_f,
+                    respect_dnd=(house_kind is None))
                 self._json({"ok": ok, "priority": priority,
                             "title": title_f, "message": message_f})
             except (ValueError, KeyError, TypeError) as e:
@@ -1804,11 +1877,24 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 j = json.loads(body or b"{}")
                 mic_only = j.get("mic_only")
-                cfg = nowplaying.FEED.set_config(
-                    j.get("api_key"), j.get("user"), clear_key=bool(j.get("clear_key")),
-                    mic_only=(bool(mic_only) if mic_only is not None else None))
-                self._json({"ok": True, "user": cfg["user"], "has_key": bool(cfg["api_key"]),
-                            "mic_only": cfg["mic_only"]})
+                eq_touch = any(k in j for k in ("eq_gain", "eq_bass", "eq_palette"))
+                ident_touch = any(k in j for k in ("api_key", "user", "clear_key", "mic_only"))
+                if ident_touch:
+                    cfg = nowplaying.FEED.set_config(
+                        j.get("api_key"), j.get("user"), clear_key=bool(j.get("clear_key")),
+                        mic_only=(bool(mic_only) if mic_only is not None else None))
+                else:
+                    cfg = nowplaying.FEED.get_config()
+                if eq_touch:
+                    cfg = nowplaying.FEED.set_eq(
+                        gain=j.get("eq_gain"), bass=j.get("eq_bass"),
+                        palette=j.get("eq_palette"))
+                self._json({"ok": True, "user": cfg.get("user"),
+                            "has_key": bool(cfg.get("api_key")),
+                            "mic_only": cfg.get("mic_only"),
+                            "eq_gain": cfg.get("eq_gain"),
+                            "eq_bass": cfg.get("eq_bass"),
+                            "eq_palette": cfg.get("eq_palette")})
             except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/ambient":

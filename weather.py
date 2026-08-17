@@ -43,6 +43,7 @@ import json
 import math
 import re
 from datetime import date as _date
+from pathlib import Path
 import math
 import calendar
 import threading
@@ -61,11 +62,19 @@ _UA = "HenderburghArcade/1.0 (LED matrix display; github.com/dylanhenderson315-l
 POINTS_URL = "https://api.weather.gov/points/{lat},{lon}"
 ALERTS_URL = "https://api.weather.gov/alerts/active?point={lat},{lon}"
 
-CONDITIONS_REFRESH = 600.0    # observations update ~hourly; 10 min is plenty
+CONDITIONS_REFRESH = 600.0    # quiet sky -- observations update ~hourly
+CONDITIONS_REFRESH_LIVE = 90.0  # a warning is out -- pressure/gust must move
 FORECAST_REFRESH = 3600.0     # high/low changes slowly; one request an hour
 HOURLY_REFRESH = 1800.0       # hourly forecast periods change slowly too -- 30 min is plenty
 HOURLY_MAX_PERIODS = 18       # ~18 real hours ahead is plenty for a wall-panel forecast view
-ALERTS_REFRESH = 120.0        # severe alerts are the time-critical half
+ALERTS_REFRESH = 120.0        # quiet
+ALERTS_REFRESH_LIVE = 30.0    # cells move; 2 min is a whole storm life
+PRESSURE_HIST_MAX = 48        # ~hours of 10-min samples, or ~1h of live 90s
+RADAR_REFRESH = 300.0         # RainViewer past frames are ~5 min
+RADAR_REFRESH_LIVE = 180.0
+RADAR_ECHO_MAX = 72
+RADAR_SCOPE_NM = 80.0
+RAINVIEWER_MAPS = "https://api.rainviewer.com/public/weather-maps.json"
 POINT_REFRESH = 86400.0       # gridpoint/station for a location never really changes
 MAX_STATION_TRIES = 4         # see _fetch_point: nearest station often under-reports
 CONFIG_CHECK = 10.0
@@ -253,10 +262,14 @@ def _fetch_hourly(hourly_url):
         temp_f = round(t) if isinstance(t, (int, float)) else None
         wind_mph = _parse_wind_mph(p.get("windSpeed"))
         feels = _hourly_feels_like_f(temp_f, rh, wind_mph)
+        dew_c = (p.get("dewpoint") or {}).get("value")
+        dew_f = round(dew_c * 9.0 / 5.0 + 32.0) if isinstance(dew_c, (int, float)) else None
         out.append({
             "start": p.get("startTime"),
             "temp_f": temp_f,
             "feels_f": round(feels) if isinstance(feels, (int, float)) else None,
+            "dew_f": dew_f,
+            "rh_pct": rh if isinstance(rh, (int, float)) else None,
             "precip_pct": pop.get("value"),
             "short": paneltext.panel_text(p.get("shortForecast")),
             "wind_mph": wind_mph,
@@ -309,21 +322,43 @@ def _fetch_point(lat, lon):
             "zones": zones}
 
 
+def _cloud_layers(raw):
+    """Real NWS cloudLayers -> [{amount, base_ft}]. Missing base stays None."""
+    out = []
+    for layer in (raw or []):
+        if not isinstance(layer, dict):
+            continue
+        amt = paneltext.panel_text(layer.get("amount")) or None
+        base_m = _val((layer.get("base") or {}))
+        base_ft = None
+        if isinstance(base_m, (int, float)):
+            base_ft = int(round(base_m * 3.28084))
+        if amt:
+            out.append({"amount": amt, "base_ft": base_ft})
+    return out
+
+
 def _read_observation(station):
     d = _get_json(f"https://api.weather.gov/stations/{station}/observations/latest")
     p = d.get("properties") or {}
     return {
-        # Celsius and km/h -- NWS returns metric despite being a US
-        # agency. Kept in source units here; converted at the render
-        # layer like every other mode.
+        # Celsius / km/h / Pa / m -- NWS is metric. Convert at render.
         "station": station,
+        "obs_ts": _iso_epoch(p.get("timestamp")),
         "temp_c": _val(p.get("temperature")),
+        "dewpoint_c": _val(p.get("dewpoint")),
         "heat_index_c": _val(p.get("heatIndex")),
         "wind_chill_c": _val(p.get("windChill")),
         "wind_kmh": _val(p.get("windSpeed")),
         "gust_kmh": _val(p.get("windGust")),
         "wind_dir_deg": _val(p.get("windDirection")),
         "humidity": _val(p.get("relativeHumidity")),
+        "pressure_pa": _val(p.get("barometricPressure")) or _val(p.get("seaLevelPressure")),
+        "visibility_m": _val(p.get("visibility")),
+        "precip_1h_mm": _val(p.get("precipitationLastHour")),
+        "precip_3h_mm": _val(p.get("precipitationLast3Hours")),
+        "precip_6h_mm": _val(p.get("precipitationLast6Hours")),
+        "clouds": _cloud_layers(p.get("cloudLayers")),
         "text": paneltext.panel_text(p.get("textDescription")),
     }
 
@@ -348,24 +383,37 @@ def feels_like_c(obs):
     return obs.get("temp_c")
 
 
+def _obs_score(obs):
+    """How much of a real met desk this station is reporting. Nearest
+    (KMYR) often has temp and nothing else -- KCRE a few miles away
+    had dewpoint + pressure + humidity on the same evening. Pick the
+    richest real report, never mix two stations."""
+    score = 0
+    for key in ("dewpoint_c", "pressure_pa", "humidity", "heat_index_c",
+                "wind_chill_c", "visibility_m"):
+        if obs.get(key) is not None:
+            score += 2 if key in ("dewpoint_c", "pressure_pa") else 1
+    if obs.get("clouds"):
+        score += 1
+    return score
+
+
 def _fetch_conditions(stations):
-    """Try candidate stations in order. Prefer one that reports a real
-    feels-like (heatIndex/windChill) or humidity alongside temperature;
-    fall back to the first that at least has a temperature."""
-    first_usable = None
+    """Try candidate stations. Prefer the one reporting the most real
+    met fields (dewpoint/pressure first), not merely the nearest."""
+    best = None
+    best_score = -1
     for st in stations:
         try:
             obs = _read_observation(st)
         except Exception:                              # noqa: BLE001
             continue
         if obs.get("temp_c") is None:
-            continue                                    # station reporting nothing useful
-        if first_usable is None:
-            first_usable = obs
-        if (obs.get("heat_index_c") is not None or obs.get("wind_chill_c") is not None
-                or obs.get("humidity") is not None):
-            return obs
-    return first_usable
+            continue
+        s = _obs_score(obs)
+        if s > best_score:
+            best, best_score = obs, s
+    return best
 
 
 # ---- storm position/motion, for the severe-alert screen's mini-scope
@@ -482,6 +530,147 @@ def _iso_epoch(s):
         return None
 
 
+def _stormish(event):
+    """A real convective/flood session, not heat or a frost."""
+    e = (event or "").upper()
+    return any(k in e for k in
+               ("WARNING", "THUNDER", "TORNADO", "FLOOD", "SPECIAL WEATHER"))
+
+
+def product_kind(event):
+    """WATCH / WARNING / ADVISORY / STATEMENT from NWS's own event name."""
+    e = (event or "").upper()
+    if "WARNING" in e:
+        return "WARNING"
+    if "WATCH" in e:
+        return "WATCH"
+    if "ADVISORY" in e:
+        return "ADVISORY"
+    return "STATEMENT"
+
+
+def event_short(event):
+    """Official NWS short tags. Unknown events stay folded full name."""
+    e = (event or "").upper()
+    if "TORNADO WARNING" in e:
+        return "TOR"
+    if "FLASH FLOOD WARNING" in e:
+        return "FFW"
+    if "FLOOD WARNING" in e:
+        return "FLW"
+    if "SEVERE THUNDERSTORM WARNING" in e:
+        return "SVR"
+    if "TORNADO WATCH" in e:
+        return "TWR"
+    if "SEVERE THUNDERSTORM WATCH" in e:
+        return "SWR"
+    if "FLASH FLOOD WATCH" in e:
+        return "FFA"
+    if "FLOOD ADVISORY" in e:
+        return "FLA"
+    if "HEAT" in e:
+        return "HEAT"
+    if "SPECIAL WEATHER" in e:
+        return "SPS"
+    return paneltext.panel_text(event) or None
+
+
+def event_color(event, severity=None):
+    """Official-ish NWS product colors. Event name wins over generic
+    severity so a Tornado Watch is pink, not the same orange as SVR."""
+    e = (event or "").upper()
+    if "TORNADO WARNING" in e:
+        return (255, 30, 30)
+    if "FLASH FLOOD WARNING" in e:
+        return (180, 24, 48)
+    if "FLOOD WARNING" in e and "FLASH" not in e:
+        return (160, 40, 60)
+    if "SEVERE THUNDERSTORM WARNING" in e:
+        return (255, 80, 40)
+    if "TORNADO WATCH" in e:
+        return (255, 130, 180)
+    if "SEVERE THUNDERSTORM WATCH" in e:
+        return (240, 200, 70)
+    if "FLASH FLOOD WATCH" in e or "FLOOD WATCH" in e:
+        return (200, 160, 80)
+    if "FLOOD ADVISORY" in e:
+        return (70, 170, 110)
+    if "HEAT" in e:
+        return (255, 150, 50)
+    if "SPECIAL WEATHER" in e:
+        return (200, 180, 90)
+    sev = severity or "Unknown"
+    table = {"Extreme": (255, 45, 45), "Severe": (255, 80, 40),
+             "Moderate": (255, 170, 40), "Minor": (240, 200, 70)}
+    return table.get(sev, (200, 200, 200))
+
+
+def _point_in_ring(lon, lat, ring):
+    """Ray-cast. ring is GeoJSON [lon, lat] vertices. Small warned
+    polygons -- planar is honest enough, not a globe projection."""
+    pts = list(ring or [])
+    if len(pts) > 1 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    if len(pts) < 3:
+        return False
+    inside = False
+    j = len(pts) - 1
+    try:
+        for i, (xi, yi) in enumerate(pts):
+            xj, yj = pts[j]
+            xi, yi, xj, yj = float(xi), float(yi), float(xj), float(yj)
+            if ((yi > lat) != (yj > lat)) and \
+                    (lon < (xj - xi) * (lat - yi) / ((yj - yi) or 1e-12) + xi):
+                inside = not inside
+            j = i
+    except (TypeError, ValueError):
+        return False
+    return inside
+
+
+def _dist_point_seg_nm(lat, lon, a, b):
+    """Great-circle distance from home to the closest point on segment
+    a..b (GeoJSON lon/lat). Linear param on a short warning edge."""
+    try:
+        alo, ala = float(a[0]), float(a[1])
+        blo, bla = float(b[0]), float(b[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    dx, dy = blo - alo, bla - ala
+    if dx == 0 and dy == 0:
+        return _bearing_distance_nm(lat, lon, ala, alo)[1]
+    t = ((lon - alo) * dx + (lat - ala) * dy) / (dx * dx + dy * dy)
+    t = max(0.0, min(1.0, t))
+    return _bearing_distance_nm(lat, lon, ala + t * dy, alo + t * dx)[1]
+
+
+def home_vs_polygon(lat, lon, coords):
+    """{rel: IN|NEAR|OUT, dist_nm} from home to a real NWS ring.
+
+    IN = inside the warned polygon. NEAR = outside but within 15nm of
+    an edge. OUT = farther. None if there is no geometry -- a zone
+    watch is not secretly IN."""
+    if not coords:
+        return None
+    if _point_in_ring(lon, lat, coords):
+        return {"rel": "IN", "dist_nm": 0.0}
+    pts = list(coords)
+    if len(pts) > 1 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    if not pts:
+        return None
+    best = None
+    for i, p in enumerate(pts):
+        d = _dist_point_seg_nm(lat, lon, p, pts[(i + 1) % len(pts)])
+        if d is None:
+            continue
+        if best is None or d < best:
+            best = d
+    if best is None:
+        return None
+    return {"rel": "NEAR" if best <= 15.0 else "OUT", "dist_nm": best}
+
+
 def _polygon_centroid(coords):
     """Mean lat/lon of a GeoJSON ring, or None. Closing vertex (same
     as the first) is dropped so it isn't double-counted. This is the
@@ -521,10 +710,101 @@ def _bearing_distance_nm(lat1, lon1, lat2, lon2):
     return brg, d_km * 0.539957
 
 
+def _parse_alert_feature(f, lat, lon):
+    """One GeoJSON feature -> desk dict, or None (test / expired / empty)."""
+    p = (f or {}).get("properties") or {}
+    event = paneltext.panel_text(p.get("event"))
+    if not event:
+        return None
+    status = p.get("status")
+    headline_raw = (p.get("headline") or "").upper()
+    if (status and status != "Actual") or event.upper().startswith("TEST ") \
+            or headline_raw.startswith("TEST "):
+        return None
+    params = p.get("parameters") or {}
+    expires = _iso_epoch(p.get("expires") or p.get("ends"))
+    if isinstance(expires, (int, float)) and expires < time.time() - 30:
+        return None
+    alert_id = str(p.get("id") or f.get("id") or event)
+    entry = {
+        "alert_id": alert_id,
+        "event": event,
+        "kind": product_kind(event),
+        "severity": p.get("severity") or "Unknown",
+        "urgency": p.get("urgency") or "Unknown",
+        "headline": paneltext.panel_text(p.get("headline")),
+        "area": paneltext.panel_text(p.get("areaDesc")),
+        "hail_in": _hail_in(params),
+        "gust_mph": _gust_mph(params),
+        "tornado": _tornado_flag(params),
+        "hail_threat": paneltext.panel_text(_param_first(params, "hailThreat")) or None,
+        "wind_threat": paneltext.panel_text(_param_first(params, "windThreat")) or None,
+        "expires": expires,
+        "issued": _iso_epoch(p.get("sent") or p.get("onset") or p.get("effective")),
+        "storm_bearing_deg": None,
+        "storm_dist_nm": None,
+        "storm_motion_dir_deg": None,
+        "storm_motion_speed_kt": None,
+        "polygon": None,
+        "home_rel": None,
+        "home_dist_nm": None,
+        "cells": [],
+    }
+    cells = _parse_storm_cells(params)
+    geom = f.get("geometry")
+    coords = None
+    if geom and geom.get("type") == "Polygon":
+        coords = (geom.get("coordinates") or [[]])[0]
+        poly = []
+        for lon_v, lat_v in coords:
+            pbrg, pdist_nm = _bearing_distance_nm(lat, lon, lat_v, lon_v)
+            poly.append((pbrg, pdist_nm))
+        if len(poly) > 18:
+            step = len(poly) / 16.0
+            poly = [poly[int(i * step)] for i in range(16)]
+        entry["polygon"] = poly
+        hv = home_vs_polygon(lat, lon, coords)
+        if hv:
+            entry["home_rel"] = hv["rel"]
+            entry["home_dist_nm"] = hv["dist_nm"]
+    if not cells and coords:
+        cen = _polygon_centroid(coords)
+        if cen:
+            cells = [{"motion_dir_deg": None, "motion_speed_kt": None,
+                      "lat": cen[0], "lon": cen[1]}]
+    built = []
+    for c in cells:
+        brg, dist_nm = _bearing_distance_nm(lat, lon, c["lat"], c["lon"])
+        built.append({
+            "bearing_deg": brg,
+            "dist_nm": dist_nm,
+            "motion_dir_deg": c.get("motion_dir_deg"),
+            "motion_speed_kt": c.get("motion_speed_kt"),
+        })
+    entry["cells"] = built
+    if built:
+        first = built[0]
+        entry["storm_bearing_deg"] = first["bearing_deg"]
+        entry["storm_dist_nm"] = first["dist_nm"]
+        entry["storm_motion_dir_deg"] = first["motion_dir_deg"]
+        entry["storm_motion_speed_kt"] = first["motion_speed_kt"]
+    return entry
+
+
+def _fetch_alert_list(url, lat, lon):
+    d = _get_json(url)
+    out = []
+    for f in d.get("features") or []:
+        rec = _parse_alert_feature(f, lat, lon)
+        if rec:
+            out.append(rec)
+    return out
+
+
 def _fetch_alerts(lat, lon, zones=None):
-    """Real alerts covering this location. Uses NWS's own UGC zone query
-    (county + forecast zone) when known, falling back to the point-based
-    query before the first successful _fetch_point() call resolves them.
+    """Real alerts covering this location. HYBRID: zone query (county
+    watches, the Horry miss) PLUS point query (polygon that contains
+    home). Merge by alert_id; keep the copy that has a polygon.
 
     WHY ZONE, NOT JUST POINT -- verified live 2026-08-10, not assumed.
     /alerts/active?point={lat},{lon} only returns an alert whose actual
@@ -545,111 +825,232 @@ def _fetch_alerts(lat, lon, zones=None):
     anyway, not a polygon) return identically either way -- this only
     changes behavior for the polygon-warned severe event class, which is
     exactly the class most worth not missing."""
+    by_id = {}
+    point_url = ALERTS_URL.format(lat=_round_coord(lat), lon=_round_coord(lon))
+    urls = []
     if zones:
-        url = "https://api.weather.gov/alerts/active?zone=" + ",".join(zones)
-    else:
-        url = ALERTS_URL.format(lat=_round_coord(lat), lon=_round_coord(lon))
-    d = _get_json(url)
-    out = []
-    for f in d.get("features") or []:
-        p = f.get("properties") or {}
-        event = paneltext.panel_text(p.get("event"))
-        if not event:
+        urls.append("https://api.weather.gov/alerts/active?zone=" + ",".join(zones))
+    urls.append(point_url)
+    for url in urls:
+        try:
+            batch = _fetch_alert_list(url, lat, lon)
+        except Exception:                              # noqa: BLE001
             continue
-        # REAL BUG FIXED 2026-08-11, confirmed against a real live NWS
-        # product, not hypothetical: a real "TEST TSUNAMI WARNING" (the
-        # National Tsunami Warning Center's own periodic nationwide
-        # system test -- real, scheduled, covers essentially the whole
-        # US coastline at once, which is why its area list is enormous
-        # and legitimately includes a real owner's configured zone) was
-        # rendering as a genuine Extreme-severity alert with no
-        # indication anywhere that it was a drill. This is exactly the
-        # kind of false alarm this project's own "never invent, never
-        # mislead" rule exists to prevent -- showing a TEST product with
-        # the same visual weight as a real one is a form of inventing
-        # urgency that isn't real.
-        #
-        # Two independent layers, since a false negative here (a REAL
-        # tsunami warning silently dropped) would be far worse than a
-        # false positive:
-        #   1. NWS's own CAP `status` field is the authoritative signal
-        #      (real values: Actual/Exercise/System/Test/Draft, per the
-        #      CAP spec NWS alerts implement) -- skip anything that is
-        #      present and not "Actual".
-        #   2. A literal "TEST" prefix on the real event/headline text is
-        #      a second, redundant check (confirmed present on the real
-        #      product that exposed this bug: "TEST TSUNAMI WARNING") --
-        #      catches a real product that for any reason didn't carry a
-        #      trustworthy status field, without relying on status alone.
-        status = p.get("status")
-        headline_raw = (p.get("headline") or "").upper()
-        if (status and status != "Actual") or event.upper().startswith("TEST ") \
-                or headline_raw.startswith("TEST "):
-            continue
-        params = p.get("parameters") or {}
-        hail = _hail_in(params)
-        gust = _gust_mph(params)
-        tornado = _tornado_flag(params)
-        expires = _iso_epoch(p.get("expires") or p.get("ends"))
-        alert_id = str(p.get("id") or f.get("id") or event)
-        entry = {
-            "alert_id": alert_id,
-            "event": event,
-            "severity": p.get("severity") or "Unknown",
-            "urgency": p.get("urgency") or "Unknown",
-            "headline": paneltext.panel_text(p.get("headline")),
-            "area": paneltext.panel_text(p.get("areaDesc")),
-            "hail_in": hail,
-            "gust_mph": gust,
-            "tornado": tornado,
-            "expires": expires,
-            # First cell copied here so existing radar/alert mini-scope
-            # readers keep working. Full list is `cells`.
-            "storm_bearing_deg": None,
-            "storm_dist_nm": None,
-            "storm_motion_dir_deg": None,
-            "storm_motion_speed_kt": None,
-            "polygon": None,
-            "cells": [],
-        }
-        cells = _parse_storm_cells(params)
-        # REAL WARNED-AREA POLYGON -- GeoJSON [lon, lat] order, verified
-        # live. Used as a fallback position when NWS sent a polygon but
-        # no motion cell, so the cell still plots on the scope.
-        geom = f.get("geometry")
-        coords = None
-        if geom and geom.get("type") == "Polygon":
-            coords = (geom.get("coordinates") or [[]])[0]
-            poly = []
-            for lon_v, lat_v in coords:
-                pbrg, pdist_nm = _bearing_distance_nm(lat, lon, lat_v, lon_v)
-                poly.append((pbrg, pdist_nm))
-            entry["polygon"] = poly
-        if not cells and coords:
-            cen = _polygon_centroid(coords)
-            if cen:
-                cells = [{"motion_dir_deg": None, "motion_speed_kt": None,
-                          "lat": cen[0], "lon": cen[1]}]
-        built = []
-        for c in cells:
-            brg, dist_nm = _bearing_distance_nm(lat, lon, c["lat"], c["lon"])
-            built.append({
-                "bearing_deg": brg,
-                "dist_nm": dist_nm,
-                "motion_dir_deg": c.get("motion_dir_deg"),
-                "motion_speed_kt": c.get("motion_speed_kt"),
-            })
-        entry["cells"] = built
-        if built:
-            first = built[0]
-            entry["storm_bearing_deg"] = first["bearing_deg"]
-            entry["storm_dist_nm"] = first["dist_nm"]
-            entry["storm_motion_dir_deg"] = first["motion_dir_deg"]
-            entry["storm_motion_speed_kt"] = first["motion_speed_kt"]
-        out.append(entry)
+        for a in batch:
+            aid = a.get("alert_id")
+            old = by_id.get(aid)
+            if old is None or (a.get("polygon") and not old.get("polygon")):
+                by_id[aid] = a
+    out = list(by_id.values())
     out.sort(key=lambda a: SEVERITY_ORDER.index(a["severity"])
              if a["severity"] in SEVERITY_ORDER else len(SEVERITY_ORDER))
     return out
+
+
+def storm_approach(dist_nm, bearing_deg, motion_dir_deg, speed_kt):
+    """Is this cell coming at home? Real geometry, no guess.
+
+    NWS motion DEG is the direction the cell is moving TOWARD.
+    Bearing is home -> cell. Closing speed is the component of
+    motion along the cell->home radial. ETA only when it's
+    actually closing (>= 2 kt)."""
+    if not all(isinstance(v, (int, float)) for v in
+               (dist_nm, bearing_deg, motion_dir_deg, speed_kt)):
+        return None
+    if speed_kt < 1 or dist_nm < 0:
+        return None
+    toward_home = (bearing_deg + 180.0) % 360.0
+    diff = abs((motion_dir_deg - toward_home + 180.0) % 360.0 - 180.0)
+    closing = speed_kt * math.cos(math.radians(diff))
+    if closing >= 2.0:
+        mins = int(round((dist_nm / closing) * 60.0))
+        if mins < 0:
+            return None
+        if mins > 180:
+            return {"aspect": "IN", "closing_kt": closing, "eta_min": None}
+        return {"aspect": "IN", "closing_kt": closing, "eta_min": mins}
+    if closing <= -2.0:
+        return {"aspect": "AWAY", "closing_kt": closing, "eta_min": None}
+    return {"aspect": "CROSS", "closing_kt": closing, "eta_min": None}
+
+
+def _web_mercator_tile(lat, lon, z):
+    """(x, y, fx, fy) tile + fractional pixel of a lat/lon at zoom z."""
+    n = 2 ** int(z)
+    lat_r = math.radians(lat)
+    xf = (lon + 180.0) / 360.0 * n
+    yf = (1.0 - math.log(math.tan(lat_r) + 1.0 / math.cos(lat_r)) / math.pi) / 2.0 * n
+    return int(math.floor(xf)), int(math.floor(yf)), xf - math.floor(xf), yf - math.floor(yf)
+
+
+def _echo_level(r, g, b, a):
+    """Universal Blue tile: brightness of a real echo, or None."""
+    if a < 40:
+        return None
+    bright = max(r, g, b)
+    if bright < 40:
+        return None
+    if bright < 90:
+        return 1
+    if bright < 150:
+        return 2
+    if bright < 210:
+        return 3
+    return 4
+
+
+def _sample_echoes(im, lat, lon, z, fx, fy):
+    """One RGBA tile -> (echoes, overhead_level). Stratified by range
+    so the nearest hits do not eat the whole budget."""
+    w, h = im.size
+    if w < 8 or h < 8:
+        return [], None
+    hx = max(0, min(w - 1, int(round(fx * w))))
+    hy = max(0, min(h - 1, int(round(fy * h))))
+    lat_r = math.radians(lat)
+    tile_deg = 360.0 / (2 ** z)
+    nm_x = (tile_deg * 60.0 * math.cos(lat_r)) / float(w)
+    nm_y = (tile_deg * 60.0) / float(h)
+    pix = im.load()
+    buckets = [[], [], []]
+    overhead = None
+    step = 5
+    for py in range(0, h, step):
+        for px in range(0, w, step):
+            r, g, b, a = pix[px, py]
+            lvl = _echo_level(r, g, b, a)
+            if lvl is None:
+                continue
+            east = (px - hx) * nm_x
+            north = (hy - py) * nm_y
+            dist = math.hypot(east, north)
+            if dist > RADAR_SCOPE_NM:
+                continue
+            if dist <= 4.0:
+                overhead = lvl if overhead is None else max(overhead, lvl)
+            if dist < 0.6:
+                continue
+            brg = (math.degrees(math.atan2(east, north)) + 360.0) % 360.0
+            bi = 0 if dist < 20 else (1 if dist < 40 else 2)
+            buckets[bi].append((lvl, dist, brg))
+    out = []
+    per = max(8, RADAR_ECHO_MAX // 3)
+    for bucket in buckets:
+        bucket.sort(key=lambda t: t[1])
+        if len(bucket) > per:
+            stride = max(1, len(bucket) // per)
+            bucket = bucket[::stride][:per]
+        for lvl, dist, brg in bucket:
+            out.append({"level": lvl, "dist_nm": dist, "bearing_deg": brg})
+    return out[:RADAR_ECHO_MAX], overhead
+
+
+def _fetch_echo_frames(lat, lon, n_frames=3):
+    """Last N RainViewer *past* frames as a short near-home loop.
+
+    Free tier: no nowcast. One tile per frame, zoom 7, home's tile only.
+    Missing/failed frame is skipped -- never a fake echo."""
+    try:
+        from io import BytesIO
+        from PIL import Image
+    except ImportError:
+        return []
+    req = urllib.request.Request(RAINVIEWER_MAPS, headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        maps = json.load(r)
+    host = maps.get("host") or ""
+    past = ((maps.get("radar") or {}).get("past") or [])
+    if not host or not past:
+        return []
+    z = 7
+    tx, ty, fx, fy = _web_mercator_tile(lat, lon, z)
+    frames = []
+    for frame in past[-max(1, int(n_frames)):]:
+        path = (frame or {}).get("path")
+        if not path:
+            continue
+        url = "%s%s/256/%d/%d/%d/2/1_1.png" % (host.rstrip("/"), path, z, tx, ty)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": _UA})
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                blob = r.read()
+            im = Image.open(BytesIO(blob)).convert("RGBA")
+        except Exception:                                  # noqa: BLE001
+            continue
+        echoes, overhead = _sample_echoes(im, lat, lon, z, fx, fy)
+        frames.append({
+            "ts": frame.get("time"),
+            "echoes": echoes,
+            "overhead": overhead,
+        })
+    return frames
+
+
+def _fetch_echoes(lat, lon):
+    """Latest frame only -- used by older callers."""
+    frames = _fetch_echo_frames(lat, lon, n_frames=1)
+    return (frames[-1].get("echoes") or []) if frames else []
+
+
+def pa_to_inhg(pa):
+    if not isinstance(pa, (int, float)):
+        return None
+    return pa / 3386.389
+
+
+def pressure_trend(history, now=None):
+    """FALLING / RISING / STEADY from our own samples, or None.
+
+    Needs two real readings at least 20 minutes apart. 0.03 inHg/hour
+    is a notable meteorological change -- below that is noise."""
+    now = time.time() if now is None else now
+    pts = [(t, p) for t, p in (history or [])
+           if isinstance(p, (int, float)) and now - t <= 8 * 3600]
+    if len(pts) < 2:
+        return None
+    newest_t, newest_p = pts[-1]
+    older = None
+    for t, p in reversed(pts[:-1]):
+        if newest_t - t >= 20 * 60:
+            older = (t, p)
+            break
+    if older is None:
+        return None
+    dt_h = (newest_t - older[0]) / 3600.0
+    if dt_h <= 0:
+        return None
+    rate = (newest_p - older[1]) / dt_h
+    if rate <= -0.03:
+        return "FALLING"
+    if rate >= 0.03:
+        return "RISING"
+    return "STEADY"
+
+
+def wind_trend(history, now=None):
+    """WIND UP / WIND DOWN / STEADY from our own mph samples, or None."""
+    now = time.time() if now is None else now
+    pts = [(t, v) for t, v in (history or [])
+           if isinstance(v, (int, float)) and now - t <= 8 * 3600]
+    if len(pts) < 2:
+        return None
+    newest_t, newest_v = pts[-1]
+    older = None
+    for t, v in reversed(pts[:-1]):
+        if newest_t - t >= 20 * 60:
+            older = (t, v)
+            break
+    if older is None:
+        return None
+    dt_h = (newest_t - older[0]) / 3600.0
+    if dt_h <= 0:
+        return None
+    rate = (newest_v - older[1]) / dt_h
+    if rate >= 3.0:
+        return "WIND UP"
+    if rate <= -3.0:
+        return "WIND DOWN"
+    return "STEADY"
 
 
 def tracks_from_alerts(alerts):
@@ -673,7 +1074,14 @@ def tracks_from_alerts(alerts):
             "hail_in": a.get("hail_in"),
             "gust_mph": a.get("gust_mph"),
             "tornado": a.get("tornado"),
+            "hail_threat": a.get("hail_threat"),
+            "wind_threat": a.get("wind_threat"),
             "expires": a.get("expires"),
+            "issued": a.get("issued"),
+            "kind": a.get("kind") or product_kind(a.get("event")),
+            "polygon": a.get("polygon"),
+            "home_rel": a.get("home_rel"),
+            "home_dist_nm": a.get("home_dist_nm"),
         }
         if cells:
             for i, c in enumerate(cells):
@@ -684,6 +1092,11 @@ def tracks_from_alerts(alerts):
                 rec["motion_dir_deg"] = c.get("motion_dir_deg")
                 rec["motion_speed_kt"] = c.get("motion_speed_kt")
                 rec["on_scope"] = c.get("bearing_deg") is not None
+                ap = storm_approach(c.get("dist_nm"), c.get("bearing_deg"),
+                                    c.get("motion_dir_deg"), c.get("motion_speed_kt"))
+                rec["approach"] = (ap or {}).get("aspect")
+                rec["eta_min"] = (ap or {}).get("eta_min")
+                rec["closing_kt"] = (ap or {}).get("closing_kt")
                 out.append(rec)
         else:
             rec = dict(shared)
@@ -704,6 +1117,187 @@ def tracks_from_alerts(alerts):
     return out
 
 
+# ---- storm log ----------------------------------------------------------
+# A session strip: issued -> expired. First-read adopts so opening the
+# desk never replays last week's TOR. ALL CLEAR is "a warning died
+# here recently and nothing is active" -- not the same as a quiet day.
+STORM_LOG_PATH = Path(__file__).parent / "storm_log.jsonl"
+STORM_LOG_MAX = 80
+ALL_CLEAR_WINDOW = 2 * 3600
+
+
+def hydrate_log_entry(e):
+    """Copy a log row and recover hail/gust from the summary we wrote
+    ourselves when older rows did not persist those fields."""
+    h = dict(e or {})
+    summary = h.get("summary") or ""
+    if h.get("gust_mph") is None:
+        m = re.search(r"(\d+)MPH", summary)
+        if m:
+            h["gust_mph"] = int(m.group(1))
+    if h.get("hail_in") is None:
+        m = re.search(r"(\d+(?:\.\d+)?)IN", summary)
+        if m:
+            try:
+                h["hail_in"] = float(m.group(1))
+            except ValueError:
+                pass
+    return h
+
+
+class StormLog:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._entries = []
+        self._loaded = False
+        self._seen = None          # None until first ingest
+        self._last = {}            # alert_id -> last alert dict
+
+    def _ensure(self):
+        if self._loaded:
+            return
+        entries = []
+        if STORM_LOG_PATH.exists():
+            try:
+                with STORM_LOG_PATH.open() as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            e = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(e, dict) and e.get("summary") and e.get("phase"):
+                            entries.append(e)
+            except OSError:
+                pass
+        self._entries = entries
+        self._loaded = True
+
+    def ingest(self, alerts):
+        """Diff the live set. First call adopts. Never invents hail."""
+        now = time.time()
+        live = {a.get("alert_id"): a for a in (alerts or []) if a.get("alert_id")}
+        with self._lock:
+            self._ensure()
+            if self._seen is None:
+                self._seen = set(live)
+                self._last = dict(live)
+                return
+            for aid, a in live.items():
+                if aid not in self._seen:
+                    self._append("ISSUED", a, now)
+            for aid in list(self._seen - set(live)):
+                self._append("EXPIRED", self._last.get(aid) or {"alert_id": aid}, now)
+            self._seen = set(live)
+            self._last = dict(live)
+
+    def _append(self, phase, a, now):
+        event = paneltext.panel_text(a.get("event")) or "ALERT"
+        sev = paneltext.panel_text(a.get("severity")) or ""
+        bits = [phase, event]
+        if sev:
+            bits.append(sev)
+        hail = a.get("hail_in")
+        if isinstance(hail, (int, float)):
+            bits.append(("%.2f" % hail).rstrip("0").rstrip(".") + "IN")
+        else:
+            hail = None
+        gust = a.get("gust_mph")
+        if isinstance(gust, (int, float)):
+            bits.append("%dMPH" % int(gust))
+        else:
+            gust = None
+        e = {
+            "ts": now,
+            "phase": phase,
+            "kind": "storm",
+            "event": event,
+            "severity": sev or None,
+            "alert_id": a.get("alert_id"),
+            "hail_in": hail,
+            "gust_mph": gust,
+            "product": product_kind(event),
+            "summary": paneltext.panel_text(" ".join(bits)),
+        }
+        self._entries.append(e)
+        while len(self._entries) > STORM_LOG_MAX:
+            self._entries.pop(0)
+        try:
+            with STORM_LOG_PATH.open("w") as f:
+                for row in self._entries:
+                    f.write(json.dumps(row) + "\n")
+        except OSError:
+            pass
+
+    def get(self, limit=12):
+        with self._lock:
+            self._ensure()
+            rows = [hydrate_log_entry(e) for e in reversed(self._entries)]
+        return rows[:limit] if limit else rows
+
+    def all_clear(self, now=None):
+        """A storm session just ended. Not a quiet Tuesday.
+
+        Tonight proved SVR can expire before the log is watching, so
+        ALL CLEAR cannot require the word WARNING. Any recent EXPIRED
+        thunder/flood/special/warning with nothing live is the after.
+        Heat ending is not a storm."""
+        now = time.time() if now is None else now
+        with self._lock:
+            self._ensure()
+            if self._seen:
+                return False
+            for e in reversed(self._entries):
+                if now - float(e.get("ts") or 0) > ALL_CLEAR_WINDOW:
+                    break
+                if e.get("phase") != "EXPIRED":
+                    continue
+                if _stormish(e.get("event")):
+                    return True
+        return False
+
+    def last_ended(self, now=None):
+        """Newest stormish EXPIRED event, or None."""
+        now = time.time() if now is None else now
+        with self._lock:
+            self._ensure()
+            for e in reversed(self._entries):
+                if now - float(e.get("ts") or 0) > ALL_CLEAR_WINDOW:
+                    break
+                if e.get("phase") == "EXPIRED" and _stormish(e.get("event")):
+                    return hydrate_log_entry(e)
+        return None
+
+    def session_peak(self, now=None):
+        """Strongest stormish product in the after-window. Last-ended
+        can be the leftover 40MPH SPS; the session was the 50MPH one."""
+        now = time.time() if now is None else now
+        best = None
+        best_key = None
+        with self._lock:
+            self._ensure()
+            for e in self._entries:
+                if now - float(e.get("ts") or 0) > ALL_CLEAR_WINDOW:
+                    continue
+                if not _stormish(e.get("event")):
+                    continue
+                h = hydrate_log_entry(e)
+                sev = (h.get("severity") or "").upper()
+                rank = SEVERITY_ORDER.index(sev.title()) if sev.title() in SEVERITY_ORDER \
+                    else len(SEVERITY_ORDER)
+                hail = h.get("hail_in") if isinstance(h.get("hail_in"), (int, float)) else 0
+                gust = h.get("gust_mph") if isinstance(h.get("gust_mph"), (int, float)) else 0
+                key = (rank, -hail, -gust, -float(h.get("ts") or 0))
+                if best_key is None or key < best_key:
+                    best, best_key = h, key
+        return best
+
+
+STORM_LOG = StormLog()
+
+
 class WeatherFeed:
     """Background poller with a last-good cache -- same contract as every
     other FEED in this project."""
@@ -722,6 +1316,12 @@ class WeatherFeed:
         self._fc_try = 0.0
         self._hourly = []
         self._hourly_try = 0.0
+        self._pressure_hist = []   # [(epoch, inhg), ...] our own samples
+        self._echoes = []
+        self._echo_frames = []
+        self._echo_try = 0.0
+        self._echo_updated = 0.0
+        self._wind_hist = []
         self._last_config_check = 0.0
         self._last_read = 0.0
         self._thread = None
@@ -739,6 +1339,11 @@ class WeatherFeed:
             point = dict(self._point) if self._point else None
             fc = dict(self._fc)
             hourly = [dict(h) for h in self._hourly]
+            phist = list(self._pressure_hist)
+            echoes = [dict(e) for e in self._echoes]
+            echo_frames = [dict(f) for f in self._echo_frames]
+            echo_age = (now - self._echo_updated) if self._echo_updated else None
+            whist = list(self._wind_hist)
             updated, err = self._cond_updated, self._err
             label = self._home[2]
         self._ensure_thread()
@@ -752,6 +1357,17 @@ class WeatherFeed:
             "tracks": tracks_from_alerts(alerts),
             "high_f": fc.get("high_f"), "low_f": fc.get("low_f"),
             "hourly": hourly,
+            "pressure_hist": phist,
+            "pressure_trend": pressure_trend(phist),
+            "storm_log": STORM_LOG.get(),
+            "all_clear": STORM_LOG.all_clear(),
+            "last_ended": STORM_LOG.last_ended(),
+            "session_peak": STORM_LOG.session_peak(),
+            "echoes": echoes,
+            "echo_frames": echo_frames,
+            "echo_age": echo_age,
+            "wind_hist": whist,
+            "wind_trend": wind_trend(whist),
             "sunrise": sunrise, "sunset": sunset,
             "configured": satellite.FEED.configured,
             "age": (now - updated) if updated else None,
@@ -778,6 +1394,7 @@ class WeatherFeed:
             self._refresh_alerts()
             self._refresh_forecast()
             self._refresh_hourly()
+            self._refresh_echoes()
             time.sleep(2.0)
 
     def _maybe_reload_location(self):
@@ -820,7 +1437,9 @@ class WeatherFeed:
     def _refresh_conditions(self):
         now = time.time()
         with self._lock:
-            if now - self._cond_try < CONDITIONS_REFRESH:
+            live = bool(self._alerts)
+            interval = CONDITIONS_REFRESH_LIVE if live else CONDITIONS_REFRESH
+            if now - self._cond_try < interval:
                 return
             point = self._point
             if not point:
@@ -833,9 +1452,48 @@ class WeatherFeed:
                 self._cond = cond
                 self._cond_updated = time.time()
                 self._err = None
+                inhg = pa_to_inhg((cond or {}).get("pressure_pa"))
+                if isinstance(inhg, (int, float)):
+                    prev = self._pressure_hist[-1][1] if self._pressure_hist else None
+                    if prev is None or abs(inhg - prev) >= 0.001:
+                        self._pressure_hist.append((time.time(), inhg))
+                        if len(self._pressure_hist) > PRESSURE_HIST_MAX:
+                            self._pressure_hist = self._pressure_hist[-PRESSURE_HIST_MAX:]
+                wind = (cond or {}).get("wind_kmh")
+                if isinstance(wind, (int, float)):
+                    mph = wind * 0.621371
+                    prevw = self._wind_hist[-1][1] if self._wind_hist else None
+                    if prevw is None or abs(mph - prevw) >= 0.2:
+                        self._wind_hist.append((time.time(), mph))
+                        if len(self._wind_hist) > PRESSURE_HIST_MAX:
+                            self._wind_hist = self._wind_hist[-PRESSURE_HIST_MAX:]
         except Exception as e:                          # noqa: BLE001
             with self._lock:
                 self._err = f"{type(e).__name__}"
+
+    def _refresh_echoes(self):
+        """Near-home reflectivity. Last-good on failure. Never invents."""
+        now = time.time()
+        with self._lock:
+            live = bool(self._alerts)
+            interval = RADAR_REFRESH_LIVE if live else RADAR_REFRESH
+            if now - self._echo_try < interval:
+                return
+            if not satellite.FEED.configured:
+                return
+            self._echo_try = now
+            lat, lon, _ = self._home
+        try:
+            frames = _fetch_echo_frames(lat, lon, n_frames=3)
+            latest = (frames[-1].get("echoes") or []) if frames else []
+            with self._lock:
+                if frames or not self._echo_frames:
+                    self._echo_frames = frames
+                    self._echoes = latest
+                if frames:
+                    self._echo_updated = time.time()
+        except Exception:                                # noqa: BLE001
+            pass
 
     def _refresh_forecast(self):
         """Today's high/low. Forecasts change slowly, so this is polled far
@@ -880,7 +1538,9 @@ class WeatherFeed:
     def _refresh_alerts(self):
         now = time.time()
         with self._lock:
-            if now - self._alerts_try < ALERTS_REFRESH:
+            live = bool(self._alerts)
+            interval = ALERTS_REFRESH_LIVE if live else ALERTS_REFRESH
+            if now - self._alerts_try < interval:
                 return
             if not satellite.FEED.configured:
                 return
@@ -889,6 +1549,7 @@ class WeatherFeed:
             zones = list(self._point["zones"]) if self._point and self._point.get("zones") else None
         try:
             alerts = _fetch_alerts(lat, lon, zones=zones)
+            STORM_LOG.ingest(alerts)
             with self._lock:
                 self._alerts = alerts
                 self._alerts_updated = time.time()

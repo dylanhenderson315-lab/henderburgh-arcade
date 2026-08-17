@@ -108,7 +108,7 @@ SCOREBOARD_DATED = SCOREBOARD_URL + "?dates={day}"
 # a fight ending is the single most time-critical event this project has
 # (the result view is the payoff), and 20s is one call per 20s TOTAL, not
 # per fight.
-REFRESH_LIVE = 20.0        # a fight is in progress right now
+REFRESH_LIVE = 2.0         # clock + last action -- one cheap card call
 REFRESH_CARD_TODAY = 120.0  # card exists today but nothing live yet
 REFRESH_IDLE = 1800.0      # next card is days away
 ERROR_BACKOFF_BASE = 30.0
@@ -144,18 +144,109 @@ STATS_URL = ("https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc"
             "/statistics?lang=en&region=us")
 
 # ESPN's raw stat names -> the compact broadcast-style fields this module
-# exposes. Only the ones an on-air UFC stats graphic actually shows (see
-# the module docstring) -- ESPN exposes 40+ granular strike-location
-# splits (head/body/leg x distance/clinch/ground) that are real but not
-# what belongs on a 64px panel.
+# exposes. Confirmed live on UFC 330 (Wells/Orolbai, 2026-08-16): the
+# general split has 43 real numbers. The 64px glass gets the ones a
+# broadcast graphic actually calls -- plus HEAD/BODY/LEG landed, which
+# we SUM from the real location splits (never a guessed %).
 _STAT_KEYS = {
     "sigStrikesLanded": "sig_landed",
     "sigStrikesAttempted": "sig_att",
+    "totalStrikesLanded": "tot_landed",
+    "totalStrikesAttempted": "tot_att",
     "takedownsLanded": "td_landed",
     "takedownsAttempted": "td_att",
     "knockDowns": "knockdowns",
     "timeInControl": "control_time",
+    "submissions": "submissions",
+    "reversals": "reversals",
+    "advances": "advances",
+    "takedownAccuracy": "td_acc",
+    "takedownsSlams": "slams",
+    "advanceToHalfGuard": "adv_half",
+    "advanceToSide": "adv_side",
+    "advanceToMount": "adv_mount",
+    "advanceToBack": "adv_back",
 }
+
+# Location landed / attempted = distance + clinch + ground. All three
+# must be present (0 is a real zero) or the sum stays None.
+_LOC_HEAD = ("sigDistanceHeadStrikesLanded",
+             "sigClinchHeadStrikesLanded",
+             "sigGroundHeadStrikesLanded")
+_LOC_BODY = ("sigDistanceBodyStrikesLanded",
+             "sigClinchBodyStrikesLanded",
+             "sigGroundBodyStrikesLanded")
+_LOC_LEG = ("sigDistanceLegStrikesLanded",
+            "sigClinchLegStrikesLanded",
+            "sigGroundLegStrikesLanded")
+_LOC_DIST = ("sigDistanceHeadStrikesLanded",
+             "sigDistanceBodyStrikesLanded",
+             "sigDistanceLegStrikesLanded")
+_LOC_CLINCH = ("sigClinchHeadStrikesLanded",
+               "sigClinchBodyStrikesLanded",
+               "sigClinchLegStrikesLanded")
+_LOC_GROUND = ("sigGroundHeadStrikesLanded",
+               "sigGroundBodyStrikesLanded",
+               "sigGroundLegStrikesLanded")
+_LOC_HEAD_ATT = ("sigDistanceHeadStrikesAttempted",
+                 "sigClinchHeadStrikesAttempted",
+                 "sigGroundHeadStrikesAttempted")
+_LOC_BODY_ATT = ("sigDistanceBodyStrikesAttempted",
+                 "sigClinchBodyStrikesAttempted",
+                 "sigGroundBodyStrikesAttempted")
+_LOC_LEG_ATT = ("sigDistanceLegStrikesAttempted",
+                "sigClinchLegStrikesAttempted",
+                "sigGroundLegStrikesAttempted")
+_LOC_DIST_ATT = ("sigDistanceHeadStrikesAttempted",
+                 "sigDistanceBodyStrikesAttempted",
+                 "sigDistanceLegStrikesAttempted")
+_LOC_CLINCH_ATT = ("sigClinchHeadStrikesAttempted",
+                   "sigClinchBodyStrikesAttempted",
+                   "sigClinchLegStrikesAttempted")
+_LOC_GROUND_ATT = ("sigGroundHeadStrikesAttempted",
+                   "sigGroundBodyStrikesAttempted",
+                   "sigGroundLegStrikesAttempted")
+
+# Play-by-play on the SCOREBOARD (no extra I/O). IDs confirmed live
+# on UFC 330. Round markers / "Results" / "Fight Over" are structure.
+# Phase ids (walkout / tape / staredown) are status, not last-action.
+_ACTION_SKIP = {"5", "18", "19", "23"}
+_PHASE_BY_ID = {
+    "1": "OPEN",
+    "2": "WALKOUTS",
+    "3": "TAPE",
+    "4": "STAREDOWN",
+}
+_ACTION_BY_ID = {
+    "12": "TD ATTEMPT",
+    "13": "TAKEDOWN",
+    "15": "REVERSAL",
+    "16": "SUB ATTEMPT",
+    "17": "KNOCKDOWN",
+    "20": "SUBMISSION",
+    "21": "KO/TKO",
+    "22": "DECISION",
+}
+
+PLAYS_URL = ("https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc"
+             "/events/{event_id}/competitions/{comp_id}/plays?limit=25")
+
+BIOS_URL = ("https://site.web.api.espn.com/apis/common/v3/sports/mma"
+            "/athletes/{athlete_id}")
+BIOS_REFRESH = 600.0
+
+
+def _sum_loc(raw, names):
+    """Sum real landed splits. None if any piece is missing."""
+    total = 0
+    for name in names:
+        if name not in raw:
+            return None
+        v = raw[name]
+        if not isinstance(v, (int, float)):
+            return None
+        total += int(v)
+    return total
 
 
 def _parse_stats(payload):
@@ -167,12 +258,30 @@ def _parse_stats(payload):
     apart from "field not provided" and render each honestly.
     """
     out = {v: None for v in _STAT_KEYS.values()}
+    out["head_landed"] = None
+    out["body_landed"] = None
+    out["leg_landed"] = None
     cats = ((payload.get("splits") or {}).get("categories") or [])
     stats = cats[0].get("stats") if cats else []
+    raw = {}
     for s in (stats or []):
-        key = _STAT_KEYS.get(s.get("name"))
+        name = s.get("name")
+        raw[name] = s.get("value")
+        key = _STAT_KEYS.get(name)
         if key:
             out[key] = s.get("value") if key != "control_time" else panel_text(s.get("displayValue"))
+    out["head_landed"] = _sum_loc(raw, _LOC_HEAD)
+    out["body_landed"] = _sum_loc(raw, _LOC_BODY)
+    out["leg_landed"] = _sum_loc(raw, _LOC_LEG)
+    out["dist_landed"] = _sum_loc(raw, _LOC_DIST)
+    out["clinch_landed"] = _sum_loc(raw, _LOC_CLINCH)
+    out["ground_landed"] = _sum_loc(raw, _LOC_GROUND)
+    out["head_att"] = _sum_loc(raw, _LOC_HEAD_ATT)
+    out["body_att"] = _sum_loc(raw, _LOC_BODY_ATT)
+    out["leg_att"] = _sum_loc(raw, _LOC_LEG_ATT)
+    out["dist_att"] = _sum_loc(raw, _LOC_DIST_ATT)
+    out["clinch_att"] = _sum_loc(raw, _LOC_CLINCH_ATT)
+    out["ground_att"] = _sum_loc(raw, _LOC_GROUND_ATT)
     return out
 
 
@@ -192,13 +301,176 @@ def _fighter(competitor):
         if r.get("type") == "total" or r.get("summary"):
             rec = r.get("summary")
             break
+    flag = ath.get("flag") or {}
+    country = panel_text(flag.get("alt")) or None
+    full = panel_text(ath.get("fullName") or ath.get("displayName"))
+    last = None
+    if full:
+        parts = full.split()
+        last = parts[-1] if parts else None
     return {
         "id": competitor.get("id"),          # athlete id -- needed to fetch
                                               # per-fighter statistics below
         "name": panel_text(ath.get("shortName") or ath.get("displayName")),
-        "full": panel_text(ath.get("fullName") or ath.get("displayName")),
+        "full": full,
+        "last": last,
         "record": panel_text(rec) or None,
+        "country": country,
         "winner": bool(competitor.get("winner")),
+    }
+
+
+def _clean_clock(raw):
+    """Fold ESPN's clock. '-' / empty is 'no clock yet', not a time."""
+    clk = panel_text(raw) or None
+    if clk in ("-", "--", "0"):
+        return None
+    return clk
+
+
+def _action_label(d):
+    t = (d or {}).get("type") or {}
+    tid = str(t.get("id") or "")
+    if tid in _ACTION_SKIP or tid in _PHASE_BY_ID:
+        return None
+    text = str(t.get("text") or "")
+    if text in ("Round Start", "Round End", "Fight Over", "Results"):
+        return None
+    mapped = _ACTION_BY_ID.get(tid)
+    if mapped:
+        return mapped
+    folded = panel_text(text.replace("Unofficial Winner", "").strip())
+    return folded or None
+
+
+def _phase(comp):
+    """Walkout / tape / staredown from the newest detail, else status."""
+    period = ((comp.get("status") or {}).get("period") or 0)
+    if isinstance(period, int) and period > 0:
+        return None
+    for d in (comp.get("details") or []):
+        tid = str(((d.get("type") or {}).get("id") or ""))
+        if tid in _PHASE_BY_ID:
+            return _PHASE_BY_ID[tid]
+        if tid not in _ACTION_SKIP and _action_label(d):
+            return None
+    st = ((comp.get("status") or {}).get("type") or {})
+    if str(st.get("name") or "") == "STATUS_FIGHTERS_WALKING":
+        return "WALKOUTS"
+    sd = panel_text(st.get("shortDetail")) or ""
+    if sd in ("IN PROGRESS", "FINAL", "SCHEDULED") or (sd and sd[0].isdigit()):
+        return None
+    return sd or None
+
+
+def _last_actions(comp, limit=3):
+    """Newest real fight actions, newest first. Scoreboard details[0] is newest."""
+    out = []
+    for d in (comp.get("details") or []):
+        lab = _action_label(d)
+        if not lab:
+            continue
+        out.append(lab)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _parse_plays(payload):
+    """Core plays list -> phase + last actions with the clock ESPN stamped.
+
+    Items arrive oldest-first. A play has no athlete, so we never guess
+    who scored the takedown -- only the type, round, and clock.
+    """
+    items = payload.get("items") or []
+    phase = None
+    actions = []
+    saw_round = False
+    for p in items:
+        rnd = ((p.get("period") or {}) or {}).get("number")
+        if isinstance(rnd, int) and rnd > 0:
+            saw_round = True
+            break
+    for p in reversed(items):
+        t = (p or {}).get("type") or {}
+        tid = str(t.get("id") or "")
+        if not tid:
+            continue
+        if tid in _PHASE_BY_ID and phase is None and not saw_round:
+            phase = _PHASE_BY_ID[tid]
+            continue
+        lab = _action_label(p)
+        if not lab:
+            continue
+        rec = {"label": lab}
+        rnd = ((p.get("period") or {}) or {}).get("number")
+        if isinstance(rnd, int) and rnd > 0:
+            rec["round"] = rnd
+        clk = _clean_clock(((p.get("clock") or {}) or {}).get("displayValue"))
+        if clk:
+            rec["clock"] = clk
+        actions.append(rec)
+        if len(actions) >= 3:
+            break
+    return {"phase": phase, "actions": actions}
+
+
+def _last_action(comp):
+    acts = _last_actions(comp, limit=1)
+    return acts[0] if acts else None
+
+
+def _broadcast(comp):
+    """Paramount+ / ESPN+ string ESPN actually sent, or None."""
+    raw = comp.get("broadcast")
+    if isinstance(raw, str) and raw.strip():
+        return panel_text(raw)
+    for b in (comp.get("broadcasts") or []):
+        names = b.get("names") or []
+        if names:
+            return panel_text(names[0])
+    for b in (comp.get("geoBroadcasts") or []):
+        media = (b.get("media") or {}).get("shortName")
+        if media:
+            return panel_text(media)
+    return None
+
+
+def _parse_bios(payload):
+    """Athlete profile -> tale-of-the-tape fields. Missing stays None."""
+    ath = (payload or {}).get("athlete") or {}
+    stance = ath.get("stance") or {}
+    assoc = ath.get("association") or {}
+    career_tko = career_sub = None
+    for s in ((ath.get("statsSummary") or {}).get("statistics") or []):
+        name = s.get("name")
+        dv = panel_text(s.get("displayValue")) or None
+        if name == "tkos-tkoLosses":
+            career_tko = dv
+        elif name == "submissions-submissionLosses":
+            career_sub = dv
+    height = panel_text(ath.get("displayHeight")) or None
+    if height:
+        height = height.replace("\"", "").replace("  ", " ").strip()
+    reach = panel_text(ath.get("displayReach")) or None
+    if reach:
+        reach = reach.replace("\"", "").strip()
+    age = ath.get("age")
+    if not isinstance(age, int):
+        age = None
+    return {
+        "height": height,
+        "reach": reach,
+        "stance": panel_text(stance.get("text")) or None,
+        "age": age,
+        "country": panel_text((ath.get("citizenshipCountry") or {}).get("abbreviation")
+                              or ath.get("citizenship")) or None,
+        "camp": panel_text(assoc.get("name")) or None,
+        "style": panel_text(ath.get("displayFightingStyle")) or None,
+        "weight": panel_text(ath.get("displayWeight")) or None,
+        "nickname": panel_text(ath.get("nickname")) or None,
+        "career_tko": career_tko,
+        "career_sub": career_sub,
     }
 
 
@@ -240,8 +512,11 @@ def _parse_fight(comp, index, total):
         # A 5-round fight on a UFC card is the main event; everything else
         # is 3. This is how the payload distinguishes it -- there is no
         # "isMainEvent" flag -- and it held on both real cards checked.
-        "main_event": rounds == 5,
+        # Card order is prelims first, main last (verified). A 5-round
+        # non-main (UFC 330 co-main) is still 5 rounds -- not MAIN EVENT.
+        "main_event": index == total - 1,
         "co_main": index == total - 2,
+        "five_round": rounds == 5,
         "state": state,                      # pre | in | post
         "completed": bool(stype.get("completed")),
         "fighters": fighters,
@@ -250,9 +525,15 @@ def _parse_fight(comp, index, total):
         "method": _method(comp) if state == "post" else None,
         # Time ELAPSED in the final round -- see module docstring.
         "final_round": status.get("period") or None,
-        "final_time": panel_text(status.get("displayClock")) or None,
+        "final_time": _clean_clock(status.get("displayClock")),
         "period": status.get("period") or 0,
-        "clock": panel_text(status.get("displayClock")) or None,
+        "clock": _clean_clock(status.get("displayClock")),
+        "detail": panel_text(stype.get("shortDetail") or stype.get("detail")) or None,
+        "status_name": panel_text(stype.get("name")) or None,
+        "phase": _phase(comp),
+        "last_action": _last_action(comp),
+        "last_actions": _last_actions(comp, limit=3),
+        "broadcast": _broadcast(comp),
     }
 
 
@@ -273,6 +554,8 @@ def _parse_card(event):
         "completed": bool(status.get("completed")),
         "venue": panel_text(venue.get("fullName")) or None,
         "city": panel_text(addr.get("city")) or None,
+        "state_abbr": panel_text(addr.get("state")) or None,
+        "broadcast": next((f.get("broadcast") for f in fights if f.get("broadcast")), None),
         "fights": fights,
         "total": len(fights),
         "done": sum(1 for f in fights if f["state"] == "post"),
@@ -301,7 +584,7 @@ class UfcFeed:
     other FEED here: never blocks the caller, never invents a value, stops
     polling once nothing has read from it for IDLE_STOP."""
 
-    STATS_REFRESH_LIVE = 15.0   # a fight in progress -- numbers move fast
+    STATS_REFRESH_LIVE = 3.0    # two per-fighter calls + plays, live fight only
     STATS_REFRESH_DONE = 600.0  # a finished fight's stats don't change once final
 
     def __init__(self):
@@ -330,6 +613,12 @@ class UfcFeed:
         self._stats_try = 0.0
         self._stats_thread = None
         self._stats_err = None
+        self._bios_want = None       # (fight_id, (athlete_id, ...))
+        self._bios_cache = {}        # fight_id -> {athlete_id: parsed bios}
+        self._bios_updated = {}
+        self._bios_err = None
+        self._plays_cache = {}       # fight_id -> {phase, actions}
+        self._plays_err = None
 
     def get(self):
         """{card, next_label, next_date, age, err}. Never blocks."""
@@ -370,6 +659,27 @@ class UfcFeed:
             self._stats_last_read = time.time()
             return dict(self._stats_cache.get(fight_id) or {})
 
+    def want_bios(self, fight_id, athlete_ids):
+        """Tale of the tape for the fight on screen. Height/reach/stance
+        do not change mid-round -- fetched once and cached."""
+        with self._lock:
+            self._bios_want = (fight_id, tuple(athlete_ids or ()))
+            self._stats_last_read = time.time()
+        self._ensure_stats_thread()
+
+    def get_bios(self, fight_id):
+        """Cached bios keyed by athlete id, or {}. Never blocks."""
+        with self._lock:
+            self._stats_last_read = time.time()
+            return dict(self._bios_cache.get(fight_id) or {})
+
+    def get_plays(self, fight_id):
+        """Last live actions with ESPN's own round/clock, or {}."""
+        with self._lock:
+            self._stats_last_read = time.time()
+            rec = self._plays_cache.get(fight_id) or {}
+            return dict(rec) if rec else {}
+
     def _ensure_stats_thread(self):
         with self._lock:
             alive = self._stats_thread is not None and self._stats_thread.is_alive()
@@ -405,6 +715,43 @@ class UfcFeed:
                 if oldest != fight_id:
                     self._stats_cache.pop(oldest, None)
                     self._stats_updated.pop(oldest, None)
+                    self._plays_cache.pop(oldest, None)
+
+    def _poll_plays(self):
+        """One extra call, live fight only -- actions here carry round + clock."""
+        with self._lock:
+            want = self._stats_want
+        if not want:
+            return
+        fight_id, event_id, comp_id, _aids, live = want
+        if not live or not event_id or not comp_id:
+            return
+        parsed = _parse_plays(_get_json(
+            PLAYS_URL.format(event_id=event_id, comp_id=comp_id)))
+        with self._lock:
+            self._plays_cache[fight_id] = parsed
+            self._plays_err = None
+
+    def _poll_bios(self):
+        with self._lock:
+            want = self._bios_want
+        if not want:
+            return
+        fight_id, athlete_ids = want
+        fetched = {}
+        for aid in athlete_ids:
+            if not aid:
+                continue
+            fetched[aid] = _parse_bios(_get_json(BIOS_URL.format(athlete_id=aid)))
+        with self._lock:
+            self._bios_cache[fight_id] = fetched
+            self._bios_updated[fight_id] = time.time()
+            self._bios_err = None
+            if len(self._bios_cache) > 4:
+                oldest = min(self._bios_updated, key=self._bios_updated.get)
+                if oldest != fight_id:
+                    self._bios_cache.pop(oldest, None)
+                    self._bios_updated.pop(oldest, None)
 
     def _run_stats(self):
         while True:
@@ -418,6 +765,13 @@ class UfcFeed:
                     due = time.time() - last >= interval
                 else:
                     due = False
+                bios_want = self._bios_want
+                if bios_want:
+                    b_id = bios_want[0]
+                    blast = self._bios_updated.get(b_id, 0.0)
+                    bios_due = time.time() - blast >= BIOS_REFRESH
+                else:
+                    bios_due = False
             if idle:
                 with self._lock:
                     self._stats_thread = None
@@ -430,6 +784,19 @@ class UfcFeed:
                 except Exception as e:                     # noqa: BLE001 - never die
                     with self._lock:
                         self._stats_err = f"{type(e).__name__}"
+                    time.sleep(ERROR_BACKOFF_BASE)
+                else:
+                    try:
+                        self._poll_plays()
+                    except Exception as e:                 # noqa: BLE001 - never die
+                        with self._lock:
+                            self._plays_err = f"{type(e).__name__}"
+            if bios_due:
+                try:
+                    self._poll_bios()
+                except Exception as e:                     # noqa: BLE001 - never die
+                    with self._lock:
+                        self._bios_err = f"{type(e).__name__}"
                     time.sleep(ERROR_BACKOFF_BASE)
             time.sleep(1.0)
 

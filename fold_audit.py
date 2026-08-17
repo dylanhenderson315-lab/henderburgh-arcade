@@ -271,6 +271,17 @@ def main():
                  lambda: {"title": paneltext.panel_text(dirty_notify),
                           "message": paneltext.panel_text(dirty_notify)})
 
+    import home
+    dirty_home = [{"id": "light.kitchen_light_left", "state": "on",
+                   "name": "Kitchen" + "".join(CANARIES),
+                   "area": "Kitchen"}]
+    home.FEED.ingest(dirty_home)
+    bad += check("home ingest names",
+                 lambda: {"labels": [r.get("label") for r in
+                                     (home.FEED.get().get("rooms") or [])],
+                          "names": [x.get("name") for x in home.FEED._lights],
+                          "story": home.FEED.get().get("story")})
+
     # ---- now playing (2026-08-09) -- real artist/track/album names are
     # exactly the kind of text that carries accents and curly quotes
     # ("Sigur Ros", "Beyonce", "Deja Vu"), i.e. the single highest-risk

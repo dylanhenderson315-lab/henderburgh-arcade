@@ -221,6 +221,7 @@
         <button data-mode="departures" style="--tile:#78c8ff">MYR LIVE<small>To and from home. Not a scheduled FIDS.</small></button>
         <button data-mode="satellite" style="--tile:#ffe23c">ISS<small>Pass list and live sky. Dead host is not an empty sky.</small></button>
         <button data-mode="weather" style="--tile:#5abeff">WEATHER<small>Hourly glance. Radar when a cell is real.</small></button>
+        <button data-mode="home" style="--tile:#ffba5a">HOME<small>What's on in the house. Rooms, not entity ids.</small></button>
       </div>
     </div>
 
@@ -231,7 +232,7 @@
         <button data-mode="sports" style="--tile:#ff8c28">SPORTS<small>Empty card. K-zone. Last pitch. Scoring takeovers.</small></button>
         <button data-mode="gameday" class="takeover" style="--tile:#eb2d41">GAME DAY<small>Takes the night. Hands the panel back when it ends.</small></button>
         <button data-mode="ticker" style="--tile:#3ce66e">TICKER<small>Your symbols. Left/right steps. HOLD parks.</small></button>
-        <button data-mode="nowplaying" style="--tile:#ff5ac8">MUSIC<small>Iris, VU, scope. 16-band only when FFT arrives. Last.fm names it.</small></button>
+        <button data-mode="nowplaying" style="--tile:#ff5ac8">MUSIC<small>Centerpiece EQ. Palettes. Gain and bass weight.</small></button>
       </div>
     </div>
 
@@ -377,13 +378,23 @@
       clear an existing key.</div>
     <div class="row"><label><input type="checkbox" id="np-mic-only">
       Use the mic as a plain equalizer instead</label></div>
-    <div class="hint">Skips Last.fm and uses the panel mic as a full
-      instrument. Left/right on the glass cycles iris, studio VU, and
-      scope — all of the same real sample. The 16-band FFT only arrives
-      if UDP Sound Sync packets reach this Mac. If they do not (common
-      when the panel is Wi-Fi and this computer is Ethernet), those
-      three faces read the panel’s real peak instead — never a fake
-      spectrum.</div>
+    <div class="row"><label>Gain</label>
+      <input type="range" id="np-gain" min="0.4" max="2.5" step="0.05" value="1"></div>
+    <div class="row"><label>Bass weight</label>
+      <input type="range" id="np-bass" min="0.3" max="2.2" step="0.05" value="1"></div>
+    <div class="row" id="np-pals">
+      <label>Palette</label>
+      <button type="button" data-pal="WARM">WARM</button>
+      <button type="button" data-pal="SPECTRUM">SPECTRUM</button>
+      <button type="button" data-pal="COOL">COOL</button>
+      <button type="button" data-pal="MONO">MONO</button>
+    </div>
+    <div class="hint">One language: bass mass in the center, air on the
+      wings, peak dots that linger. Palettes are the finish — vinyl
+      warm, spectrum, studio cool, furniture mono. Left/right on the
+      panel walks them. Quiet is an analog clock chip. Never a fake
+      24-band FFT. Gain is how hard it hits. Bass weight is how heavy
+      the low mass feels.</div>
   </div>
 
   <div id="notecard" class="card hide">
@@ -399,6 +410,26 @@
       Type the one reminder, the one job, the one line you need to see
       from across the room. Ambient shows it whenever it is set. Fold
       happens at save — what you see in the count is what the wall holds.</div>
+  </div>
+
+  <div id="homecard" class="card hide">
+    <h2>Home Hub</h2>
+    <div class="hint" id="home-status">Looking for the house…</div>
+    <div class="row"><label>Bedtime hour</label>
+      <input type="number" id="home-bed" min="0" max="23" value="23"></div>
+    <div class="row"><label>Doorbell entity</label>
+      <input type="text" id="home-bell" placeholder="binary_sensor.doorbell — empty until you have one"></div>
+    <div class="row"><label>Door entity</label>
+      <input type="text" id="home-door" placeholder="binary_sensor.front_door"></div>
+    <div class="row"><label>Leak entity</label>
+      <input type="text" id="home-leak" placeholder="binary_sensor.laundry_leak"></div>
+    <div class="row"><button id="home-save">Save</button>
+      <span id="home-msg" class="badge"></span></div>
+    <div class="hint">Rooms come from HA areas (Hallway, Kitchen, Living
+      Room, Entertainment Room, 3rd Bedroom). Empty sensor ids stay off
+      the glass — never a fake doorbell. Doorbell later: an HA automation
+      calls script.arcade_notify with title RING and data.kind doorbell.
+      Leak is urgent. Lamp/board scripts are unchanged.</div>
   </div>
 
   <div id="ambientcard" class="card hide">
@@ -774,10 +805,11 @@ const HERO = {
   departures: ['MYR LIVE', 'Airborne traffic whose route names home. Not a scheduled board.'],
   satellite: ['ISS', 'Pass list and live sky. A dead catalogue is not an empty sky.'],
   weather: ['WEATHER', 'Hourly when the sky is quiet. Radar when a cell is real.'],
+  home: ['HOME', 'House radar. What is on. Empty sensors stay absent.'],
   sports: ['SPORTS', 'The scorebug. DETAIL when it is live. White is the score until the clock earns it.'],
   gameday: ['GAME DAY', 'Takes the night. Hands the panel back when the event ends.'],
   ticker: ['TICKER', 'Your symbols. Nothing invented. HOLD parks the tape.'],
-  nowplaying: ['MUSIC', 'The panel mic is the instrument. Left/right cycles iris, VU, and scope. 16-band FFT only when packets arrive — never a fake spectrum. Last.fm names the track.'],
+  nowplaying: ['MUSIC', 'Centerpiece EQ. One language, four palettes. Quiet is a clock chip.'],
   news: ['NEWS', 'Headlines. HOLD parks.'],
   events: ['EVENTS', 'What this board just saw.'],
   blog: ['BLOG', 'The guestbook. Left and right walk posts.'],
@@ -1069,6 +1101,12 @@ async function loadNowPlaying(){
        $('np-key').placeholder = j.has_key ? '••••••••  (already set — leave blank to keep it)'
                                             : 'paste a free Last.fm API key';
        if (!$('np-mic-only').matches(':focus')) $('np-mic-only').checked = !!j.mic_only;
+       const gainEl = $('np-gain'), bassEl = $('np-bass');
+       if (gainEl && document.activeElement !== gainEl) gainEl.value = j.eq_gain ?? 1;
+       if (bassEl && document.activeElement !== bassEl) bassEl.value = j.eq_bass ?? 1;
+       document.querySelectorAll('#np-pals [data-pal]').forEach(btn => {
+         btn.classList.toggle('active', btn.dataset.pal === (j.eq_palette || 'WARM'));
+       });
        const mic = j.mic || {};
        let micLine = 'Mic: looking…';
        if (mic.stale){
@@ -1111,6 +1149,48 @@ $('np-mic-only').addEventListener('change', async () => {
     {user: $('np-user').value, mic_only: $('np-mic-only').checked})).json();
   say('np-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
   loadNowPlaying();
+});
+async function saveEq(extra){
+  const body = {
+    eq_gain: parseFloat($('np-gain').value),
+    eq_bass: parseFloat($('np-bass').value)
+  };
+  if (extra) Object.assign(body, extra);
+  const j = await (await post('/api/nowplaying', body)).json();
+  say('np-msg', j.ok === false ? (j.error || 'error') : 'eq saved', j.ok !== false);
+  loadNowPlaying();
+}
+['np-gain','np-bass'].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener('change', () => saveEq());
+});
+document.querySelectorAll('#np-pals [data-pal]').forEach(btn => {
+  btn.addEventListener('click', () => saveEq({eq_palette: btn.dataset.pal}));
+});
+
+async function loadHome(){
+  try{
+    const j = await (await fetch('/api/home')).json();
+    const bed = $('home-bed');
+    if (bed && document.activeElement !== bed) bed.value = j.bedtime_hour ?? 23;
+    const set = (id, v) => { const el = $(id); if (el && document.activeElement !== el) el.value = v || ''; };
+    set('home-bell', j.doorbell); set('home-door', j.door); set('home-leak', j.leak);
+    const bits = [];
+    if (j.on_count != null) bits.push(j.on_count + ' on');
+    if (j.story) bits.push(j.story);
+    if (j.err) bits.push('no signal: ' + j.err);
+    else if (j.age == null) bits.push('waiting for HA ingest');
+    $('home-status').textContent = bits.join(' · ') || 'House is quiet.';
+  }catch(_){}
+}
+if ($('home-save')) $('home-save').addEventListener('click', async () => {
+  const j = await (await post('/api/home', {
+    bedtime_hour: parseInt($('home-bed').value, 10),
+    doorbell: $('home-bell').value, door: $('home-door').value,
+    leak: $('home-leak').value
+  })).json();
+  say('home-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
+  loadHome();
 });
 
 function paintNotePreview(j){
@@ -1500,6 +1580,11 @@ function syncUI(){
   if (base === 'nowplaying' && Date.now() - cfgTouched > 3000) loadNowPlaying();
   $('notecard').classList.toggle('hide', base !== 'ownernote');
   if (base === 'ownernote' && Date.now() - cfgTouched > 3000) loadNote();
+  const hc = $('homecard');
+  if (hc){
+    hc.classList.toggle('hide', base !== 'home');
+    if (base === 'home' && Date.now() - cfgTouched > 3000) loadHome();
+  }
   $('ambientcard').classList.toggle('hide', base !== 'ambient');
   if (base === 'ambient' && Date.now() - cfgTouched > 3000) loadAmbient();
   $('sportscard').classList.toggle('hide', base !== 'sports');
@@ -1549,7 +1634,7 @@ const PLAYABLE = new Set(['snake','tetris','pong','breakout','tron','flappy',
                           'brawler','chase','tunnel','powder',
                           'ticker','satellite','flights','followflight',
                           'departures','nowplaying','ownernote','events',
-                          'sports','news','weather','clock','blog',
+                          'sports','news','weather','home','clock','blog',
                           'ambient','gameday','menu']);
 /* Powder is genuinely pointer-driven, so on the desktop dashboard you draw
    straight onto the preview canvas: it is already a 1:1 map of the panel,

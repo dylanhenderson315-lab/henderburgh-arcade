@@ -1,0 +1,18 @@
+{
+  "ha_url": "http://127.0.0.1:8123",
+  "ha_token": null,
+  "bedtime_hour": 23,
+  "rooms": [
+    {"id": "hallway", "label": "HALLWAY", "area": "Hallway"},
+    {"id": "kitchen", "label": "KITCHEN", "area": "Kitchen"},
+    {"id": "living", "label": "LIVING", "area": "Living Room"},
+    {"id": "game", "label": "GAME", "area": "Entertainment Room"},
+    {"id": "beds", "label": "BEDS", "area": "3rd Bedroom"}
+  ],
+  "exclude_prefix": [
+    "light.apollo_m_1"
+  ],
+  "doorbell": null,
+  "door": null,
+  "leak": null
+}

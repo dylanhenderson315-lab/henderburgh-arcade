@@ -44,15 +44,17 @@ MODES = (
     _m("departures", "BOARD", "data", (120, 200, 255), menu=True, sequence=True,
        note="Live to/from home. Not a scheduled board. Left/right pages."),
     _m("nowplaying", "MUSIC", "data", (255, 90, 200), menu=True, sequence=True,
-       note="Left/right cycles iris, VU, and scope. Last.fm names the track."),
+       note="Bass mass + air. Left/right walks palettes. Last.fm names the track."),
     _m("ownernote", "TODAY", "data", (255, 214, 110), menu=True, sequence=True,
        note="Today's work sticky. 84 characters. Edit on this phone."),
     _m("sports", "SPORTS", "data", (255, 140, 40), menu=True, sequence=True,
-       note="Left/right walks games. DETAIL is the in-depth card."),
+       note="Every live game, in DETAIL. Left/right walks the slate."),
     _m("news", "NEWS", "data", (255, 226, 60), menu=True, sequence=True,
        note="Left/right walks headlines. HOLD parks."),
     _m("weather", "WEATHER", "data", (90, 190, 255), menu=True, sequence=True,
        note="Up/down: conditions, hourly, radar. Ambient: hourly, or radar if storms."),
+    _m("home", "HOME", "data", (255, 186, 90), menu=True, sequence=True,
+       note="House radar. What's on. Rotate for house events."),
     _m("clock", "CLOCK", "data", (120, 200, 255), menu=True, sequence=True,
        note="FACE flips analog and digital."),
     _m("blog", "BLOG", "data", (176, 96, 255), menu=True, sequence=True,
@@ -87,7 +89,7 @@ def menu_tiles():
 
 # WORLD walk — sky first, not menu-shelf order.
 SEQUENCE = (
-    "flights", "satellite", "weather", "sports", "nowplaying",
+    "flights", "satellite", "weather", "home", "sports", "nowplaying",
     "followflight", "departures", "ticker", "news", "events",
     "blog", "ownernote", "clock",
 )

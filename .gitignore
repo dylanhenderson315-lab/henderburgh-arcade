@@ -42,6 +42,10 @@ hangar_log.jsonl
 # source (see events_log.py).
 events_log.jsonl
 
+# Storm Desk session strip + Home Hub house facts — runtime, not source.
+storm_log.jsonl
+home_log.jsonl
+
 # Last-good CelesTrak / station TLE catalogue -- runtime cache so a
 # dead visual host does not wipe the sky on restart (see skypass.py).
 skypass_tle_cache.txt

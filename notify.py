@@ -82,9 +82,24 @@ def check_token(presented):
     """Constant-time compare against the configured token. Missing or
     malformed input compares against the real token and simply fails,
     same as any other mismatch -- no special-cased short path that could
-    itself leak timing information."""
+    itself leak timing information.
+
+    Accepts the raw token or `Bearer <token>` — Home Assistant's REST
+    notify likes Authorization headers, the arcade's own callers send
+    X-Arcade-Token."""
     real = load_config()["token"]
-    return hmac.compare_digest(str(presented or ""), real)
+    raw = str(presented or "").strip()
+    if raw.lower().startswith("bearer "):
+        raw = raw[7:].strip()
+    return hmac.compare_digest(raw, real)
+
+
+def token_from_headers(headers):
+    """X-Arcade-Token first, then Authorization. Never logs the value."""
+    if headers is None:
+        return None
+    get = headers.get if hasattr(headers, "get") else (lambda k, d=None: None)
+    return get("X-Arcade-Token") or get("Authorization")
 
 
 def push_pending(payload):

@@ -80,12 +80,36 @@ def _get_json(url):
         return json.load(r)
 
 
+def _eq_gain(v, default=1.0):
+    try:
+        return max(0.40, min(2.50, float(v)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _eq_bass(v, default=1.0):
+    try:
+        return max(0.30, min(2.20, float(v)))
+    except (TypeError, ValueError):
+        return default
+
+
+# AudioRays' extra touch: palettes you change on the fly. Color, not
+# geometry — one instrument, four finishes. WARM is the vinyl look.
+PALETTES = ("WARM", "SPECTRUM", "COOL", "MONO")
+
+
+def _eq_palette(v, default="WARM"):
+    s = str(v or "").strip().upper()
+    return s if s in PALETTES else default
+
+
 def load_config():
-    """{"api_key": str|None, "user": str|None, "mic_only": bool}. Both
-    Last.fm fields empty is the honest default (nothing configured yet),
-    never a guessed account. `mic_only` defaults False -- see
-    save_config()'s docstring for what it means."""
-    cfg = {"api_key": None, "user": None, "mic_only": False}
+    """Last.fm identity + the EQ control surface. Last.fm empty is the
+    honest default. EQ fields have house defaults so a missing key is
+    not an error."""
+    cfg = {"api_key": None, "user": None, "mic_only": False,
+           "eq_gain": 1.0, "eq_bass": 1.0, "eq_palette": "WARM"}
     if not CONFIG_PATH.exists():
         return cfg
     try:
@@ -95,6 +119,12 @@ def load_config():
                 v = raw.get(k)
                 cfg[k] = str(v).strip() or None if v else None
             cfg["mic_only"] = bool(raw.get("mic_only"))
+            if "eq_gain" in raw:
+                cfg["eq_gain"] = _eq_gain(raw.get("eq_gain"))
+            if "eq_bass" in raw:
+                cfg["eq_bass"] = _eq_bass(raw.get("eq_bass"))
+            if "eq_palette" in raw:
+                cfg["eq_palette"] = _eq_palette(raw.get("eq_palette"))
     except (json.JSONDecodeError, OSError, AttributeError, TypeError):
         pass          # keep honest defaults; never crash a render over a bad file
     return cfg
@@ -144,8 +174,26 @@ def save_config(api_key, user, clear_key=False, mic_only=None):
     # else: mic_only omitted -- preserve whatever was already saved
     # (defaults to False via .get() below on a first-ever save).
     CONFIG_PATH.write_text(json.dumps(data, indent=2))
-    return {"api_key": data.get("api_key"), "user": data["user"],
-            "mic_only": bool(data.get("mic_only"))}
+    return load_config()
+
+
+def save_eq(gain=None, bass=None, palette=None, mode=None, decay=None):
+    """Read-modify-write of the EQ surface. Listening controls are
+    gain + bass weight + palette. Older keys are ignored if omitted."""
+    data = {}
+    if CONFIG_PATH.exists():
+        try:
+            data = json.loads(CONFIG_PATH.read_text()) or {}
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+            data = {}
+    if gain is not None:
+        data["eq_gain"] = _eq_gain(gain)
+    if bass is not None:
+        data["eq_bass"] = _eq_bass(bass)
+    if palette is not None:
+        data["eq_palette"] = _eq_palette(palette)
+    CONFIG_PATH.write_text(json.dumps(data, indent=2))
+    return load_config()
 
 
 def _parse_now_playing(data):
@@ -196,6 +244,9 @@ class NowPlayingFeed:
         cfg = load_config()
         self._api_key, self._user = cfg["api_key"], cfg["user"]
         self._mic_only = cfg["mic_only"]
+        self._eq_gain = cfg["eq_gain"]
+        self._eq_bass = cfg.get("eq_bass", 1.0)
+        self._eq_palette = cfg.get("eq_palette", "WARM")
         self._track = None
         self._updated = 0.0
         self._last_try = 0.0
@@ -207,13 +258,16 @@ class NowPlayingFeed:
     def get_config(self):
         with self._lock:
             return {"api_key": self._api_key, "user": self._user,
-                    "mic_only": self._mic_only}
+                    "mic_only": self._mic_only,
+                    "eq_gain": self._eq_gain, "eq_bass": self._eq_bass,
+                    "eq_palette": self._eq_palette}
 
     def set_config(self, api_key, user, clear_key=False, mic_only=None):
         cfg = save_config(api_key, user, clear_key=clear_key, mic_only=mic_only)
         with self._lock:
             self._api_key, self._user = cfg["api_key"], cfg["user"]
             self._mic_only = cfg["mic_only"]
+            self._adopt_eq(cfg)
             # A new account's track is a different real fact -- never show
             # the previous account's last track against the new one.
             self._track = None
@@ -221,6 +275,17 @@ class NowPlayingFeed:
             self._last_try = 0.0
             self._err = None
         return cfg
+
+    def set_eq(self, gain=None, bass=None, palette=None, mode=None, decay=None):
+        cfg = save_eq(gain=gain, bass=bass, palette=palette)
+        with self._lock:
+            self._adopt_eq(cfg)
+        return cfg
+
+    def _adopt_eq(self, cfg):
+        self._eq_gain = cfg["eq_gain"]
+        self._eq_bass = cfg.get("eq_bass", 1.0)
+        self._eq_palette = cfg.get("eq_palette", "WARM")
 
     def get(self):
         """{configured, playing, track, age, err}. Never blocks.
@@ -276,6 +341,7 @@ class NowPlayingFeed:
                 self._track = None
                 self._updated = 0.0
             self._mic_only = cfg["mic_only"]
+            self._adopt_eq(cfg)
 
     def _refresh_once(self):
         now = time.time()
