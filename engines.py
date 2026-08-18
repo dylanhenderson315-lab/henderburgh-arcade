@@ -10560,11 +10560,22 @@ class DepartureBoardEngine(Browsable):
             draw_text3x5(buf, 5, y, fit_text(ident, name_budget), (255, 255, 255))
             if dist_txt:
                 draw_text3x5(buf, WIDTH - 2 - text_w(dist_txt), y, dist_txt, self.INK_DIM)
+            # Row 2: "> CITY" on the left, DEP/ARR tag on the right. The
+            # left text is the arrow PREFIX plus the fitted city, so its
+            # budget must reserve room for BOTH the arrow and the tag or
+            # a long city ("< RALEIGH/DURHAM") runs straight through the
+            # tag -- a real COLLISION render_audit.py caught here (the
+            # arrow was prepended after fit_text() without being counted).
             arrow = ">" if status == "DEPARTING" else "<"
-            city_budget = WIDTH - 8 - text_w(tag) - 4
-            city = f"{arrow} {fit_text(other, city_budget)}" if other else tag
-            draw_text3x5(buf, 5, y + 6, city, self.INK)
-            draw_text3x5(buf, WIDTH - 2 - text_w(tag), y + 6, tag, col)
+            tag_x = WIDTH - 2 - text_w(tag)
+            prefix = arrow + " "
+            # left text may reach tag_x minus a 2px gap; the fitted city
+            # gets whatever is left after the arrow prefix.
+            city_budget = tag_x - 2 - 5 - text_w(prefix)
+            city = prefix + fit_text(other, max(4, city_budget)) if other else ""
+            if city:
+                draw_text3x5(buf, 5, y + 6, city, self.INK)
+            draw_text3x5(buf, tag_x, y + 6, tag, col)
             y += 16
             if y > HEIGHT - 5:
                 break

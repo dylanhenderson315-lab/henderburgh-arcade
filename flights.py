@@ -84,7 +84,29 @@ FOLLOW_SOURCES = (
 )
 FOLLOW_URL = FOLLOW_SOURCES[0][1]
 
-RADIUS_NM = 40                  # "in the local sky" -- roughly a 15 min drive's worth of horizon
+# GLOBAL per-REGISTRATION lookup, the fallback path _fetch_follow() uses
+# when a callsign lookup comes back empty (2026-08-17). Famous aircraft
+# in the curated FAMOUS_AIRCRAFT picker below are identified by tail
+# number (N1A, N941NA, ...), not a flight-number callsign -- a Goodyear
+# blimp or NASA's Super Guppy has no "airline ICAO + number" callsign to
+# match, so the callsign endpoint never finds them. Same replica family
+# and same {"ac":[...]} envelope as the callsign path.
+#
+# Deliberately NOT airplanes.live here: its /v2/reg endpoint returns a
+# real 403 from this project's User-Agent (confirmed live 2026-08-17),
+# and _fetch_ac_list() treats "a source errored AND none returned
+# traffic" as a hard raise -- so a 403 replica would turn an honest
+# "not airborne" into a NO SIGNAL error. adsb.lol (/v2/reg) and adsb.fi
+# (/api/v2/registration) both return a clean empty envelope for a
+# grounded reg, confirmed live, so only those two are used.
+FOLLOW_REG_SOURCES = (
+    ("adsb.lol",
+     "https://api.adsb.lol/v2/reg/{reg}", "ac"),
+    ("adsb.fi",
+     "https://opendata.adsb.fi/api/v2/registration/{reg}", "aircraft"),
+)
+
+RADIUS_NM = 40                # "in the local sky" -- roughly a 15 min drive's worth of horizon
 MAX_TRACKED = 8                 # nearest N, so the mode has a bounded, meaningful list
 MAX_LOOKUPS_PER_REFRESH = 8     # radar 8 + board candidates; cache means this is burst-only
 
@@ -1543,6 +1565,54 @@ FOLLOW_REFRESH = 15.0   # flat interval, not adaptive like POSITION_REFRESH's
                         # every other feed here).
 
 
+# ---- CURATED FAMOUS AIRCRAFT (2026-08-17) ----------------------------------
+# Owner ask: "have a drop down of famous planes like air force one and stuff
+# like that to follow." The hard rule (CLAUDE.md's own "never invent"): every
+# entry here is a REAL, publicly documented aircraft identified by a REAL
+# identifier the ADS-B networks this project already queries (adsb.lol /
+# airplanes.live / adsb.fi) actually key on -- a registration (tail number)
+# for the individual airframes, resolved via the reg-lookup fallback
+# _fetch_follow() gained this same session. Nothing here is a guessed or
+# aspirational identifier.
+#
+# `id` is what gets POSTed to the existing /api/flights/follow endpoint (it
+# is normalized/uppercased by save_followed_flight() exactly like any typed
+# callsign). `kind` is "reg" or "callsign", informational only -- the feed
+# tries callsign then registration regardless, so a mislabeled entry still
+# resolves; it exists so the picker can hint how a given plane is found.
+#
+# HONEST GAP, stated plainly and surfaced on the card: these are real
+# airframes, but most are display/heritage aircraft that only fly on show
+# days (the Goodyear blimps and NASA's Super Guppy fly far more often than
+# the warbirds). Following one when it is parked shows the card's real
+# "NOT CURRENTLY AIRBORNE" tri-state -- an honest "it isn't up right now",
+# never a fabricated position. AIR FORCE ONE is included because the owner
+# asked for it by name; its ADS-B is routinely filtered/blocked, so it will
+# almost always read NOT AIRBORNE -- that honesty is the whole point of the
+# tri-state, and the card/label says so rather than pretending otherwise.
+FAMOUS_AIRCRAFT = (
+    # (label, id, kind, note)
+    ("AIR FORCE ONE", "AF1", "callsign",
+     "Usually filtered on ADS-B -- expect NOT AIRBORNE"),
+    ("GOODYEAR WINGFOOT ONE", "N1A", "reg", "Goodyear blimp (Zeppelin NT)"),
+    ("GOODYEAR WINGFOOT TWO", "N2A", "reg", "Goodyear blimp (Zeppelin NT)"),
+    ("GOODYEAR WINGFOOT THREE", "N3A", "reg", "Goodyear blimp (Zeppelin NT)"),
+    ("NASA SUPER GUPPY", "N941NA", "reg", "NASA outsize-cargo turboprop"),
+    ("B-29 FIFI", "N529B", "reg", "Commemorative Air Force B-29"),
+    ("B-29 DOC", "N69972", "reg", "Doc's Friends B-29"),
+    ("B-17 ALUMINUM OVERCAST", "N5017N", "reg", "EAA B-17 Flying Fortress"),
+    ("B-17 SENTIMENTAL JOURNEY", "N9323Z", "reg", "CAF B-17 Flying Fortress"),
+)
+
+
+def famous_aircraft():
+    """The curated famous-aircraft picker list as plain dicts, for the
+    control panel / phone remote follow card. Single source of truth --
+    the HTML never hardcodes tail numbers, it reads this."""
+    return [{"label": l, "id": i, "kind": k, "note": n}
+            for (l, i, k, n) in FAMOUS_AIRCRAFT]
+
+
 def load_followed_flight():
     """The currently-followed callsign, or None if nothing is configured.
 
@@ -1612,6 +1682,19 @@ def _fetch_follow(callsign):
     shape. An empty "ac" list is a REAL, honest "not currently airborne"
     result -- not treated as an error."""
     ac_list = _fetch_ac_list(FOLLOW_SOURCES, {"callsign": callsign})
+    if not ac_list:
+        # Fall back to a REGISTRATION lookup before concluding "not
+        # airborne". Famous-aircraft picker entries (FAMOUS_AIRCRAFT) are
+        # keyed by tail number, which the callsign endpoint never matches;
+        # a real airline callsign ("UAL123") that IS up already returned
+        # above, so this only runs when the callsign path found nothing.
+        # A reg-source network failure is swallowed here (the callsign
+        # path already succeeded-empty, so an honest "not airborne" beats
+        # a NO SIGNAL error from the fallback tier).
+        try:
+            ac_list = _fetch_ac_list(FOLLOW_REG_SOURCES, {"reg": callsign})
+        except Exception:                              # noqa: BLE001
+            ac_list = []
     if not ac_list:
         return None
     # A callsign can (rarely) match more than one currently-squawking
