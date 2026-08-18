@@ -46,7 +46,7 @@ MODES = (
     _m("nowplaying", "MUSIC", "data", (255, 90, 200), menu=True, sequence=True,
        note="Bass mass + air. Left/right walks palettes. Last.fm names the track."),
     _m("ownernote", "TODAY", "data", (255, 214, 110), menu=True, sequence=True,
-       note="Today's work sticky. 84 characters. Edit on this phone."),
+       note="Today's work checklist. One task per line, x to check. Edit on this phone."),
     _m("sports", "SPORTS", "data", (255, 140, 40), menu=True, sequence=True,
        note="Every live game, in DETAIL. Left/right walks the slate."),
     _m("news", "NEWS", "data", (255, 226, 60), menu=True, sequence=True,

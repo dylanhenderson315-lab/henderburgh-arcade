@@ -208,7 +208,7 @@
       <div class="tiles">
         <button data-mode="ambient" style="--tile:#b060ff">AMBIENT<small>AUTO / WORLD / ARCADE / MIX. Live games lock DETAIL.</small></button>
         <button data-mode="clock" style="--tile:#78c8ff">CLOCK<small>The resting face. Analog or digital. FACE flips.</small></button>
-        <button data-mode="ownernote" style="--tile:#ffd66e">TODAY<small>One 84-character sticky. Vestaboard, not Evernote.</small></button>
+        <button data-mode="ownernote" style="--tile:#ffd66e">TODAY<small>Your work checklist on the wall. Type it on the phone.</small></button>
       </div>
     </div>
 
@@ -401,18 +401,21 @@
   </div>
 
   <div id="notecard" class="card hide">
-    <h2>Today — one work note</h2>
-    <div class="row"><textarea id="note-text" rows="4" style="flex:1"
-      placeholder="THE ONE THING TO HOLD ON THE WALL"></textarea></div>
-    <div id="note-preview" class="hint">0 / 84 panel characters</div>
+    <h2>Today — your work checklist</h2>
+    <div class="row"><input id="note-title" type="text" style="flex:1"
+      placeholder="Heading (optional) — e.g. TUE PRIORITIES"></div>
+    <div class="row"><textarea id="note-text" rows="6" style="flex:1"
+      placeholder="One task per line…&#10;Ship the render audit&#10;x Reply to the plumber&#10;Call the bank"></textarea></div>
+    <div id="note-preview" class="hint">0 tasks</div>
     <div class="row"><button id="note-save">Save</button>
       <button id="note-clear">Clear</button>
       <span id="note-msg" class="badge"></span></div>
-    <div class="hint">This is a Vestaboard, not a notebook. The panel
-      can draw 6 lines × 14 glyphs (84 characters), uppercase only.
-      Type the one reminder, the one job, the one line you need to see
-      from across the room. Ambient shows it whenever it is set. Fold
-      happens at save — what you see in the count is what the wall holds.</div>
+    <div class="hint">Run your day off the wall. One task per line;
+      start a line with <b>x&nbsp;</b> to check it off. The panel shows a
+      scannable checklist with a done count, ~13 glyphs per line,
+      uppercase only. Ambient surfaces it when there's open work — more
+      when you just edited it. Fold happens at save, so the preview is
+      exactly what the wall holds.</div>
   </div>
 
   <div id="homecard" class="card hide">
@@ -802,7 +805,7 @@ const MODE_LABELS = {
 const HERO = {
   ambient: ['AMBIENT', 'The director. AUTO is a show. WORLD walks the sky. ARCADE plays itself. MIX is yours.'],
   clock: ['CLOCK', 'The resting face. Analog or digital. Rain and ISS stay honest.'],
-  ownernote: ['TODAY', 'One work sticky. 84 characters. Ambient holds it when it is set.'],
+  ownernote: ['TODAY', 'Your work checklist — today\'s tasks, checkable, on the wall. Ambient surfaces it when there is open work.'],
   flights: ['FLIGHTS', 'Polar radar of what is really up. Climb and descent only when ADS-B says so.'],
   followflight: ['FOLLOW', 'One ICAO callsign. Type UAL123, not UA123. Ambient only if it is airborne.'],
   departures: ['MYR LIVE', 'Airborne traffic whose route names home. Not a scheduled board.'],
@@ -1214,32 +1217,49 @@ if ($('home-save')) $('home-save').addEventListener('click', async () => {
   loadHome();
 });
 
+function noteLocalStats(){
+  const lines = ($('note-text').value || '').split('\n')
+    .map(s => s.trim()).filter(Boolean);
+  const cols = window._noteCols || 13, max = window._noteMax || 12;
+  let done = 0, over = 0;
+  lines.forEach(l => {
+    const m = /^(x |\[x\]\s?|\* )/i.test(l);
+    if (m) done++;
+    const t = l.replace(/^(x |\[x\]\s?|\* )/i, '').trim();
+    if (t.length > cols) over++;
+  });
+  return {count: lines.length, done, over, max};
+}
 function paintNotePreview(j){
   const el = $('note-preview');
   if (!el) return;
-  const chars = (j && typeof j.chars === 'number') ? j.chars
-    : ($('note-text').value || '').trim().length;
-  const budget = (j && j.budget) || 84;
-  const fits = j && typeof j.fits === 'boolean' ? j.fits : chars <= budget;
-  el.textContent = chars + ' / ' + budget + ' panel characters'
-    + (fits ? '' : ' — over budget, wall will crop');
-  el.style.color = fits ? '' : '#e07070';
+  if (j && typeof j.cols === 'number'){ window._noteCols = j.cols; window._noteMax = j.max_items; }
+  const s = noteLocalStats();
+  let txt = s.count + (s.count === 1 ? ' task' : ' tasks');
+  if (s.count) txt += ' · ' + s.done + ' done';
+  if (s.count > s.max) txt += ' — over ' + s.max + ', wall shows +' + (s.count - s.max);
+  if (s.over) txt += ' — ' + s.over + ' line' + (s.over === 1 ? '' : 's') + ' too long, wall crops';
+  el.textContent = txt;
+  el.style.color = (s.count > s.max || s.over) ? '#e07070' : '';
 }
 async function loadNote(){
   try{ const j = await (await fetch('/api/note')).json();
-       if (!$('note-text').matches(':focus')) $('note-text').value = j.text || '';
+       window._noteCols = j.cols; window._noteMax = j.max_items;
+       if (!$('note-text').matches(':focus')) $('note-text').value = j.body || '';
+       if (!$('note-title').matches(':focus')) $('note-title').value = j.title || '';
        paintNotePreview(j); }catch(_){}
 }
-$('note-text').addEventListener('input', () => paintNotePreview());
-$('note-save').addEventListener('click', async () => {
-  const j = await (await post('/api/note', {text: $('note-text').value})).json();
-  say('note-msg', j.ok === false ? (j.error || 'error')
-    : (j.fits === false ? 'saved — over 84, wall crops' : 'saved'), j.ok !== false);
+async function saveNote(){
+  const j = await (await post('/api/note',
+    {items: $('note-text').value, title: $('note-title').value})).json();
+  say('note-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
   loadNote();
-});
+}
+$('note-text').addEventListener('input', () => paintNotePreview());
+$('note-save').addEventListener('click', saveNote);
 $('note-clear').addEventListener('click', async () => {
-  $('note-text').value = '';
-  const j = await (await post('/api/note', {text: ''})).json();
+  $('note-text').value = ''; $('note-title').value = '';
+  const j = await (await post('/api/note', {items: '', title: ''})).json();
   say('note-msg', j.ok === false ? (j.error || 'error') : 'cleared', j.ok !== false);
   loadNote();
 });

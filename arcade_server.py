@@ -1424,7 +1424,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(catalog.public_json())
         elif path == "/api/note":
             data = ownernote.load_config()
-            self._json({**data, **ownernote.preview(data.get("text"))})
+            self._json({**data, **ownernote.preview(data)})
         elif path == "/api/ambient":
             cfg = ambient.load_config()
             live = None
@@ -1916,15 +1916,22 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/note":
-            # {"text": "..."} -- the owner's own persistent message
-            # (ownernote.py). An empty/omitted text clears the note, the
-            # one real "remove it" path -- folded through panel_text()
-            # inside save_config() itself, not here, since the owner's
-            # text is the whole boundary this endpoint exists to guard.
+            # The owner's own work checklist (ownernote.py). The phone
+            # sends {"title": "...", "items": "<one task per line, x to
+            # check>"}; `body` is accepted as an alias, and legacy `text`
+            # (the old single sticky) still works. An empty result clears
+            # the note -- the one real "remove it" path. Everything is
+            # folded through panel_text() inside save_config() itself, the
+            # whole boundary this endpoint exists to guard.
             try:
                 j = json.loads(body or b"{}")
-                saved = ownernote.save_config(j.get("text"))
-                self._json({"ok": True, **saved, **ownernote.preview(saved.get("text"))})
+                src = j.get("items")
+                if src is None:
+                    src = j.get("body")
+                if src is None:
+                    src = j.get("text")
+                saved = ownernote.save_config(src, title=j.get("title"))
+                self._json({"ok": True, **saved, **ownernote.preview(saved)})
             except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/gameday/config":
