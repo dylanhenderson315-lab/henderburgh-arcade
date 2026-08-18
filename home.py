@@ -213,7 +213,8 @@ class HomeFeed:
             on_since = dict(self._on_since)
             age = (now - self._updated) if self._updated else None
             err = self._err
-            stories = list(self._stories[-12:])
+            all_stories = list(self._stories)
+            stories = all_stories[-12:]
             late_day = self._late_day
         self._ensure_thread()
         rooms = self._rooms_from(cfg, lights, on_since, now)
@@ -229,11 +230,18 @@ class HomeFeed:
             age_s = fmt_age(longest["longest_s"])
             if age_s:
                 story = "%s  %s" % (longest["label"], age_s)
+        # Counted against the FULL log (all_stories), not the last-12
+        # slice `stories` is trimmed to for display -- a busy day with
+        # more than 12 mixed-kind events (door/leak/late alongside real
+        # doorbell rings) would silently push earlier rings out of that
+        # slice and undercount, showing a wrong-but-plausible number
+        # rather than the honest one. HOME_LOG_MAX (80) already bounds
+        # how far back this can look.
         rings_today = 0
         day0 = time.localtime(now)
         start = time.mktime((day0.tm_year, day0.tm_mon, day0.tm_mday,
                              0, 0, 0, 0, 0, -1))
-        for e in stories:
+        for e in all_stories:
             if e.get("kind") == "ring" and float(e.get("ts") or 0) >= start:
                 rings_today += 1
         slots = {
@@ -483,6 +491,19 @@ class HomeFeed:
                 if not str(eid).startswith("light."):
                     continue
                 attrs = st.get("attributes") or {}
+                # Honest gap: HA's real /api/states response does not
+                # carry an "area" attribute (area assignment is a
+                # device/entity-registry concept, not exposed on a
+                # plain state object) -- attrs.get("area") is realistically
+                # always None on this poll path, so a room's configured
+                # "area" match (_room_for) never actually fires for
+                # polled data; only the entity-id substring fallback
+                # (_ENTITY_ROOM) does. A real "area" value CAN arrive via
+                # POST /api/home/ingest, if an HA automation/template
+                # resolves and sends it explicitly -- that path is
+                # unaffected. Not worked around here with a guessed
+                # second HA endpoint; flagged rather than silently
+                # assumed working.
                 lights.append({
                     "id": eid,
                     "state": st.get("state"),
