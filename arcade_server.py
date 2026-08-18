@@ -1294,7 +1294,11 @@ class Handler(BaseHTTPRequestHandler):
             s = flights.FOLLOW_FEED.get()
             self._json({"configured": s["configured"], "callsign": s["callsign"],
                         "airborne": s["airborne"], "age": s["age"],
-                        "aircraft": s["aircraft"], "err": s["err"]})
+                        "aircraft": s["aircraft"], "err": s["err"],
+                        # Curated famous-aircraft picker (flights.FAMOUS_
+                        # AIRCRAFT is the single source of truth; the HTML
+                        # never hardcodes tail numbers).
+                        "famous": flights.famous_aircraft()})
         elif path == "/api/sports/teams":
             # Real team lists (2026-08-09), for the control panel's
             # league/team dropdowns and the favorite-teams city-quick-add

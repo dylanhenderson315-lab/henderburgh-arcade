@@ -334,6 +334,9 @@
 
   <div id="followcard" class="card hide">
     <h2>Follow a flight — anywhere, by callsign</h2>
+    <div class="row"><label>Famous</label>
+      <select id="ff-famous"><option value="">— pick a famous plane —</option></select></div>
+    <div id="ff-famnote" class="hint"></div>
     <div class="row"><label>Callsign</label>
       <input type="text" id="ff-callsign" placeholder="e.g. UAL123"></div>
     <div class="row"><button id="ff-save">Follow</button>
@@ -1073,8 +1076,26 @@ $('lc-save').addEventListener('click', async () => {
   say('lc-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
 });
 
+let ffFamous = [];
+function fillFamous(list){
+  if (!list || !list.length) return;
+  ffFamous = list;
+  const sel = $('ff-famous');
+  if (sel.options.length > 1) return;   // already populated
+  for (const p of list){
+    const o = document.createElement('option');
+    o.value = p.id; o.textContent = p.label + '  (' + p.id + ')';
+    sel.appendChild(o);
+  }
+}
+$('ff-famous').addEventListener('change', () => {
+  const p = ffFamous.find(x => x.id === $('ff-famous').value);
+  $('ff-famnote').textContent = p ? p.note : '';
+  if (p) $('ff-callsign').value = p.id;
+});
 async function loadFollow(){
   try{ const j = await (await fetch('/api/flights/follow')).json();
+       fillFamous(j.famous);
        if (j.callsign && !$('ff-callsign').matches(':focus')) $('ff-callsign').value = j.callsign;
        $('ff-now').textContent = !j.configured ? ''
          : (j.airborne === true
