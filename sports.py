@@ -1518,8 +1518,12 @@ def _leaders_from_payload(data):
     category lists pre-game (confirmed on real pre-game NBA/NHL
     payloads), so this returns [] then rather than a fabricated stat.
 
-    Returns up to 2 entries [{team, cat, name, value}], newest team
-    order as ESPN gave it.
+    Returns up to 2 entries PER TEAM (4 total) [{team, cat, name,
+    value}] -- the first two real, non-empty categories ESPN lists for
+    that team, in ESPN's own headline-relevance order, team order as
+    ESPN gave it. The renderer decides how many it has room for; this
+    just stops inventing a "one stat per team" ceiling that was never a
+    real constraint, only how many rows the original caller drew.
     """
     ldrs = data.get("leaders") if isinstance(data, dict) else None
     if not isinstance(ldrs, list):
@@ -1531,33 +1535,32 @@ def _leaders_from_payload(data):
         cats = team.get("leaders")
         if not isinstance(cats, list):
             continue
-        cat = next((c for c in cats
-                    if isinstance(c, dict) and isinstance(c.get("leaders"), list)
-                    and c.get("leaders")), None)
-        if not cat:
-            continue
-        lead = cat["leaders"][0]
-        if not isinstance(lead, dict):
-            continue
-        ath = lead.get("athlete") if isinstance(lead.get("athlete"), dict) else {}
-        name = ath.get("shortName") or ath.get("displayName")
-        if not name:
-            continue
-        val = lead.get("value")
-        if isinstance(val, bool):
-            val = None
-        if isinstance(val, (int, float)):
-            val_s = str(int(val)) if float(val) == int(val) else str(val)
-        else:
-            dv = lead.get("displayValue")
-            val_s = str(dv).strip() if dv else ""
         tm = (team.get("team") or {}).get("abbreviation")
-        out.append({
-            "team": paneltext.panel_text(tm) if tm else "",
-            "cat": _leader_label(cat.get("name")),
-            "name": paneltext.panel_text(name),
-            "value": paneltext.panel_text(val_s) if val_s else "",
-        })
+        real_cats = [c for c in cats
+                     if isinstance(c, dict) and isinstance(c.get("leaders"), list)
+                     and c.get("leaders")]
+        for cat in real_cats[:2]:
+            lead = cat["leaders"][0]
+            if not isinstance(lead, dict):
+                continue
+            ath = lead.get("athlete") if isinstance(lead.get("athlete"), dict) else {}
+            name = ath.get("shortName") or ath.get("displayName")
+            if not name:
+                continue
+            val = lead.get("value")
+            if isinstance(val, bool):
+                val = None
+            if isinstance(val, (int, float)):
+                val_s = str(int(val)) if float(val) == int(val) else str(val)
+            else:
+                dv = lead.get("displayValue")
+                val_s = str(dv).strip() if dv else ""
+            out.append({
+                "team": paneltext.panel_text(tm) if tm else "",
+                "cat": _leader_label(cat.get("name")),
+                "name": paneltext.panel_text(name),
+                "value": paneltext.panel_text(val_s) if val_s else "",
+            })
     return out
 
 

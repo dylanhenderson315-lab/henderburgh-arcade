@@ -900,6 +900,27 @@ fetch('/api/catalog').then(r => r.json()).then(j => {
     else if (HERO[m.name] && m.label) HERO[m.name][0] = m.label;
   });
   if (curMode) renderHero(curMode);
+  // Drift guard, not a rewrite: this page's mode buttons are still
+  // hand-written HTML (grouping/takeover styling/config cards are
+  // deliberate, per CLAUDE.md, and not worth reopening for a live
+  // cross-check alone) -- but catalog.py is the real source of truth
+  // for which modes exist. Same spirit as render_audit.py/fold_audit.py
+  // catching drift in the panel's own renderers: warn loudly in the
+  // console the moment a catalog mode has no button here, or a button
+  // points at a mode catalog.py no longer knows about, instead of that
+  // staying silent until someone notices a missing tile by eye.
+  try{
+    const menuModes = new Set((j.menu || []));
+    const have = new Set(Array.from(document.querySelectorAll('[data-mode]'))
+      .map(el => el.dataset.mode));
+    const missing = [...menuModes].filter(n => !have.has(n));
+    const orphaned = [...have].filter(n => j.modes && !j.modes.some(m => m.name === n)
+      && !['mirror','video','cast'].includes(n));
+    if (missing.length)
+      console.warn('catalog modes with no arcade.html button:', missing);
+    if (orphaned.length)
+      console.warn('arcade.html buttons for modes catalog.py no longer lists:', orphaned);
+  }catch(_){}
 }).catch(() => {});
 
 /* ---------- do not disturb ---------- */

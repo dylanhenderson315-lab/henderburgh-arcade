@@ -14165,18 +14165,21 @@ class SportsEngine(Browsable, BigMomentSource):
         return y + 7
 
     def _draw_leaders(self, buf, ev, y):
-        """Real per-team top performer, the way baseball's DETAIL shows a
+        """Real per-team top performers, the way baseball's DETAIL shows a
         real pitcher/batter matchup -- brings player-level data to the
         team sports (football/basketball/hockey) that otherwise show
         none. Source is ESPN's own `leaders` array from the same summary
         bundle the feed already fetches (ZERO extra I/O, see
-        sports._leaders_from_payload). Draws nothing when ESPN hasn't
-        populated leaders yet (honest pre-game empty, never a guessed
-        stat) or when no vertical room remains.
+        sports._leaders_from_payload, which now surfaces up to 2 real
+        categories per team). Draws nothing when ESPN hasn't populated
+        leaders yet (honest pre-game empty, never a guessed stat).
 
         Each row: 2px team-color rail + short category tag + surname +
         value, on an empty plate. fit_person keeps the surname when the
-        full name won't fit -- never a bare initial."""
+        full name won't fit -- never a bare initial. Every row is gated
+        on real remaining vertical room (`y > HEIGHT - 5: break`), so
+        widening the row cap here never risks overflow -- a card with no
+        room left simply stops drawing, same as this loop always did."""
         leaders = ev.get("leaders") or (
             sports.FEED.get_summary(ev.get("id")) or {}).get("leaders")
         if not leaders:
@@ -14186,7 +14189,7 @@ class SportsEngine(Browsable, BigMomentSource):
             ab = c.get("abbr")
             if ab:
                 cmap[ab] = c.get("color")
-        for ld in leaders[:2]:
+        for ld in leaders[:4]:
             if y > HEIGHT - 5:
                 break
             name = ld.get("name") or ""
@@ -16039,6 +16042,10 @@ class WeatherEngine:
     WX_CX, WX_CY, WX_R = SCOPE_CX, 32, 26
     SWEEP_DEG_PER_TICK = 3.0
     SWEEP_COLOR = (40, 90, 160)
+    # How long a manual browse away from adopt_ambient_view()'s target is
+    # respected before the smart default re-asserts itself. See that
+    # method's own docstring for the reasoning.
+    AUTO_RETURN_SECONDS = 600.0
 
     def _apply_skin(self):
         """Same instance-attribute-shadowing idiom SportsEngine's own
@@ -16076,6 +16083,7 @@ class WeatherEngine:
         self.sweep = 0.0
         self._auto_detail = False
         self._last_adopt_sig = None  # see adopt_ambient_view()
+        self._adopt_forced_at = None  # see adopt_ambient_view()
 
     # ---- input -----------------------------------------------------------
     def has_content(self):
@@ -16136,7 +16144,15 @@ class WeatherEngine:
         all-clear flipping, hourly first becoming available) -- a genuine
         new event still takes over the glass immediately, same as before,
         but browsing away from an already-adopted state is now respected
-        until something real changes again."""
+        until something real changes again.
+
+        AUTO-RETURN TIMEOUT (2026-08-18): respecting a manual browse
+        forever has its own failure mode -- someone browses to "met"
+        once, forgets, and weather never returns to its smart default
+        even after the real state that prompted the browse is long
+        gone. AUTO_RETURN_SECONDS (600s = 10min) re-runs the forcing
+        logic on a stale-but-unchanged signature, same as if it had
+        just changed -- a real timeout, not a second signal to track."""
         alerts = self.data.get("alerts") or []
         warning = next((a for a in alerts if a.get("kind") == "WARNING"), None)
         sig = (
@@ -16147,9 +16163,13 @@ class WeatherEngine:
             bool(self.data.get("all_clear")),
             bool(self.data.get("hourly")),
         )
+        now = time.time()
         if sig == self._last_adopt_sig:
-            return
+            if (self._adopt_forced_at is not None
+                    and now - self._adopt_forced_at < self.AUTO_RETURN_SECONDS):
+                return
         self._last_adopt_sig = sig
+        self._adopt_forced_at = now
         if warning and (warning.get("polygon") or warning.get("cells")):
             if self.view not in ("radar", self.VIEW_DETAIL, self.VIEW_ALERT):
                 self.view = "radar"
@@ -17897,6 +17917,10 @@ class OwnerNoteEngine:
     ACCENT = (255, 214, 110)
     BODY = (225, 228, 238)     # an OPEN task -- bright, still to do
     URGENT = (255, 96, 90)     # an OPEN task marked "!" -- urgent red
+    ACCENT_STALE = (150, 130, 80)  # header when open items sat unedited a while
+    STALE_AGE_S = 24 * 3600.0      # only saved_at (whole-note) is real; no
+                                    # per-item timestamp exists to be honest
+                                    # about a single task's own age
     DONE = (110, 168, 120)     # a CHECKED task -- calm green, handled
     DONE_INK = (96, 104, 120)  # checked task text -- dimmed, receded
     BOX = (120, 128, 148)      # empty checkbox outline
@@ -18000,8 +18024,17 @@ class OwnerNoteEngine:
 
         done = sum(1 for it in items if it.get("done"))
         tag = f"{done}/{len(items)}"
+        # A stale header (open items sitting untouched a while) is a real,
+        # honest signal -- saved_at is a real timestamp, not a guess. Only
+        # the WHOLE NOTE'S age is real (no per-item timestamp exists), so
+        # this dims the header, not any one row -- never implies a task
+        # itself is old when only the note as a whole hasn't been touched.
+        saved = self.data.get("saved_at")
+        stale = (done < len(items) and isinstance(saved, (int, float))
+                 and time.time() - saved >= self.STALE_AGE_S)
+        header_col = self.ACCENT_STALE if stale else self.ACCENT
         # draw_header fits the title into whatever the tag leaves it.
-        draw_header(buf, title, self.ACCENT, right_tag=tag)
+        draw_header(buf, title, header_col, right_tag=tag)
         draw_divider(buf, 9)
 
         # Reserve the last row for "+N MORE" only when there is genuine
