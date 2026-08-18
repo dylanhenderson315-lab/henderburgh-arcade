@@ -106,9 +106,15 @@ SCOREBOARD_DATED = SCOREBOARD_URL + "?dates={day}"
 
 # One request returns the whole card, so the live tier is genuinely cheap:
 # a fight ending is the single most time-critical event this project has
-# (the result view is the payoff), and 20s is one call per 20s TOTAL, not
-# per fight.
-REFRESH_LIVE = 2.0         # clock + last action -- one cheap card call
+# (the result view is the payoff). REFRESH_LIVE was briefly dropped to
+# 2.0 ("one cheap card call") without the measured justification every
+# other cadence decision in this project cites -- that is 10x the
+# original 20s rate against an undocumented, unofficial API with no
+# published rate limit (see the module's own "ESPN volume risk" note and
+# CLAUDE.md's polling-load section). 5.0 still lands a finish/clock
+# update 4x faster than the original 20s without abandoning the
+# discipline every other feed here follows.
+REFRESH_LIVE = 5.0         # clock + last action -- one cheap card call
 REFRESH_CARD_TODAY = 120.0  # card exists today but nothing live yet
 REFRESH_IDLE = 1800.0      # next card is days away
 ERROR_BACKOFF_BASE = 30.0
@@ -584,7 +590,14 @@ class UfcFeed:
     other FEED here: never blocks the caller, never invents a value, stops
     polling once nothing has read from it for IDLE_STOP."""
 
-    STATS_REFRESH_LIVE = 3.0    # two per-fighter calls + plays, live fight only
+    # 3.0 (three real calls -- two per-fighter stats + one plays call --
+    # every 3s, ~1 req/sec sustained for an entire live fight) was never
+    # measured against this project's own ESPN-volume discipline; the
+    # original STATS_REFRESH_LIVE was 15.0 for the same reason
+    # REFRESH_LIVE above was 20.0. 6.0 halves the original interval
+    # (numbers feel noticeably fresher) without doubling the request
+    # rate a second time on top of that.
+    STATS_REFRESH_LIVE = 6.0    # two per-fighter calls + plays, live fight only
     STATS_REFRESH_DONE = 600.0  # a finished fight's stats don't change once final
 
     def __init__(self):
