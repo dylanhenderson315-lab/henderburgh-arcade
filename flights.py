@@ -1592,7 +1592,16 @@ FOLLOW_REFRESH = 15.0   # flat interval, not adaptive like POSITION_REFRESH's
 # tri-state, and the card/label says so rather than pretending otherwise.
 FAMOUS_AIRCRAFT = (
     # (label, id, kind, note)
-    ("AIR FORCE ONE", "AF1", "callsign",
+    # Real tail numbers, not a guessed callsign -- "AF1" is not a real
+    # ADS-B callsign the VC-25 ever broadcasts (it flies under its own
+    # Air Force tail number/callsign; "Air Force One" is a radio
+    # callsign only while POTUS is aboard, which ADS-B doesn't reflect).
+    # The two real VC-25A airframes are 82-8000 and 92-9000 (US Air
+    # Force serials), which _fetch_follow()'s reg-lookup path expects as
+    # N-less military tail numbers.
+    ("AIR FORCE ONE (82-8000)", "82-8000", "reg",
+     "Usually filtered on ADS-B -- expect NOT AIRBORNE"),
+    ("AIR FORCE ONE (92-9000)", "92-9000", "reg",
      "Usually filtered on ADS-B -- expect NOT AIRBORNE"),
     ("GOODYEAR WINGFOOT ONE", "N1A", "reg", "Goodyear blimp (Zeppelin NT)"),
     ("GOODYEAR WINGFOOT TWO", "N2A", "reg", "Goodyear blimp (Zeppelin NT)"),

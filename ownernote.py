@@ -49,6 +49,11 @@ TITLE_COLS = 14
 
 # Frictionless "check one off" markers a line can start with, phone-typed.
 _DONE_MARKERS = ("x ", "[x]", "[x] ", "* ")
+# A leading "!" pins a task to the top and marks it urgent on the panel.
+# Cheap, same parsing pattern as the done-marker -- no new field a phone
+# textarea can't express, just a second character it can prefix a line
+# with. Order-independent: "! x task" and "x ! task" both parse the same.
+_URGENT_MARKER = "!"
 
 _cache = None
 _mtime = None
@@ -58,17 +63,29 @@ _mtime = None
 # parsing helpers -- turn any typed shape into a clean item list
 # ---------------------------------------------------------------------------
 def _parse_line(line):
-    """One raw text line -> (text, done). A leading `x ` / `[x]` / `* `
-    (case-insensitive) checks the item off; everything else is the task."""
+    """One raw text line -> (text, done, urgent). A leading `x ` / `[x]` /
+    `* ` (case-insensitive) checks the item off; a leading `!` (before or
+    after a done marker) pins/flags it urgent; everything else is the
+    task."""
     s = str(line).strip()
     done = False
-    low = s.lower()
-    for m in _DONE_MARKERS:
-        if low.startswith(m):
-            done = True
-            s = s[len(m):].strip()
+    urgent = False
+    for _ in range(2):
+        if s.startswith(_URGENT_MARKER):
+            urgent = True
+            s = s[1:].strip()
+            continue
+        low = s.lower()
+        matched = False
+        for m in _DONE_MARKERS:
+            if low.startswith(m):
+                done = True
+                s = s[len(m):].strip()
+                matched = True
+                break
+        if not matched:
             break
-    return s, done
+    return s, done, urgent
 
 
 def _lines_to_items(raw):
@@ -76,9 +93,9 @@ def _lines_to_items(raw):
     Blank lines are dropped; each real line is one task."""
     items = []
     for line in str(raw).splitlines():
-        s, done = _parse_line(line)
+        s, done, urgent = _parse_line(line)
         if s:
-            items.append({"text": s, "done": done})
+            items.append({"text": s, "done": done, "urgent": urgent})
     return items
 
 
@@ -96,11 +113,12 @@ def _items_from_any(value):
             if isinstance(it, dict):
                 t = str(it.get("text") or "").strip()
                 if t:
-                    out.append({"text": t, "done": bool(it.get("done"))})
+                    out.append({"text": t, "done": bool(it.get("done")),
+                                "urgent": bool(it.get("urgent"))})
             elif isinstance(it, str):
-                s, done = _parse_line(it)
+                s, done, urgent = _parse_line(it)
                 if s:
-                    out.append({"text": s, "done": done})
+                    out.append({"text": s, "done": done, "urgent": urgent})
         return out
     return []
 
@@ -177,9 +195,15 @@ def save_config(items=None, title=None):
     for it in parsed:
         ft = paneltext.panel_text(it["text"]).strip() if it["text"] else ""
         if ft:
-            folded.append({"text": ft, "done": bool(it["done"])})
+            folded.append({"text": ft, "done": bool(it["done"]),
+                            "urgent": bool(it.get("urgent"))})
         if len(folded) >= MAX_ITEMS:
             break
+    # Urgent items float to the top, stable otherwise -- a priority pin,
+    # not a re-sort of the whole list. Done-ness is untouched by this;
+    # an urgent DONE item still floats (it's a fact about the task, not
+    # a display-only state).
+    folded.sort(key=lambda it: 0 if it["urgent"] else 1)
     ftitle = None
     if title:
         ftitle = paneltext.panel_text(str(title)).strip() or None
@@ -202,7 +226,8 @@ def to_body(cfg):
     checked items prefixed `x `. Round-trips through save_config()."""
     lines = []
     for it in cfg.get("items", []):
-        lines.append(("x " if it.get("done") else "") + it["text"])
+        prefix = ("! " if it.get("urgent") else "") + ("x " if it.get("done") else "")
+        lines.append(prefix + it["text"])
     return "\n".join(lines)
 
 

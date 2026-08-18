@@ -17896,6 +17896,7 @@ class OwnerNoteEngine:
     BG = (0, 0, 0)
     ACCENT = (255, 214, 110)
     BODY = (225, 228, 238)     # an OPEN task -- bright, still to do
+    URGENT = (255, 96, 90)     # an OPEN task marked "!" -- urgent red
     DONE = (110, 168, 120)     # a CHECKED task -- calm green, handled
     DONE_INK = (96, 104, 120)  # checked task text -- dimmed, receded
     BOX = (120, 128, 148)      # empty checkbox outline
@@ -18010,8 +18011,14 @@ class OwnerNoteEngine:
         y = self.LIST_TOP
         for it in items[:shown]:
             is_done = bool(it.get("done"))
+            is_urgent = bool(it.get("urgent"))
             self._draw_check(buf, 2, y, is_done)
-            col = self.DONE_INK if is_done else self.BODY
+            if is_done:
+                col = self.DONE_INK
+            elif is_urgent:
+                col = self.URGENT
+            else:
+                col = self.BODY
             draw_text3x5(buf, self.TEXT_X, y,
                          fit_text(it["text"], self.TEXT_BUDGET), col)
             y += self.ROW_H
