@@ -162,9 +162,23 @@ class AudioSyncFeed:
             sample_smth = peak_pct / 100.0
             sample_raw = sample_smth
             peak = peak_pct >= 80
+            # HTTP peak has no FFT -- self._fft above is only ever the
+            # LAST UDP packet's bands, cached and never cleared when
+            # multicast dies. Without this, a caller on the honest HTTP
+            # replica path would still see a "real" 16-band FFT that is
+            # actually a frozen snapshot from whenever UDP last arrived
+            # (could be hours old) -- exactly the fake-spectrum-by-omission
+            # this module's own docstring promises never happens. Missing
+            # FFT stays missing on this path, full stop.
+            fft = None
+            fft_magnitude = 0.0
+            fft_major_peak = 0.0
         else:
             path = None
             stale = True
+            fft = None
+            fft_magnitude = 0.0
+            fft_major_peak = 0.0
         return {
             "sample_raw": sample_raw, "sample_smth": sample_smth,
             "peak": peak, "fft": fft,
