@@ -433,7 +433,7 @@ const GAMES = {
   nowplaying: {name:'MUSIC',   color:'#ff5ac8', axis:'horizontal',
     note:'Left/right cycles bars, VU, and scope. Last.fm names the track — set it on the control panel.'},
   ownernote: {name:'TODAY',    color:'#ffd66e',
-    note:'Today\'s work sticky. 84 characters. Type it here.'},
+    note:'Today\'s work checklist. One task per line, x to check one off. Type it here.'},
   followflight: {name:'FOLLOW', color:'#ffc85a',
     note:'ICAO callsign only — UAL123, not UA123.'},
   departures: {name:'BOARD',   color:'#78c8ff', axis:'horizontal',
@@ -856,36 +856,69 @@ function buildControls(base, scheme, demo){
 function buildNoteDesk(){
   $('note').innerHTML =
     '<div class="desk">'+
-    '<textarea id="desk-note" placeholder="THE ONE THING TO HOLD ON THE WALL"></textarea>'+
-    '<div class="count" id="desk-note-count">0 / 84</div>'+
+    '<input id="desk-note-title" type="text" placeholder="HEADING (OPTIONAL)" '+
+      'style="width:100%;box-sizing:border-box;margin-bottom:8px;">'+
+    '<textarea id="desk-note" placeholder="One task per line…\nShip the render audit\nx Reply to the plumber\nCall the bank"></textarea>'+
+    '<div class="count" id="desk-note-count">0 tasks</div>'+
     '<div class="row"><button type="button" id="desk-note-save">Save</button>'+
+    '<button type="button" id="desk-note-check">✓ line</button>'+
     '<button type="button" id="desk-note-clear">Clear</button></div>'+
-    '<div class="hint">6 lines × 14 glyphs. Uppercase on the wall. This is today\'s sticky, not a notebook.</div>'+
+    '<div class="hint">Run your day off the wall. One task per line — '+
+    'start a line with <b>x&nbsp;</b> to check it off (or tap ✓ line on the '+
+    'task your cursor is in). ~13 glyphs per line, uppercase on the panel.</div>'+
     '</div>';
   const ta = $('desk-note');
+  const title = $('desk-note-title');
   const count = $('desk-note-count');
-  const paint = (j) => {
-    const n = (j && typeof j.chars === 'number') ? j.chars : (ta.value || '').trim().length;
-    const b = (j && j.budget) || 84;
-    count.textContent = n + ' / ' + b + ((j && j.fits === false) ? ' — crops' : '');
+  let cols = 13, max = 12;
+  const paint = () => {
+    const lines = (ta.value || '').split('\n').map(s => s.trim()).filter(Boolean);
+    let done = 0, over = 0;
+    lines.forEach(l => {
+      if (/^(x |\[x\]\s?|\* )/i.test(l)) done++;
+      if (l.replace(/^(x |\[x\]\s?|\* )/i, '').trim().length > cols) over++;
+    });
+    let t = lines.length + (lines.length === 1 ? ' task' : ' tasks');
+    if (lines.length) t += ' · ' + done + ' done';
+    if (lines.length > max) t += ' — over ' + max + ', wall shows +' + (lines.length - max);
+    if (over) t += ' — ' + over + ' too long, crops';
+    count.textContent = t;
   };
   fetch('/api/note').then(r => r.json()).then(j => {
-    if (j.text) ta.value = j.text;
-    paint(j);
+    if (typeof j.cols === 'number'){ cols = j.cols; max = j.max_items; }
+    if (j.body) ta.value = j.body;
+    if (j.title) title.value = j.title;
+    paint();
   }).catch(() => {});
-  ta.addEventListener('input', () => paint());
+  ta.addEventListener('input', paint);
+  // Toggle the "x " marker on whichever line the cursor sits in.
+  $('desk-note-check').onclick = () => {
+    const v = ta.value, pos = ta.selectionStart;
+    let ls = v.lastIndexOf('\n', pos - 1) + 1;
+    let le = v.indexOf('\n', pos); if (le < 0) le = v.length;
+    let line = v.slice(ls, le);
+    line = /^(x |\[x\]\s?|\* )/i.test(line)
+      ? line.replace(/^(x |\[x\]\s?|\* )/i, '')
+      : 'x ' + line;
+    ta.value = v.slice(0, ls) + line + v.slice(le);
+    ta.focus(); ta.selectionStart = ta.selectionEnd = ls + line.length;
+    paint();
+  };
   $('desk-note-save').onclick = async () => {
     const j = await (await fetch('/api/note', {method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({text: ta.value})})).json();
-    paint(j);
+      body: JSON.stringify({items: ta.value, title: title.value})})).json();
+    if (typeof j.cols === 'number'){ cols = j.cols; max = j.max_items; }
+    if (typeof j.body === 'string') ta.value = j.body;
+    if (typeof j.title !== 'undefined') title.value = j.title || '';
+    paint();
   };
   $('desk-note-clear').onclick = async () => {
-    ta.value = '';
+    ta.value = ''; title.value = '';
     await fetch('/api/note', {method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({text: ''})});
-    paint({chars:0, budget:84, fits:true});
+      body: JSON.stringify({items: '', title: ''})});
+    paint();
   };
 }
 

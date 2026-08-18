@@ -17778,11 +17778,19 @@ class BlogEngine(Browsable):
 
 
 class OwnerNoteEngine:
-    """TODAY -- one work sticky. ownernote.py is the store.
+    """TODAY -- the owner's work checklist. ownernote.py is the store.
 
-    Vestaboard, not a notebook: 6×14 glyphs, no scroll, no keyboard.
-    The phone is the capture surface. The panel holds the one line
-    you need to see from across the room.
+    Reframed 2026-08-17 from a one-line "sticky" into a real work note:
+    an optional heading + a short list of today's line-items, each one
+    checkable, held on the glass until changed. The phone is the capture
+    surface (one task per line, `x ` checks one off); the panel is the
+    glance -- a scannable checklist with a done count, readable from
+    across the room.
+
+    HONEST, like every text surface here: only ever what the owner typed,
+    folded at ownernote.save_config()'s write boundary. Nothing invented,
+    nothing scrolled off the count -- more items than fit show as "+N
+    MORE", a true statement, not a lie.
 
     tick() reads ownernote.load_config()'s mtime cache -- not the disk.
     """
@@ -17792,9 +17800,19 @@ class OwnerNoteEngine:
 
     BG = (0, 0, 0)
     ACCENT = (255, 214, 110)
-    BODY = (225, 228, 238)
+    BODY = (225, 228, 238)     # an OPEN task -- bright, still to do
+    DONE = (110, 168, 120)     # a CHECKED task -- calm green, handled
+    DONE_INK = (96, 104, 120)  # checked task text -- dimmed, receded
+    BOX = (120, 128, 148)      # empty checkbox outline
     INK_DIM = (70, 76, 92)
-    BODY_LINES = ownernote.LINES
+
+    # A checkable row: a 5px box at x=2 + a 4px gap + text from x=11.
+    ROW_H = 8
+    LIST_TOP = 12
+    # y = 12,20,...  last row must keep a 5px glyph inside HEIGHT-5 = 59.
+    LIST_ROWS = (HEIGHT - 5 - LIST_TOP) // ROW_H + 1   # -> 6 rows
+    TEXT_X = 11
+    TEXT_BUDGET = WIDTH - TEXT_X - 2                   # 51px, ~13 glyphs
 
     def __init__(self):
         self.score = 0
@@ -17803,8 +17821,11 @@ class OwnerNoteEngine:
     def reset(self):
         self.data = ownernote.load_config()
 
+    def _items(self):
+        return self.data.get("items") or []
+
     def has_content(self):
-        return bool(self.data.get("text"))
+        return bool(self._items())
 
     def input(self, cmd):
         pass
@@ -17814,34 +17835,94 @@ class OwnerNoteEngine:
 
     def tick(self):
         self.data = ownernote.load_config()
-        self.score = 1 if self.data.get("text") else 0
+        items = self._items()
+        # Score = open items -- the live "work still to do" number, the
+        # honest thing a glance at this mode is asking.
+        self.score = sum(1 for it in items if not it.get("done"))
 
     AMBIENT_STYLE = "fade"
 
     def ambient_weight(self):
+        # Coarse dwell tier: a set note earns a real turn, an empty one a
+        # skippable minimum -- the same shape every other mode here uses.
         return 1.2 if self.has_content() else 0.5
 
     def ambient_interest(self):
-        return 0.45 if self.has_content() else 0.0
+        """0..1 director's eye -- how much does today's note deserve the
+        screen RIGHT NOW. Distinct from ambient_weight()'s coarse tiers:
+        this is fine-grained and comparable across modes, answering
+        "should someone be looking at THIS instead of anything else".
+
+        Every term is real, none invented. A note earns attention for
+        three honest reasons: it EXISTS (the owner put it here on
+        purpose), it has OPEN items (an unchecked checklist is a live
+        reminder; an all-done list is a trophy, worth less), and it is
+        FRESH (just saved from the phone -- surface it while it matters).
+        An empty note scores 0.0 and must never take a turn."""
+        items = self._items()
+        if not items:
+            return 0.0
+        open_n = sum(1 for it in items if not it.get("done"))
+        score = 0.4                       # the owner deliberately set a note
+        if open_n:
+            score += 0.2 + 0.15 * clamp(open_n / 4.0, 0.0, 1.0)
+        saved = self.data.get("saved_at")
+        if isinstance(saved, (int, float)):
+            age = max(0.0, time.time() - saved)
+            score += 0.25 * clamp(1.0 - age / 1800.0, 0.0, 1.0)  # ~30 min
+        return clamp(score, 0.0, 1.0)
+
+    def _draw_check(self, buf, x, y, done):
+        """A 5x5 checkbox at (x,y). Open = outline; done = filled square
+        with a bright tick, so the state reads at a glance, not by color
+        alone."""
+        for i in range(5):
+            put_px(buf, x + i, y, self.BOX)
+            put_px(buf, x + i, y + 4, self.BOX)
+            put_px(buf, x, y + i, self.BOX)
+            put_px(buf, x + 4, y + i, self.BOX)
+        if done:
+            for iy in range(1, 4):
+                for ix in range(1, 4):
+                    put_px(buf, x + ix, y + iy, (30, 60, 38))
+            # a small tick: down-right then up-right
+            put_px(buf, x + 1, y + 2, self.DONE)
+            put_px(buf, x + 2, y + 3, self.DONE)
+            put_px(buf, x + 3, y + 1, self.DONE)
 
     def frame(self):
         buf = blank()
         fill(buf, self.BG)
-        text = self.data.get("text")
+        items = self._items()
+        title = self.data.get("title") or "TODAY"
 
-        if not text:
+        if not items:
             draw_header(buf, "TODAY", self.ACCENT)
-            draw_text_centered(buf, 26, "NO NOTE SET", self.INK_DIM)
-            draw_text_centered(buf, 34, "YET", self.INK_DIM)
+            draw_text_centered(buf, 26, "NO NOTES", self.INK_DIM)
+            draw_text_centered(buf, 34, "SET ON PHONE", self.INK_DIM)
             return bytes(buf)
 
-        draw_header(buf, "TODAY", self.ACCENT)
-        lines = wrap_text(text, WIDTH - 6, self.BODY_LINES)
-        total_h = len(lines) * 8
-        y = max(14, (HEIGHT - total_h) // 2 + 4)
-        for ln in lines:
-            draw_text_centered(buf, y, ln, self.BODY)
-            y += 8
+        done = sum(1 for it in items if it.get("done"))
+        tag = f"{done}/{len(items)}"
+        # draw_header fits the title into whatever the tag leaves it.
+        draw_header(buf, title, self.ACCENT, right_tag=tag)
+        draw_divider(buf, 9)
+
+        # Reserve the last row for "+N MORE" only when there is genuine
+        # overflow, so a note that exactly fits uses every row for a task.
+        overflow = len(items) > self.LIST_ROWS
+        shown = self.LIST_ROWS - 1 if overflow else self.LIST_ROWS
+        y = self.LIST_TOP
+        for it in items[:shown]:
+            is_done = bool(it.get("done"))
+            self._draw_check(buf, 2, y, is_done)
+            col = self.DONE_INK if is_done else self.BODY
+            draw_text3x5(buf, self.TEXT_X, y,
+                         fit_text(it["text"], self.TEXT_BUDGET), col)
+            y += self.ROW_H
+        if overflow:
+            more = len(items) - shown
+            draw_text3x5(buf, self.TEXT_X, y, f"+{more} MORE", self.INK_DIM)
         return bytes(buf)
 
 

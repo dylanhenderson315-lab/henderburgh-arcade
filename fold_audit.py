@@ -303,19 +303,27 @@ def main():
     bad += check("nowplaying track/artist/album",
                  lambda: nowplaying._parse_now_playing(dirty_np))
 
-    # ownernote.py -- the owner's own typed text, folded inside
+    # ownernote.py -- the owner's own typed checklist, folded inside
     # save_config() itself (the write boundary, not render time). Real
     # config is captured and restored so this audit run -- which writes
     # a real dirty note to disk to exercise the real save path, not a
-    # copy of it -- never leaves stray state behind on disk.
+    # copy of it -- never leaves stray state behind on disk. A dirty
+    # heading AND a dirty multi-line task list both go through the real
+    # save path, since both are folded boundaries now.
     import ownernote
     _on_before = ownernote.load_config()
     def _check_ownernote():
-        return ownernote.save_config("Note" + "".join(CANARIES) + " text")
+        canary = "".join(CANARIES)
+        return ownernote.save_config(
+            "Task " + canary + " one\nx Done " + canary + " two",
+            title="Heading " + canary)
     try:
         bad += check("ownernote.save_config", _check_ownernote)
     finally:
-        ownernote.save_config(_on_before.get("text"))
+        # Restore the real prior note through the real save path (items +
+        # title), not a stale {"text"} shape.
+        ownernote.save_config(_on_before.get("items"),
+                              title=_on_before.get("title"))
 
     # ---- the pure text cleaners each feed exposes ------------------------
     import news
