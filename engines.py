@@ -12170,6 +12170,8 @@ class SportsEngine(Browsable, BigMomentSource):
                 ev["atbat_pitches"] = bun["atbat_pitches"]
             if bun.get("line_score"):
                 ev["line_score"] = bun["line_score"]
+            if bun.get("leaders"):
+                ev["leaders"] = bun["leaders"]
         watch = None
         if self.detail:
             watch = next((e for e in self.universal if e.get("id") == self.detail), None)
@@ -14151,6 +14153,54 @@ class SportsEngine(Browsable, BigMomentSource):
             draw_marquee(buf, y, text, self.INK, self.scroll)
         return y + 7
 
+    def _draw_leaders(self, buf, ev, y):
+        """Real per-team top performer, the way baseball's DETAIL shows a
+        real pitcher/batter matchup -- brings player-level data to the
+        team sports (football/basketball/hockey) that otherwise show
+        none. Source is ESPN's own `leaders` array from the same summary
+        bundle the feed already fetches (ZERO extra I/O, see
+        sports._leaders_from_payload). Draws nothing when ESPN hasn't
+        populated leaders yet (honest pre-game empty, never a guessed
+        stat) or when no vertical room remains.
+
+        Each row: 2px team-color rail + short category tag + surname +
+        value, on an empty plate. fit_person keeps the surname when the
+        full name won't fit -- never a bare initial."""
+        leaders = ev.get("leaders") or (
+            sports.FEED.get_summary(ev.get("id")) or {}).get("leaders")
+        if not leaders:
+            return y
+        cmap = {}
+        for c in ev.get("competitors") or []:
+            ab = c.get("abbr")
+            if ab:
+                cmap[ab] = c.get("color")
+        for ld in leaders[:2]:
+            if y > HEIGHT - 5:
+                break
+            name = ld.get("name") or ""
+            if not name:
+                continue
+            cat = ld.get("cat") or ""
+            val = ld.get("value") or ""
+            rail = cmap.get(ld.get("team")) or self.INK_DIM
+            fill_plate(buf, 2, y - 1, WIDTH - 2, y + 6)
+            for by in range(5):
+                for bx in (2, 3):
+                    put_px(buf, bx, y + by, rail)
+            x = 6
+            if cat:
+                draw_text3x5(buf, x, y, cat, self.INK_DIM)
+                x += text_w(cat) + 2
+            vw = text_w(val) if val else 0
+            name_budget = (WIDTH - 4 - (vw + 2 if val else 0)) - x
+            if name_budget >= 8:
+                draw_text3x5(buf, x, y, fit_person(name, name_budget), self.INK)
+            if val:
+                draw_text3x5(buf, WIDTH - 4 - vw, y, val, self.LIVE)
+            y += 7
+        return y
+
     def _draw_timeout_pips(self, buf, ev, y):
         """Home/away timeout dots from real ESPN ints, or y unchanged."""
         sit = ev.get("situation") or {}
@@ -15242,6 +15292,7 @@ class SportsEngine(Browsable, BigMomentSource):
                                    self.INK_DIM)
             y = self._draw_period_line(buf, ev, y)
 
+        y = self._draw_leaders(buf, ev, y)
         odds_line = self._footer_odds_text(ev)
         foot_lines = [x for x in (odds_line, ev.get("series"), ev.get("venue"),
                                   ev.get("broadcast"), ev.get("note")) if x]
@@ -15529,6 +15580,7 @@ class SportsEngine(Browsable, BigMomentSource):
                 y = self._draw_period_line(buf, ev, y)
             y = draw_text_on_empty(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8),
                                    self.INK_DIM)
+            y = self._draw_leaders(buf, ev, y)
             odds_line = self._footer_odds_text(ev)
             foot_lines = [x for x in (odds_line, ev.get("series"), ev.get("venue"),
                                       ev.get("broadcast"), ev.get("note")) if x]
@@ -15557,6 +15609,7 @@ class SportsEngine(Browsable, BigMomentSource):
         y = self._draw_last_play(buf, ev, y)
         y = self._draw_timeout_pips(buf, ev, y)
         y = self._draw_period_line(buf, ev, y)
+        y = self._draw_leaders(buf, ev, y)
         self._draw_win_pct(buf, ev)
         foot_lines = [x for x in (ev.get("series"), ev.get("venue"),
                                   ev.get("broadcast"), ev.get("note")) if x]
@@ -15608,6 +15661,7 @@ class SportsEngine(Browsable, BigMomentSource):
             y = draw_text_on_empty(buf, y, fit_text(ev.get("detail") or "", WIDTH - 8),
                                    self.INK_DIM)
 
+        y = self._draw_leaders(buf, ev, y)
         # Real bug fixed 2026-08-11 (completeness review): dedicated
         # detail renderers built their own hardcoded footer chain and
         # silently stopped showing odds the moment this sport graduated

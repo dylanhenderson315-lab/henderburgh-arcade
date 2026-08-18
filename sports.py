@@ -1471,6 +1471,96 @@ def _win_prob_from_payload(data):
     return float(pct) if isinstance(pct, (int, float)) else None
 
 
+# Display-only short tags for the common headline leader categories.
+# NEVER used to SELECT a category (that is done generically -- see
+# _leaders_from_payload) so a category missing from this map is a
+# cosmetic fallback, never a dropped stat. Confirmed real ESPN category
+# `name` values (NFL live/post + soccer live, 2026-08-17): passingYards,
+# rushingYards, receivingYards, sacks, totalTackles, totalShots,
+# accuratePasses, defensiveInterventions, saves. The rest are the
+# standard basketball/hockey headline names, left mapped so they render
+# tidily whenever ESPN populates them.
+_LEADER_CAT_LABEL = {
+    "passingYards": "PASS", "rushingYards": "RUSH", "receivingYards": "REC",
+    "sacks": "SACK", "totalTackles": "TKL", "interceptions": "INT",
+    "points": "PTS", "rebounds": "REB", "assists": "AST", "blocks": "BLK",
+    "steals": "STL", "goals": "G", "goalsAgainst": "GA", "saves": "SV",
+    "totalShots": "SHOT", "accuratePasses": "PASS",
+    "defensiveInterventions": "DEF",
+}
+
+
+def _leader_label(cat_name):
+    """Short display tag for a leader category. Cosmetic only."""
+    if cat_name in _LEADER_CAT_LABEL:
+        return _LEADER_CAT_LABEL[cat_name]
+    s = "".join(ch for ch in (cat_name or "") if ch.isalpha())
+    return s[:4].upper() if s else ""
+
+
+def _leaders_from_payload(data):
+    """Top statistical leader per team from ESPN's real summary `leaders`.
+
+    ZERO extra I/O -- parsed from the same summary bundle every other
+    per-game fact here already comes from. Brings real, player-level
+    data (the thing baseball's pitcher/batter matchup provides) to the
+    team sports that otherwise show none.
+
+    Takes the FIRST category ESPN lists for each team. ESPN orders these
+    by headline relevance (passing yards for football, points for
+    basketball, etc.), so NO per-sport category name is ever hardcoded
+    or guessed -- the only confirmed-live fact this relies on is the
+    payload SHAPE (leaders[] -> {team, leaders[] -> {name, leaders[] ->
+    {athlete.shortName, value, displayValue}}}), verified 2026-08-17
+    against real NFL and soccer summaries.
+
+    Honestly empty until a game is live/finished: ESPN sends empty
+    category lists pre-game (confirmed on real pre-game NBA/NHL
+    payloads), so this returns [] then rather than a fabricated stat.
+
+    Returns up to 2 entries [{team, cat, name, value}], newest team
+    order as ESPN gave it.
+    """
+    ldrs = data.get("leaders") if isinstance(data, dict) else None
+    if not isinstance(ldrs, list):
+        return []
+    out = []
+    for team in ldrs[:2]:
+        if not isinstance(team, dict):
+            continue
+        cats = team.get("leaders")
+        if not isinstance(cats, list):
+            continue
+        cat = next((c for c in cats
+                    if isinstance(c, dict) and isinstance(c.get("leaders"), list)
+                    and c.get("leaders")), None)
+        if not cat:
+            continue
+        lead = cat["leaders"][0]
+        if not isinstance(lead, dict):
+            continue
+        ath = lead.get("athlete") if isinstance(lead.get("athlete"), dict) else {}
+        name = ath.get("shortName") or ath.get("displayName")
+        if not name:
+            continue
+        val = lead.get("value")
+        if isinstance(val, bool):
+            val = None
+        if isinstance(val, (int, float)):
+            val_s = str(int(val)) if float(val) == int(val) else str(val)
+        else:
+            dv = lead.get("displayValue")
+            val_s = str(dv).strip() if dv else ""
+        tm = (team.get("team") or {}).get("abbreviation")
+        out.append({
+            "team": paneltext.panel_text(tm) if tm else "",
+            "cat": _leader_label(cat.get("name")),
+            "name": paneltext.panel_text(name),
+            "value": paneltext.panel_text(val_s) if val_s else "",
+        })
+    return out
+
+
 def summarize_payload(league, event_id, data):
     """One summary JSON -> every per-game fact the engine reads.
 
@@ -1499,6 +1589,7 @@ def summarize_payload(league, event_id, data):
         "total_rounds": mma_total,
         "atbat_pitches": last_atbat_pitches(_mlb_pitches_from_payload(data)),
         "line_score": _mlb_line_score_from_payload(data),
+        "leaders": _leaders_from_payload(data),
     }
 
 
