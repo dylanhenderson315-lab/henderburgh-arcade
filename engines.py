@@ -16075,6 +16075,7 @@ class WeatherEngine:
         self.sel_key = None      # identity of the selected weather track
         self.sweep = 0.0
         self._auto_detail = False
+        self._last_adopt_sig = None  # see adopt_ambient_view()
 
     # ---- input -----------------------------------------------------------
     def has_content(self):
@@ -16117,9 +16118,38 @@ class WeatherEngine:
 
     def adopt_ambient_view(self):
         """During a warning the desk owns the glass. Watch/outlook
-        stays on hourly or met. Quiet sky is hourly, not a temp card."""
+        stays on hourly or met. Quiet sky is hourly, not a temp card.
+
+        REAL BUG FIXED (2026-08-17): AmbientEngine calls this every single
+        tick while weather is the visible sub-mode (see its call sites),
+        not just when something actually changed. The branches below only
+        ever *steer toward* a target and never yield it back, so any
+        manual up/down browse away from that target (to "met", say) was
+        silently re-forced within one tick (~50ms) any time hourly data,
+        a track, or an alert was present -- which is effectively always
+        once the feed has anything at all. That made manual browsing of
+        weather's own views inside ambient nearly impossible, the exact
+        "browsing while expanded stays expanded" rule this project has
+        already had to learn for flights/sports/satellite. Fixed by only
+        re-running the forcing logic when the underlying real state has
+        actually changed (a new/different warning, a changed track set,
+        all-clear flipping, hourly first becoming available) -- a genuine
+        new event still takes over the glass immediately, same as before,
+        but browsing away from an already-adopted state is now respected
+        until something real changes again."""
         alerts = self.data.get("alerts") or []
         warning = next((a for a in alerts if a.get("kind") == "WARNING"), None)
+        sig = (
+            warning.get("id") if warning else None,
+            bool(warning and (warning.get("polygon") or warning.get("cells"))),
+            tuple(sorted(str(t.get("id")) for t in (self.data.get("tracks") or [])
+                         if t.get("id"))),
+            bool(self.data.get("all_clear")),
+            bool(self.data.get("hourly")),
+        )
+        if sig == self._last_adopt_sig:
+            return
+        self._last_adopt_sig = sig
         if warning and (warning.get("polygon") or warning.get("cells")):
             if self.view not in ("radar", self.VIEW_DETAIL, self.VIEW_ALERT):
                 self.view = "radar"
