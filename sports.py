@@ -3135,6 +3135,21 @@ class SportsFeed:
             gc = self._pinned_from_field(events, golf_player)
             if gc is not None:
                 gev = self.golf_field_event()
+        elif golf_player and gc is not None and gc.get("hole_scores") is None:
+            # Real per-hole data (`hole_scores`) only exists on the FULL
+            # FIELD payload (`_fetch_golf_field()`), not the header's
+            # competitor shape (`_header_competitor()` never parses
+            # nested linescores). A pinned golfer near the top of the
+            # leaderboard is usually found via the header first -- so
+            # without this, hole_scores would only ever populate for a
+            # golfer NOT in the header's top slice, which is backwards
+            # from what a person pinning a leader actually wants. Reuses
+            # `_pinned_from_field()`'s own GOLF_FIELD_REFRESH cache, so
+            # this costs nothing beyond what golf polling already pays.
+            field_gc = self._pinned_from_field(events, golf_player)
+            if field_gc is not None and field_gc.get("hole_scores"):
+                gc = dict(gc)
+                gc["hole_scores"] = field_gc["hole_scores"]
         tev, tc = find_pinned_tennis_player(events, tennis_player)
         return {"events": events, "age": age,
                 "leagues": sorted({(e["sport"], e["league"]) for e in events}),
@@ -3820,6 +3835,32 @@ GOLF_FIELD_URL = "https://site.web.api.espn.com/apis/site/v2/sports/golf/{tour}/
 GOLF_FIELD_REFRESH = 60.0
 
 
+def _golf_played(r):
+    return sum(1 for h in (r.get("linescores") or []) if h.get("value") is not None)
+
+
+def _golf_current_round(rounds, period):
+    """The real CURRENT round dict from a competitor's `linescores`
+    (one entry per round), or None. Shared by `_golf_thru()` and
+    `_golf_hole_scores()` -- same selection logic, not duplicated.
+
+    The event's own `period` is None on this endpoint (unlike the
+    header), and the rounds list always contains ALL FOUR rounds --
+    including future ones with zero holes. So the current round is the
+    LAST one with any holes actually played; taking rounds[-1] always
+    picked an empty round 4."""
+    if not rounds:
+        return None
+    if period:
+        cur = next((r for r in rounds if r.get("period") == period and _golf_played(r)), None)
+        if cur is not None:
+            return cur
+    for r in reversed(rounds):
+        if _golf_played(r):
+            return r
+    return None
+
+
 def _golf_thru(competitor, period):
     """Holes completed in the CURRENT round, or None.
 
@@ -3828,32 +3869,42 @@ def _golf_thru(competitor, period):
     list -- so counting the holes in the current round recovers it rather
     than leaving the most useful number blank.
     """
-    rounds = competitor.get("linescores") or []
-    if not rounds:
-        return None
-
-    def played(r):
-        return sum(1 for h in (r.get("linescores") or []) if h.get("value") is not None)
-
-    # The event's own `period` is None on this endpoint (unlike the
-    # header), and the rounds list always contains ALL FOUR rounds --
-    # including future ones with zero holes. So the current round is the
-    # LAST one with any holes actually played; taking rounds[-1] always
-    # picked an empty round 4 and reported None for everybody.
-    cur = None
-    if period:
-        cur = next((r for r in rounds if r.get("period") == period and played(r)), None)
-    if cur is None:
-        for r in reversed(rounds):
-            if played(r):
-                cur = r
-                break
+    cur = _golf_current_round(competitor.get("linescores") or [], period)
     if cur is None:
         return None
-    n = played(cur)
+    n = _golf_played(cur)
     # 18 means that round is complete, which is "F" on a real leaderboard
     # rather than "thru 18"; the caller renders it as finished.
     return n or None
+
+
+def _golf_hole_scores(competitor, period):
+    """Real per-hole relative-to-par for the CURRENT round, 18 entries
+    (hole 1..18), or None -- confirmed live 2026-08-19 against a real
+    completed round (Wyndham Championship): each nested `linescores[]`
+    entry under the current round carries `period` (real hole number),
+    `displayValue` (real strokes as a string), and
+    `scoreType.displayValue` (real relative-to-par: "-1"/"E"/"+2"/etc).
+    A hole not yet played has no entry -- represented as None in that
+    slot, never a guessed par. Ordered by real hole number, not payload
+    order (not confirmed always sorted)."""
+    cur = _golf_current_round(competitor.get("linescores") or [], period)
+    if cur is None:
+        return None
+    holes = cur.get("linescores") or []
+    by_num = {}
+    for h in holes:
+        n = h.get("period")
+        if not isinstance(n, int) or not (1 <= n <= 18):
+            continue
+        val = h.get("value")
+        if val is None:
+            continue
+        rel = ((h.get("scoreType") or {}).get("displayValue"))
+        by_num[n] = paneltext.panel_text(rel) if isinstance(rel, str) and rel else None
+    if not by_num:
+        return None
+    return [by_num.get(n) for n in range(1, 19)]
 
 
 def _fetch_golf_field(tour):
@@ -3879,6 +3930,7 @@ def _fetch_golf_field(tour):
             "score": paneltext.panel_text(c.get("score")),
             "place": _num_or_none(c.get("order")),
             "thru": _golf_thru(c, period),
+            "hole_scores": _golf_hole_scores(c, period),
             "hole": None, "tee_time": None, "player_state": None,
             "winner": False, "home_away": None, "color": None,
             "alt_color": None, "record": None, "seed": None,

@@ -12697,6 +12697,7 @@ class SportsEngine(Browsable, BigMomentSource):
         self.universal = []
         self.ucur = 0
         self.detail = None            # event id being shown expanded, or None
+        self.golf_scorecard = False   # real per-hole view, toggled by rotate on the golf panel
         self._score_lock_id = None    # event a scoring takeover just landed on
         self._score_lock_ticks = 0
         # Pinned golfer, resolved by the feed each poll.
@@ -13280,6 +13281,17 @@ class SportsEngine(Browsable, BigMomentSource):
         # it. `drop` is a second way back, and still toggles auto-advance
         # from the list, which is what it has always done there.
         if cmd == "rotate":
+            # SCORECARD (2026-08-19): while the golf panel itself is
+            # showing, `rotate` toggles the real per-hole scorecard
+            # instead of select-to-expand -- the golf panel isn't a
+            # ticker event, so falling through to the generic
+            # "expand whatever the ticker cursor points at, then jump
+            # to the events panel" behaviour below would yank the
+            # viewer OUT of golf entirely, which is backwards for a
+            # button pressed while looking AT golf.
+            if self._panel() == self.PANEL_GOLF:
+                self.golf_scorecard = not self.golf_scorecard
+                return
             if self.detail is not None:
                 self.detail = None
             else:
@@ -13335,6 +13347,8 @@ class SportsEngine(Browsable, BigMomentSource):
             self.panel_i %= len(self.panels)
         else:
             self.panel_i = 0
+        if self._panel() != self.PANEL_GOLF:
+            self.golf_scorecard = False   # never stuck open once the auto-cycle moves on
         games = self.data.get("games") or []
         # ENRICH the universal events with per-league detail the header
         # does not carry. The header has bases and outs but NOT the count
@@ -14084,6 +14098,84 @@ class SportsEngine(Browsable, BigMomentSource):
         else:
             draw_text_centered(buf, 56, fit_text(ev.get("name") or "", WIDTH - 8),
                                self.INK_DIM, x_min=3)
+        return bytes(buf)
+
+    # Real per-hole relative-to-par -> a broadcast "birdie board" color,
+    # not text -- 18 holes worth of "-1"/"E"/"+2" strings has no honest
+    # way to fit as readable text at this resolution, and a colored dot
+    # per hole is a real, standard golf-broadcast convention for exactly
+    # this at-a-glance question ("how did they do on each hole").
+    HOLE_EAGLE = (60, 255, 140)
+    HOLE_BIRDIE = (90, 220, 120)
+    HOLE_PAR = (150, 160, 185)
+    HOLE_BOGEY = (255, 170, 60)
+    HOLE_DOUBLE = (255, 70, 70)
+    HOLE_UNPLAYED = (30, 30, 40)
+
+    @classmethod
+    def _hole_color(cls, rel_text):
+        """Real relative-to-par string ("-1"/"E"/"+2"/None) -> a color.
+        None (hole not yet played) is the dim unplayed slot, never a
+        guessed color."""
+        if not rel_text:
+            return cls.HOLE_UNPLAYED
+        if rel_text == "E":
+            return cls.HOLE_PAR
+        try:
+            n = int(rel_text)
+        except ValueError:
+            return cls.HOLE_UNPLAYED
+        if n <= -2:
+            return cls.HOLE_EAGLE
+        if n == -1:
+            return cls.HOLE_BIRDIE
+        if n == 0:
+            return cls.HOLE_PAR
+        if n == 1:
+            return cls.HOLE_BOGEY
+        return cls.HOLE_DOUBLE
+
+    def _frame_golf_scorecard(self):
+        """Real per-hole scorecard for the pinned golfer's CURRENT round
+        -- reached by pressing rotate while the golf panel is showing
+        (see input()). 18 real holes as two 9-hole rows of colored
+        squares (front 9 / back 9), each colored by the real relative-
+        to-par ESPN reported for that hole; an unplayed hole stays a
+        dim outline rather than a guessed color. Only reachable when
+        `hole_scores` is real data (see sports._golf_hole_scores()) --
+        the caller already checks this before dispatching here."""
+        buf = blank(); fill(buf, self.BG)
+        accent = self.SPORT_ACCENT["golf"]
+        draw_header(buf, "SCORECARD", accent)
+
+        c = self.golf_pinned or {}
+        name = c.get("abbr") or c.get("full") or "-"
+        draw_text3x5(buf, 2, 11, fit_text(name, WIDTH - 4), self.HERO_INK)
+
+        holes = c.get("hole_scores") or [None] * 18
+        cell = 6
+        x0 = 3
+
+        def draw_row(y, label, rng):
+            draw_text3x5(buf, 2, y, label, self.INK_DIM)
+            for i, hole_n in enumerate(rng):
+                col = self._hole_color(holes[hole_n - 1] if hole_n - 1 < len(holes) else None)
+                x = x0 + i * cell
+                for dx in range(4):
+                    for dy in range(4):
+                        put_px(buf, x + dx, y + 8 + dy, col)
+
+        draw_row(19, "FRONT", range(1, 10))
+        draw_row(35, "BACK", range(10, 19))
+
+        # Real totals -- reuse the same PAR/POS numbers the main golf
+        # view shows, so this card and that one never disagree.
+        par = c.get("score") or "-"
+        thru = c.get("thru")
+        foot = f"THRU {thru}" if thru else (c.get("player_state") == "pre" and "NOT STARTED" or "")
+        draw_text3x5(buf, 2, HEIGHT - 12, f"PAR {par}", self.HERO_INK)
+        if foot:
+            draw_text3x5(buf, WIDTH - 4 - text_w(foot), HEIGHT - 12, foot, self.INK_DIM)
         return bytes(buf)
 
     def _golf_tied(self, place):
@@ -16537,6 +16629,8 @@ class SportsEngine(Browsable, BigMomentSource):
         if panel == self.PANEL_TEAM:
             return self._frame_pinned()
         if panel == self.PANEL_GOLF:
+            if self.golf_scorecard and (self.golf_pinned or {}).get("hole_scores"):
+                return self._frame_golf_scorecard()
             return self._frame_golf_pinned()
         if panel == self.PANEL_TENNIS:
             return self._frame_tennis_pinned()
