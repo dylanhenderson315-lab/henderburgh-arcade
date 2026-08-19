@@ -10771,19 +10771,21 @@ class MoonEngine:
     # Real ORDER is preserved exactly; real SPACING is not, on purpose,
     # so every ring is wide enough to read as its own orbit and every
     # dot sits far enough from its neighbors to stay distinguishable.
-    # Capped at 16 (not the panel's own max radius) -- the selection
-    # Pushed as large as the panel allows -- direct owner ask ("make it
-    # as big as possible for it to be visually stunning"). The
-    # selection ring + direction tick add up to 4px BEYOND a planet's
-    # own ring radius (see _frame_planets_orbit), and the header/footer
-    # text rows leave roughly a 47px vertical window; 19 + 4 fits that
-    # window with real margin, found by empirically stress-testing
-    # increasing radii via render_audit.Audit (every planet, 8 worst-
-    # case angles, selected) until clipping appeared, then backing off
-    # -- not hand-derived and hoped correct.
+    # Pushed to the real panel limit -- direct owner ask, twice over:
+    # "make it as big as possible", then "make it even bigger... not
+    # all bunched together". GENUINELY EVENLY SPACED (~2.4px steps),
+    # not proportional to real AU or a sqrt curve -- both of those
+    # compressed the outer four rings against each other, which is
+    # exactly the "bunched together" complaint. The selection ring +
+    # direction tick add up to 4px beyond a planet's own ring (see
+    # _frame_planets_orbit), and the minimal header + footer text row
+    # leave a real ~54px vertical window; 23 + 4 fits with real margin,
+    # found by empirically stress-testing increasing radii via
+    # render_audit.Audit (every planet, 8 worst-case angles, selected)
+    # until clipping appeared, then backing off -- not hand-derived.
     ORBIT_RADIUS = {
-        "MERCURY": 6, "VENUS": 8, "EARTH": 10, "MARS": 12,
-        "JUPITER": 15, "SATURN": 16, "URANUS": 18, "NEPTUNE": 19,
+        "MERCURY": 6, "VENUS": 8, "EARTH": 11, "MARS": 13,
+        "JUPITER": 16, "SATURN": 18, "URANUS": 20, "NEPTUNE": 23,
     }
     # Real relative size tier -- Venus/Earth genuinely larger than
     # Mercury/Mars; Jupiter/Saturn genuinely dwarf Uranus/Neptune. Not
@@ -10809,36 +10811,50 @@ class MoonEngine:
         idx = self.ORBIT_ORDER.index(name) if name in self.ORBIT_ORDER else 0
         return 2 * math.pi * idx / len(self.ORBIT_ORDER)
 
+    @staticmethod
+    def _minimal_header(buf, accent):
+        """A 2px accent rule ONLY -- no title text. Every other mode in
+        this project uses the full draw_header() (rule + title), but
+        the orbit/moons views are the two places size was explicitly
+        asked to be maximized twice over ("as big as possible... not
+        all bunched together"); the full header's title row costs ~7px
+        of real vertical room this diagram needs more than the title
+        text does (the SPACE hub's own page-dot indicator, plus the
+        bottom info line naming whatever's selected, already say what
+        screen this is). Keeps the ONE piece of the header convention
+        that matters most at a glance from across a room -- the colour
+        rule -- and spends the rest on the actual content."""
+        for x in range(WIDTH):
+            put_px(buf, x, 0, accent)
+            put_px(buf, x, 1, rim(accent, 0.45))
+
     def _frame_planets_orbit(self):
         """Every real planet, ALWAYS visible, ALWAYS distinguishable,
-        AND genuinely orbiting the Sun -- direct owner feedback across
-        two rounds: first "i literally do not see them on the led
-        board... want to see every planet and distinguish which one",
-        then "the planets have to be orbiting the sun" once a fixed
-        grid layout fixed visibility but stopped looking like a solar
-        system.
+        genuinely orbiting the Sun, and as LARGE as this panel can
+        honestly fit -- direct owner feedback across three rounds:
+        "i literally do not see them... want to see every planet and
+        distinguish which one", then "the planets have to be orbiting
+        the sun", then "make it even bigger... not all bunched
+        together."
 
-        This version keeps what fixed the visibility bug (every planet
-        ALWAYS draws, at a real size tier, never blocked on live data
-        having arrived yet) while restoring the actual orbit picture:
-        the Sun sits at the real centre, and every planet sits on its
-        own FIXED, WIDELY-SPACED ring (ORBIT_RADIUS, real outward
-        order preserved, real AU spacing deliberately NOT used -- that
-        was the original design's failure mode, collapsing the inner
-        planets onto the Sun) at its REAL current angle around the Sun
-        (from moon.py's real Horizons position, dead-reckoned the same
-        as always -- see _orbit_angle()). A planet with no live angle
-        yet still sits on its own real ring, at an honest placeholder
-        angle, rather than vanishing.
+        Every real planet ALWAYS draws (never blocked on live Horizons
+        data having arrived), at a real size tier, on its own FIXED,
+        EVENLY-SPACED ring (ORBIT_RADIUS -- real Mercury-outward order
+        preserved, but spaced in genuinely equal ~2-3px steps, not
+        real AU proportions, specifically so the outer four rings
+        never bunch up against each other the way a proportional or
+        sqrt scale both did), at its REAL current angle around the Sun.
+        The header is deliberately minimal (see _minimal_header) to
+        give the diagram the most real room this panel can spare.
         """
         buf = blank()
         fill(buf, self.BG)
-        draw_header(buf, "SOLAR SYSTEM", self.ACCENT)
+        self._minimal_header(buf, self.ACCENT)
         orbits = self.data.get("orbits") or {}
         names = self._orbit_selectable()
         sel_name = names[self.planet_idx % len(names)] if names else None
 
-        cx, cy = 32, 33
+        cx, cy = 32, 30
 
         # Real fixed orbit rings -- faint, so the planets read as the
         # actual content, but present enough that the circular
@@ -10992,43 +11008,56 @@ class MoonEngine:
         """Real zoomed-in moon system for WHICHEVER planet was selected
         (self.zoomed_planet) -- direct owner ask ("do every planet's
         moons... select planet, zoomed in look where we can see the
-        moons"). The planet sits at centre (a real filled disc, its own
-        real color, sized larger than any moon the way a planet
-        genuinely dwarfs them), its real moons at their REAL current
-        position (moon.py's own real Horizons fetch, moon.PLANET_MOONS),
-        dead-reckoned between real fetches the same way every other body
-        on this hub now is. Mercury/Venus never reach this view -- they
-        have zero real moons, so _cycle_planet_view() never offers it
-        for them, an honest omission rather than an empty screen.
+        moons"), then "make the moons view just as big and stunning"
+        once the solar-system view got the same treatment.
 
-        Real moon orbital radii (km, public reference data, used only
-        for the ring paths, exactly like ORBIT_AU is for planets) can
-        span a wide range within one system (Neptune's Proteus at
-        117,647km vs. Triton at 354,760km) -- sqrt-scaling again, same
-        honest-fit reasoning as the solar system view.
+        Same redesign as _frame_planets_orbit, for the same reason:
+        real km-proportional (sqrt-scaled) distance made the innermost
+        real moons collapse toward the planet, invisible and unable to
+        be individually selected. Every real moon now gets its own
+        FIXED, EVENLY-SPACED ring (real orbital ORDER preserved --
+        moon.PLANET_MOONS is already ascending by real distance -- real
+        spacing is not) and ALWAYS draws there, whether or not its live
+        Horizons position has landed yet. Saturn's real ring bands
+        still scale off REAL km (see _draw_saturn_rings) using a scale
+        factor derived from wherever Mimas -- the innermost real moon
+        -- actually landed in this fixed scheme, so the rings stay
+        correctly proportioned relative to the real moon orbits around
+        them, not just relative to the planet disc.
         """
         buf = blank()
         fill(buf, self.BG)
         planet = self.zoomed_planet
         real_moons = moon.PLANET_MOONS.get(planet) or []
-        draw_header(buf, f"{planet} SYSTEM" if planet else "MOONS", self.ACCENT, right_tag="MOONS")
+        self._minimal_header(buf, self.ACCENT)
         have = (self.data.get("moons") or {}).get(planet) or {}
         cx, cy = 32, 30
-        r_max = 27
-        ring_km = {name: km for _id, name, km in real_moons}
-        km_max = max(ring_km.values()) if ring_km else 1.0
 
-        def scaled_r(km):
-            return min(r_max, r_max * math.sqrt(max(0.0, km) / km_max))
+        # Evenly spaced real orbital slots -- innermost real moon at
+        # MOON_INNER_R, outermost at MOON_OUTER_R, real order preserved,
+        # real distance NOT (that was the bunching bug). A single-moon
+        # system (Earth, Neptune's headline Triton aside) still gets a
+        # generous ring rather than sitting right on the planet.
+        inner_r, outer_r = 7, 23
+        n = max(1, len(real_moons))
+        step = (outer_r - inner_r) / (n - 1) if n > 1 else 0
+        slot_r = {name: inner_r + step * i for i, (_id, name, _km) in enumerate(real_moons)}
 
-        for sx, sy in self._STARS:
-            put_px(buf, sx, sy, (60, 62, 78))
+        # Saturn's real ring bands need a real km->px scale -- derived
+        # from wherever Mimas (the innermost real moon) landed in the
+        # fixed scheme above, so the rings stay correctly proportioned
+        # to the real moon orbits, not an arbitrary second scale.
+        def saturn_scaled_r(km):
+            mimas_km = next((k for _id, nm, k in real_moons if nm == "MIMAS"), None)
+            mimas_r = slot_r.get("MIMAS")
+            if not mimas_km or not mimas_r:
+                return 0.0
+            return min(mimas_r - 1, km / mimas_km * mimas_r)
 
-        for name, km in ring_km.items():
-            rr = scaled_r(km)
-            n = max(20, int(rr * 3.2))
-            for i in range(n):
-                a = 2 * math.pi * i / n
+        for name, rr in slot_r.items():
+            n_pts = max(20, int(rr * 3.2))
+            for i in range(n_pts):
+                a = 2 * math.pi * i / n_pts
                 put_px(buf, int(round(cx + rr * math.cos(a))),
                        int(round(cy + rr * math.sin(a))), (30, 34, 26))
 
@@ -11039,35 +11068,36 @@ class MoonEngine:
         planet_col = rim(self.PLANET_COLOR.get(planet, self.INK), pulse)
 
         if planet == "SATURN":
-            self._draw_saturn_rings(buf, cx, cy, scaled_r, dim=pulse)
+            self._draw_saturn_rings(buf, cx, cy, saturn_scaled_r, dim=pulse)
 
         for dx in range(-2, 3):
             for dy in range(-2, 3):
                 if dx * dx + dy * dy <= 5:
                     put_px(buf, cx + dx, cy + dy, planet_col)
 
-        names = [name for _id, name, _km in real_moons if name in have]
+        names = [name for _id, name, _km in real_moons]
         self.planet_idx %= max(1, len(names))
         sel_name = names[self.planet_idx] if names else None
 
         for _id, name, _km in real_moons:
             o = have.get(name)
-            if not o:
-                continue
-            dr_key = f"{planet}:{name}"
-            x, y = self._orbit_xy(dr_key, {"x_au": o["x_km"], "y_au": o["y_km"]},
-                                   cx, cy, scaled_r, max_extrap_s=self.MOON_MAX_EXTRAP_S)
+            ang = self._orbit_angle(f"{planet}:{name}",
+                                     {"x_au": o["x_km"], "y_au": o["y_km"]} if o else None)
+            rr = slot_r[name]
+            x = int(round(cx + rr * math.cos(ang)))
+            y = int(round(cy + rr * math.sin(ang)))
             col = self.MOON_COLOR.get(name, self.INK)
             selected = name == sel_name
+            base_col = col if o else rim(col, 0.55)   # dim, not absent, while still locating
             if selected:
                 pulse2 = 0.75 + 0.25 * math.sin(self.ticks * 0.08)
                 ring_white = rim((255, 255, 255), pulse2)
                 for dx, dy in ((0, -3), (0, 3), (-3, 0), (3, 0)):
                     put_px(buf, x + dx, y + dy, ring_white)
-            put_px(buf, x, y, col)
-            put_px(buf, x + 1, y, col)
+            put_px(buf, x, y, base_col)
+            put_px(buf, x + 1, y, base_col)
 
-        y = 57
+        y = 58
         if sel_name:
             o = have.get(sel_name)
             if o:
