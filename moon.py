@@ -80,10 +80,17 @@ USNO_URL = ("https://aa.usno.navy.mil/api/rstt/oneday"
             "?date={date}&coords={lat},{lon}&tz={tz}")
 LL2_URL = "https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit=5&mode=list"
 HORIZONS_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
+CAD_URL = "https://ssd-api.jpl.nasa.gov/cad.api"   # real, free, keyless close-approach data
 
 USNO_REFRESH = 3600.0 * 6   # real rise/set/illumination is a once-a-day fact; 6h keeps it current across a long-running day
 LAUNCH_REFRESH = 3600.0     # respect LL2's real ~15/hr soft limit by a wide margin
 PLANET_REFRESH = 3600.0     # per planet -- Horizons is a research tool, not built for tight polling
+NEO_LIST_REFRESH = 3600.0 * 6   # real close-approach list -- new ones don't appear that often
+NEO_VECTOR_REFRESH = 900.0      # real position for the CURRENT tracked NEO, refreshed often
+                                 # since a close-approaching NEO genuinely moves fast (see
+                                 # MoonEngine's own dead-reckoning docstring for why 15min is
+                                 # still not "live" and why extrapolation matters more here
+                                 # than for any planet)
 IDLE_STOP = 120.0
 TIMEOUT = 8.0
 _UA = "Mozilla/5.0 (HenderburghArcade)"
@@ -99,6 +106,17 @@ ORBIT_BODIES = PLANETS + [("399", "EARTH")]   # real heliocentric x/y, see
                                                 # Earth included so the
                                                 # orbit diagram can show
                                                 # where WE are too.
+# Real Galilean moons of Jupiter (Io/Europa/Ganymede/Callisto), the
+# single most recognizable real moon system to point a hobbyist at --
+# direct owner ask ("select planet, zoomed in look where we can see
+# the moons"). Scoped to Jupiter only for this pass (Saturn/Mars are a
+# natural next step, same technique, not built yet -- an honest scope
+# limit, not an oversight).
+JUPITER_MOONS = [("501", "IO"), ("502", "EUROPA"), ("503", "GANYMEDE"), ("504", "CALLISTO")]
+JUPITER_ID = "599"
+MOON_VECTOR_REFRESH = 1800.0   # 30min -- moons orbit fast (Io: 1.77 real days), worth
+                                # refreshing more often than a planet's own slow orbit
+
 SUN_ID = "10"   # real Horizons body id -- fetched the same way as a planet
                 # (see _refresh_one_planet's round-robin), but kept OUT of
                 # PLANETS: it's not a planet to browse, it's real day/night
@@ -283,6 +301,98 @@ def _fetch_planet_vector(body_id):
     return _parse_horizons_vector(data.get("result") if isinstance(data, dict) else None)
 
 
+def _fetch_closest_neo():
+    """Real closest upcoming near-Earth-object close approach in the
+    next 30 days, via JPL's Center for NEO Studies CAD (Close-Approach
+    Data) API -- confirmed live 2026-08-19, free, keyless, no signup
+    (a genuinely different, separate JPL service from api.nasa.gov's
+    NeoWs, which DOES need a key -- this one does not). Real fields:
+    `des` (designation, e.g. "2026 PX"), `cd` (close-approach date/
+    time), `dist` (real AU distance at closest approach), `v_rel`
+    (real relative velocity, km/s), `h` (real absolute magnitude).
+    Returns None on any real failure or an empty result -- there is
+    always SOME close approach within 30 days in practice, but an
+    honest empty read is possible and must not be masked."""
+    params = {
+        "date-min": time.strftime("%Y-%m-%d"),
+        "date-max": time.strftime("%Y-%m-%d", time.gmtime(time.time() + 30 * 86400)),
+        "dist-max": "0.2", "sort": "dist",
+    }
+    url = CAD_URL + "?" + urllib.parse.urlencode(params)
+    data = _get_json(url)
+    if not isinstance(data, dict):
+        return None
+    fields = data.get("fields")
+    rows = data.get("data")
+    if not (isinstance(fields, list) and isinstance(rows, list) and rows):
+        return None
+    row = dict(zip(fields, rows[0]))
+    des = paneltext.panel_text(row.get("des") or "") or None
+    if not des:
+        return None
+    try:
+        dist_au = float(row.get("dist"))
+    except (TypeError, ValueError):
+        dist_au = None
+    try:
+        v_rel = float(row.get("v_rel"))
+    except (TypeError, ValueError):
+        v_rel = None
+    try:
+        h_mag = float(row.get("h"))
+    except (TypeError, ValueError):
+        h_mag = None
+    return {"des": des, "cd": paneltext.panel_text(row.get("cd") or "") or None,
+            "dist_au": dist_au, "v_rel": v_rel, "h": h_mag}
+
+
+def _fetch_smallbody_vector(designation):
+    """Real heliocentric (x_au, y_au) for a real small body (asteroid/
+    comet), via the SAME Horizons VECTORS call `_fetch_planet_vector()`
+    uses, just with the small-body COMMAND syntax (`DES=<designation>;`
+    -- confirmed live 2026-08-19 against a real CAD-listed object,
+    "2026 PX"). Small bodies are perturbed orbits Horizons integrates
+    numerically (`Small perturbers: Yes` in the real response), same
+    real ephemeris service as every planet here, not a second-class
+    approximation."""
+    now = datetime.utcnow()
+    start = now.strftime("%Y-%m-%d")
+    stop = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    params = {
+        "format": "json", "COMMAND": f"'DES={designation};'", "OBJ_DATA": "NO",
+        "MAKE_EPHEM": "YES", "EPHEM_TYPE": "VECTORS",
+        "CENTER": "'500@10'", "REF_PLANE": "ECLIPTIC", "OUT_UNITS": "'AU-D'",
+        "VEC_TABLE": "'1'",
+        "START_TIME": f"'{start}'", "STOP_TIME": f"'{stop}'", "STEP_SIZE": "'1 d'",
+    }
+    url = HORIZONS_URL + "?" + urllib.parse.urlencode(params)
+    data = _get_json(url)
+    return _parse_horizons_vector(data.get("result") if isinstance(data, dict) else None)
+
+
+def _fetch_moon_vector(moon_id, planet_id):
+    """Real (x_km, y_km) of a real moon RELATIVE TO ITS PLANET (not the
+    Sun) -- CENTER='500@<planet_id>' is Horizons' real body-centered
+    frame syntax, confirmed live 2026-08-19 against Io/Jupiter (parsed
+    ~421,700km from Jupiter, matching Io's real ~421,800km orbital
+    radius). KM-S units here, not AU -- a moon's real orbital distance
+    is naturally thousands of km, not a fraction of an AU."""
+    now = datetime.utcnow()
+    start = now.strftime("%Y-%m-%d")
+    stop = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    params = {
+        "format": "json", "COMMAND": f"'{moon_id}'", "OBJ_DATA": "NO",
+        "MAKE_EPHEM": "YES", "EPHEM_TYPE": "VECTORS",
+        "CENTER": f"'500@{planet_id}'", "REF_PLANE": "ECLIPTIC", "OUT_UNITS": "'KM-S'",
+        "VEC_TABLE": "'1'",
+        "START_TIME": f"'{start}'", "STOP_TIME": f"'{stop}'", "STEP_SIZE": "'1 d'",
+    }
+    url = HORIZONS_URL + "?" + urllib.parse.urlencode(params)
+    data = _get_json(url)
+    v = _parse_horizons_vector(data.get("result") if isinstance(data, dict) else None)
+    return {"x_km": v["x_au"], "y_km": v["y_au"]} if v else None
+
+
 def _fetch_planet(body_id, lat, lon):
     """Real az/el/mag/distance for one planet from home, right now, via
     JPL Horizons -- or None on any real failure. A ~2h observer window
@@ -316,10 +426,19 @@ class MoonFeed:
         self._planets = {}          # name -> {az_deg, el_deg, mag, dist_au}
         self._sun = {}               # real {az_deg, el_deg} -- day/night context, see SUN_ID
         self._orbits = {}           # name -> {x_au, y_au}, real heliocentric, see ORBIT_BODIES
+        self._orbits_ts = {}        # name -> real wall time of that fetch, for dead-reckoning
         self._orbit_cursor = 0
         self._orbit_try = {}
         self._planet_cursor = 0
         self._planet_try = {}       # name -> last-fetch wall time
+        self._neo = None            # real closest upcoming close-approach, see _fetch_closest_neo
+        self._neo_try = 0.0
+        self._neo_vec_try = 0.0
+        self._neo_ts = 0.0          # real wall time of the NEO's own last vector fetch
+        self._jmoons = {}           # name -> {x_km, y_km}, real, relative to Jupiter
+        self._jmoons_ts = {}
+        self._jmoon_cursor = 0
+        self._jmoon_try = {}
         self._last_read = 0.0
         self._thread = None
         self._home = satellite.FEED.get_location()
@@ -336,13 +455,19 @@ class MoonFeed:
             planets = {k: dict(v) for k, v in self._planets.items()}
             sun = dict(self._sun) if self._sun else None
             orbits = {k: dict(v) for k, v in self._orbits.items()}
+            orbits_ts = dict(self._orbits_ts)
+            neo = dict(self._neo) if self._neo else None
+            neo_ts = self._neo_ts
+            jmoons = {k: dict(v) for k, v in self._jmoons.items()}
+            jmoons_ts = dict(self._jmoons_ts)
             err = self._usno_err or self._launch_err
             age = (now - self._usno_try) if self._usno_try else None
         self._ensure_thread()
         out = {
             "configured": satellite.FEED.configured,
             "age": age, "err": err, "launch": launch, "planets": planets, "sun": sun,
-            "orbits": orbits,
+            "orbits": orbits, "orbits_ts": orbits_ts, "neo": neo, "neo_ts": neo_ts or None,
+            "jmoons": jmoons, "jmoons_ts": jmoons_ts,
         }
         out.update(usno)
         return out
@@ -364,7 +489,36 @@ class MoonFeed:
             self._refresh_launch()
             self._refresh_one_planet()
             self._refresh_one_orbit()
+            self._refresh_neo_list()
+            self._refresh_neo_vector()
+            self._refresh_one_jmoon()
             time.sleep(5.0)
+
+    def _refresh_one_jmoon(self):
+        """Round-robin, same shape as _refresh_one_orbit() -- at most one
+        Galilean moon's real Jupiter-relative position per loop pass.
+        Always kept warm alongside everything else here (cheap: 4 real
+        bodies, 30min cadence) rather than gated on whether the moon
+        zoom view is currently open -- the SAME "tick every sub-thing so
+        switching to it is never cold" reasoning AmbientEngine's own
+        composed sub-engines already follow."""
+        now = time.time()
+        for _ in range(len(JUPITER_MOONS)):
+            moon_id, name = JUPITER_MOONS[self._jmoon_cursor]
+            self._jmoon_cursor = (self._jmoon_cursor + 1) % len(JUPITER_MOONS)
+            if now - self._jmoon_try.get(name, 0.0) < MOON_VECTOR_REFRESH:
+                continue
+            self._jmoon_try[name] = now
+            try:
+                parsed = _fetch_moon_vector(moon_id, JUPITER_ID)
+            except (urllib.error.URLError, TimeoutError, ValueError,
+                    json.JSONDecodeError, OSError, KeyError):        # noqa: BLE001
+                return
+            if parsed is not None:
+                with self._lock:
+                    self._jmoons[name] = parsed
+                    self._jmoons_ts[name] = now
+            return
 
     def _refresh_one_orbit(self):
         """Round-robin, same shape as _refresh_one_planet(): at most ONE
@@ -386,7 +540,50 @@ class MoonFeed:
             if parsed is not None:
                 with self._lock:
                     self._orbits[name] = parsed
+                    self._orbits_ts[name] = now
             return
+
+    def _refresh_neo_list(self):
+        now = time.time()
+        with self._lock:
+            if now - self._neo_try < NEO_LIST_REFRESH:
+                return
+            self._neo_try = now
+        try:
+            neo = _fetch_closest_neo()
+        except (urllib.error.URLError, TimeoutError, ValueError,
+                json.JSONDecodeError, OSError, KeyError):        # noqa: BLE001
+            return
+        if neo is not None:
+            with self._lock:
+                # A genuinely NEW closest object resets the vector cadence
+                # so its real position is fetched again right away, not
+                # left showing the PREVIOUS object's stale position under
+                # the new one's label.
+                if not self._neo or self._neo.get("des") != neo.get("des"):
+                    self._neo_vec_try = 0.0
+                self._neo = neo
+
+    def _refresh_neo_vector(self):
+        now = time.time()
+        with self._lock:
+            if now - self._neo_vec_try < NEO_VECTOR_REFRESH:
+                return
+            des = (self._neo or {}).get("des")
+        if not des:
+            return
+        with self._lock:
+            self._neo_vec_try = now
+        try:
+            parsed = _fetch_smallbody_vector(des)
+        except (urllib.error.URLError, TimeoutError, ValueError,
+                json.JSONDecodeError, OSError, KeyError):        # noqa: BLE001
+            return
+        if parsed is not None:
+            with self._lock:
+                if (self._neo or {}).get("des") == des:   # still the same real object
+                    self._neo.update(parsed)
+                    self._neo_ts = now
 
     def _refresh_one_planet(self):
         """Round-robin: at most ONE body fetched per loop pass, and only

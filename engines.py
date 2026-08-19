@@ -10535,7 +10535,9 @@ class MoonEngine:
         self.ticks = 0
         self.view = "moon"
         self.planet_idx = 0
-        self.planet_view = "orbit"   # "orbit" (real heliocentric top-down) | "dome" (real az/el sky)
+        self.planet_view = "orbit"   # "orbit" (real heliocentric top-down) | "moons" (Jupiter zoom) | "dome" (real az/el sky)
+        self._orbit_dr = {}          # name -> {x0,y0,t0,vx,vy} real dead-reckoning state
+        self._orbit_prev_ts = {}     # name -> last-seen fetch timestamp, to detect a NEW real sample
 
     def has_content(self):
         return bool(self.data.get("curphase")) or bool(self.data.get("launch"))
@@ -10543,22 +10545,63 @@ class MoonEngine:
     def ambient_weight(self):
         return 1.3 if self.has_content() else 0.5
 
+    def _browsable_names(self):
+        """Real names for whichever sub-view is currently showing --
+        DOME needs az/el data (_visible_planet_names), ORBIT/MOONS need
+        heliocentric/Jupiter-relative data instead. Using the wrong list
+        for the wrong view was the real bug behind "no earth is there"
+        and moons never being reachable via left/right."""
+        if self.planet_view == "moons":
+            jmoons = self.data.get("jmoons") or {}
+            return [name for _id, name in moon.JUPITER_MOONS if name in jmoons]
+        if self.planet_view == "orbit":
+            return self._orbit_selectable()
+        return self._visible_planet_names()
+
     def input(self, cmd):
-        planets = self._visible_planet_names()
+        names = self._browsable_names()
         if cmd == "rotate":
             self.view = "planets" if self.view == "moon" else "moon"
         elif cmd == "drop" and self.view == "planets":
-            self.planet_view = "dome" if self.planet_view == "orbit" else "orbit"
-        elif self.view == "planets" and planets and cmd in ("left", "right"):
+            self._cycle_planet_view()
+        elif self.view == "planets" and names and cmd in ("left", "right"):
             step = -1 if cmd == "left" else 1
-            self.planet_idx = (self.planet_idx + step) % len(planets)
+            self.planet_idx = (self.planet_idx + step) % len(names)
+
+    def _cycle_planet_view(self):
+        """orbit -> moons (ONLY when JUPITER is the real selected body,
+        the one system this project has real moon data for) -> dome ->
+        orbit. Real owner ask: "select planet, zoomed in look where we
+        can see the moons"."""
+        order = ["orbit", "dome"]
+        sel = self._orbit_selectable()
+        sel_name = sel[self.planet_idx % len(sel)] if sel else None
+        if sel_name == "JUPITER":
+            order = ["orbit", "moons", "dome"]
+        i = order.index(self.planet_view) if self.planet_view in order else 0
+        self.planet_view = order[(i + 1) % len(order)]
 
     def _visible_planet_names(self):
         """Real planet names with at least a real az/el reading -- order
         follows moon.PLANETS (Mercury..Neptune), not sorted by brightness
-        or elevation, so the list order is stable tick to tick."""
+        or elevation, so the list order is stable tick to tick. Used by
+        the DOME view (az/el is only meaningful for the dome)."""
         have = self.data.get("planets") or {}
         return [name for _, name in moon.PLANETS if name in have]
+
+    def _orbit_selectable(self):
+        """Real selectable bodies for the ORBIT/MOONS views -- EARTH
+        first (direct owner report: "no earth is there"), then every
+        planet we have a real heliocentric position for. Deliberately
+        independent of _visible_planet_names()/az-el data -- the orbit
+        view has nothing to do with what's above the horizon right now,
+        so gating its selection on that data was the real bug."""
+        orbits = self.data.get("orbits") or {}
+        out = []
+        if "EARTH" in orbits:
+            out.append("EARTH")
+        out.extend(name for _, name in moon.PLANETS if name in orbits)
+        return out
 
     def auto(self):
         pass
@@ -10567,6 +10610,59 @@ class MoonEngine:
         self.ticks += 1
         self.data = moon.FEED.get()
         self.score = self.data.get("illum_pct") or 0
+        self._update_orbit_dr()
+
+    def _update_orbit_dr(self):
+        """Real dead-reckoning, same principle as flights.py's own
+        `_update_dead_reckoning()`: a real fetch lands at most once an
+        hour (moon.PLANET_REFRESH) or every 15-30min for the NEO/moons,
+        which would otherwise leave every dot frozen for that whole
+        window -- not genuinely "live" the way the owner asked for.
+        Between real fetches, extrapolate forward using the REAL
+        velocity computed from the last two real samples (never a
+        guessed speed); a genuinely new real sample always wins outright
+        and resets the reference, exactly like flights' own rule."""
+        now = time.time()
+        sources = [(self.data.get("orbits") or {}, self.data.get("orbits_ts") or {})]
+        neo = self.data.get("neo")
+        neo_ts = self.data.get("neo_ts")
+        if neo and neo.get("x_au") is not None and neo_ts:
+            sources.append(({"NEO": {"x_au": neo["x_au"], "y_au": neo["y_au"]}}, {"NEO": neo_ts}))
+        jmoons = self.data.get("jmoons") or {}
+        jmoons_ts = self.data.get("jmoons_ts") or {}
+        if jmoons:
+            sources.append((jmoons, jmoons_ts))
+        for bodies, ts_map in sources:
+            for name, o in bodies.items():
+                ts = ts_map.get(name)
+                if ts is None:
+                    continue
+                if self._orbit_prev_ts.get(name) == ts:
+                    continue   # no new real sample since last tick
+                xk = "x_km" if "x_km" in o else "x_au"
+                yk = "y_km" if "y_km" in o else "y_au"
+                prev = self._orbit_dr.get(name)
+                vx = vy = 0.0
+                if prev is not None:
+                    dt = ts - prev["t0"]
+                    if dt > 0:
+                        vx = (o[xk] - prev["x0"]) / dt
+                        vy = (o[yk] - prev["y0"]) / dt
+                self._orbit_dr[name] = {"x0": o[xk], "y0": o[yk], "t0": ts, "vx": vx, "vy": vy}
+                self._orbit_prev_ts[name] = ts
+
+    def _extrapolated_xy(self, name, fallback_x, fallback_y, max_extrap_s):
+        """Real extrapolated (x, y) for `name`, or the real last-fetched
+        (fallback_x, fallback_y) if there's no dead-reckoning reference
+        yet. Extrapolation is capped at `max_extrap_s` past the real
+        reference sample -- an honest ceiling, same reasoning as
+        flights.py's DR_MAX_MULT: if fetches stall, freeze rather than
+        project indefinitely into an increasingly unreliable future."""
+        dr = self._orbit_dr.get(name)
+        if dr is None:
+            return fallback_x, fallback_y
+        dt = min(time.time() - dr["t0"], max_extrap_s)
+        return dr["x0"] + dr["vx"] * dt, dr["y0"] + dr["vy"] * dt
 
     @staticmethod
     def _launch_countdown(net_iso):
@@ -10632,7 +10728,17 @@ class MoonEngine:
         "JUPITER": 5.20, "SATURN": 9.58, "URANUS": 19.20, "NEPTUNE": 30.05,
     }
 
+    # How long an extrapolated position is trusted past its real
+    # reference sample before this project's own "an honest gap beats
+    # a lie" rule freezes it -- 2x each source's own real refresh
+    # cadence, same ratio flights.py's DR_MAX_MULT already uses.
+    ORBIT_MAX_EXTRAP_S = moon.PLANET_REFRESH * 2
+    NEO_MAX_EXTRAP_S = moon.NEO_VECTOR_REFRESH * 2
+    MOON_MAX_EXTRAP_S = moon.MOON_VECTOR_REFRESH * 2
+
     def _frame_planets(self):
+        if self.planet_view == "moons":
+            return self._frame_planets_moons()
         return self._frame_planets_orbit() if self.planet_view == "orbit" else self._frame_planets_dome()
 
     def _frame_planets_orbit(self):
@@ -10661,7 +10767,7 @@ class MoonEngine:
         fill(buf, self.BG)
         draw_header(buf, "SOLAR SYSTEM", self.ACCENT, right_tag="ORBIT")
         orbits = self.data.get("orbits") or {}
-        names = self._visible_planet_names()
+        names = self._orbit_selectable()
 
         cx, cy = 32, 30
         r_max = 27
@@ -10694,19 +10800,26 @@ class MoonEngine:
 
         sel_name = names[self.planet_idx % len(names)] if names else None
 
-        # EARTH is real, live data too (moon.ORBIT_BODIES includes it) --
-        # drawn distinctly so a viewer can find "us" on the diagram.
+        # EARTH is real, live data too, real dead-reckoning applied same
+        # as every planet -- drawn distinctly so a viewer can find "us".
         earth = orbits.get("EARTH")
+        earth_col = (110, 180, 255)
         if earth:
-            ex, ey = self._orbit_xy(earth, cx, cy, scaled_r)
-            put_px(buf, ex, ey, (110, 180, 255))
-            put_px(buf, ex + 1, ey, (110, 180, 255))
+            ex, ey = self._orbit_xy("EARTH", earth, cx, cy, scaled_r)
+            selected = sel_name == "EARTH"
+            if selected:
+                pulse2 = 0.75 + 0.25 * math.sin(self.ticks * 0.08)
+                ring_white = rim((255, 255, 255), pulse2)
+                for dx, dy in ((0, -3), (0, 3), (-3, 0), (3, 0)):
+                    put_px(buf, ex + dx, ey + dy, ring_white)
+            put_px(buf, ex, ey, earth_col)
+            put_px(buf, ex + 1, ey, earth_col)
 
         for name, _id in moon.PLANETS:
             o = orbits.get(name)
             if not o:
                 continue
-            x, y = self._orbit_xy(o, cx, cy, scaled_r)
+            x, y = self._orbit_xy(name, o, cx, cy, scaled_r)
             col = self.PLANET_COLOR.get(name, self.INK)
             selected = name == sel_name
             if selected:
@@ -10720,28 +10833,143 @@ class MoonEngine:
                 put_px(buf, x + 1, y, col)
                 put_px(buf, x, y + 1, col)
 
+        # Real closest upcoming near-Earth object (skyevents-adjacent
+        # data, but fetched by moon.py since it rides the same Horizons
+        # infra) -- a fast-moving streak-style marker, distinct from any
+        # planet, with its own breathing pulse so it reads as "moving
+        # fast" even between real fetches.
+        neo = self.data.get("neo")
+        if neo and neo.get("x_au") is not None:
+            nx, ny = self._orbit_xy("NEO", neo, cx, cy, scaled_r, max_extrap_s=self.NEO_MAX_EXTRAP_S)
+            neo_pulse = 0.6 + 0.4 * abs(math.sin(self.ticks * 0.15))
+            neo_col = rim((255, 90, 220), neo_pulse)
+            put_px(buf, nx, ny, neo_col)
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                put_px(buf, nx + dx, ny + dy, rim(neo_col, 0.5))
+
         if sel_name:
-            p = orbits.get(sel_name)
             y = 57
-            if p:
-                dist = math.hypot(p["x_au"], p["y_au"])
-                draw_text3x5(buf, 2, y,
-                             fit_text(f"{sel_name} {dist:.2f} AU FROM SUN", WIDTH - 4),
-                             self.PLANET_COLOR.get(sel_name, self.INK))
+            if sel_name == "EARTH":
+                draw_text3x5(buf, 2, y, "EARTH -- HOME", earth_col if earth else self.INK_DIM)
             else:
-                draw_text3x5(buf, 2, y, fit_text(f"{sel_name} -- LOCATING", WIDTH - 4), self.INK_DIM)
+                p = orbits.get(sel_name)
+                if p:
+                    dist = math.hypot(p["x_au"], p["y_au"])
+                    draw_text3x5(buf, 2, y,
+                                 fit_text(f"{sel_name} {dist:.2f} AU FROM SUN", WIDTH - 4),
+                                 self.PLANET_COLOR.get(sel_name, self.INK))
+                else:
+                    draw_text3x5(buf, 2, y, fit_text(f"{sel_name} -- LOCATING", WIDTH - 4), self.INK_DIM)
+        elif neo:
+            draw_text3x5(buf, 2, 57,
+                         fit_text(f"{neo['des']} {neo.get('dist_au', 0):.4f} AU {neo.get('cd', '')}", WIDTH - 4),
+                         rim((255, 90, 220), 1.0))
         return bytes(buf)
 
-    @staticmethod
-    def _orbit_xy(o, cx, cy, scaled_r):
-        """Real (x_au, y_au) -> real panel pixel: real angle
-        (atan2(y, x)) preserved exactly, radius sqrt-scaled by the REAL
-        live distance (hypot(x, y)), not the reference semi-major axis
-        -- so an orbit's real eccentricity is genuinely visible."""
-        au = math.hypot(o["x_au"], o["y_au"])
-        ang = math.atan2(o["y_au"], o["x_au"])
+    def _orbit_xy(self, name, o, cx, cy, scaled_r, max_extrap_s=None):
+        """Real (x_au, y_au) -> real panel pixel, with dead-reckoning
+        extrapolation applied first (see _extrapolated_xy) so the dot
+        genuinely creeps between real fetches instead of freezing.
+        Real angle (atan2) and real live distance (hypot) both come
+        from the extrapolated point, so an orbit's real eccentricity
+        stays genuinely visible, not flattened onto the reference ring."""
+        max_s = max_extrap_s if max_extrap_s is not None else self.ORBIT_MAX_EXTRAP_S
+        x, y = self._extrapolated_xy(name, o["x_au"], o["y_au"], max_s)
+        au = math.hypot(x, y)
+        ang = math.atan2(y, x)
         rr = scaled_r(au)
         return int(round(cx + rr * math.cos(ang))), int(round(cy + rr * math.sin(ang)))
+
+    # Real observed colors of the 4 Galilean moons -- Io's real sulfur-
+    # yellow, Europa's real icy white-tan, Ganymede's real grey-brown,
+    # Callisto's real dark grey -- same "real observed color, not
+    # invented" discipline as PLANET_COLOR.
+    JMOON_COLOR = {"IO": (240, 220, 90), "EUROPA": (230, 220, 200),
+                   "GANYMEDE": (170, 150, 130), "CALLISTO": (110, 100, 95)}
+
+    def _frame_planets_moons(self):
+        """Real zoomed-in Jupiter system -- direct owner idea ("select
+        planet, zoomed in look where we can see the moons"). Jupiter at
+        centre (a real filled disc, its own real banded-tan color, sized
+        larger than any moon the way it genuinely dwarfs them), the 4
+        real Galilean moons at their REAL current position relative to
+        Jupiter (moon.py's own real Horizons fetch, moon.JUPITER_MOONS),
+        dead-reckoned between real fetches the same way every other body
+        on this hub now is.
+
+        Real moon orbital radii (km, public reference data, used only
+        for the ring paths exactly like ORBIT_AU is for planets): Io
+        421,700 / Europa 671,100 / Ganymede 1,070,400 / Callisto
+        1,882,700 -- Callisto's real orbit is ~4.5x Io's, so sqrt-scaling
+        is used again for the same honest-fit reason as the solar
+        system view.
+        """
+        buf = blank()
+        fill(buf, self.BG)
+        draw_header(buf, "JUPITER SYSTEM", self.ACCENT, right_tag="MOONS")
+        jmoons = self.data.get("jmoons") or {}
+        cx, cy = 32, 30
+        r_max = 27
+        ring_km = {"IO": 421700.0, "EUROPA": 671100.0, "GANYMEDE": 1070400.0, "CALLISTO": 1882700.0}
+        km_max = max(ring_km.values())
+
+        def scaled_r(km):
+            return r_max * math.sqrt(max(0.0, km) / km_max)
+
+        for sx, sy in self._STARS:
+            put_px(buf, sx, sy, (60, 62, 78))
+
+        for name, km in ring_km.items():
+            rr = scaled_r(km)
+            n = max(20, int(rr * 3.2))
+            for i in range(n):
+                a = 2 * math.pi * i / n
+                put_px(buf, int(round(cx + rr * math.cos(a))),
+                       int(round(cy + rr * math.sin(a))), (30, 34, 26))
+
+        # Jupiter itself -- filled disc, real banded color, breathing
+        # like the Sun does on the solar-system view (one consistent
+        # "this is the real light/mass at the centre" language).
+        pulse = 0.85 + 0.15 * math.sin(self.ticks * 0.05)
+        jup_col = rim(self.PLANET_COLOR["JUPITER"], pulse)
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
+                if dx * dx + dy * dy <= 5:
+                    put_px(buf, cx + dx, cy + dy, jup_col)
+
+        names = [name for _id, name in moon.JUPITER_MOONS if name in jmoons]
+        self.planet_idx %= max(1, len(names))
+        sel_name = names[self.planet_idx] if names else None
+
+        for _id, name in moon.JUPITER_MOONS:
+            o = jmoons.get(name)
+            if not o:
+                continue
+            x, y = self._orbit_xy(name, {"x_au": o["x_km"], "y_au": o["y_km"]},
+                                   cx, cy, scaled_r, max_extrap_s=self.MOON_MAX_EXTRAP_S)
+            col = self.JMOON_COLOR.get(name, self.INK)
+            selected = name == sel_name
+            if selected:
+                pulse2 = 0.75 + 0.25 * math.sin(self.ticks * 0.08)
+                ring_white = rim((255, 255, 255), pulse2)
+                for dx, dy in ((0, -3), (0, 3), (-3, 0), (3, 0)):
+                    put_px(buf, x + dx, y + dy, ring_white)
+            put_px(buf, x, y, col)
+            put_px(buf, x + 1, y, col)
+
+        y = 57
+        if sel_name:
+            o = jmoons.get(sel_name)
+            if o:
+                dist_km = math.hypot(o["x_km"], o["y_km"])
+                draw_text3x5(buf, 2, y,
+                             fit_text(f"{sel_name} {dist_km:,.0f} KM", WIDTH - 4),
+                             self.JMOON_COLOR.get(sel_name, self.INK))
+            else:
+                draw_text3x5(buf, 2, y, fit_text(f"{sel_name} -- LOCATING", WIDTH - 4), self.INK_DIM)
+        else:
+            draw_text3x5(buf, 2, y, "LOOKING FOR MOONS", self.INK_DIM)
+        return bytes(buf)
 
     def _frame_planets_dome(self):
         """A real sky-dome diagram -- reuses the EXACT scope_xy()/
@@ -11130,7 +11358,7 @@ class SpaceHubEngine(Browsable):
         if cat == "sky":
             self._sat._step(direction)
         elif cat == "planets":
-            names = self._moon._visible_planet_names()
+            names = self._moon._browsable_names()
             if names:
                 self._moon.planet_idx = (self._moon.planet_idx + direction) % len(names)
         # moon/events: nothing to browse, real no-op.
@@ -11155,7 +11383,7 @@ class SpaceHubEngine(Browsable):
             self._sat.view = (self._sat.VIEW_SCOPE if self._sat.view == self._sat.VIEW_PASSES
                               else self._sat.VIEW_PASSES)
         elif cmd == "rotate" and self.category == "planets":
-            self._moon.planet_view = "dome" if self._moon.planet_view == "orbit" else "orbit"
+            self._moon._cycle_planet_view()
         elif cmd == "drop" and self.category == "sky":
             self._sat.input("drop")
 
