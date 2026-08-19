@@ -10775,10 +10775,21 @@ class DepartureBoardEngine(Browsable):
                     draw_text_centered(buf, 50, "LOCAL SKY", self.INK_DIM)
             return bytes(buf)
 
+        # REAL AIRPORT-BOARD LAYOUT (2026-08-19 redesign, direct owner
+        # complaint -- "should look like the actual airport departure/
+        # arrival board... but better"). A real split-flap FIDS board's
+        # own real conventions, adapted to 64px: a small filled DEP/ARR
+        # badge per row (not just a color rail -- a real board marks the
+        # direction with an explicit glyph, not just a tinted edge), the
+        # flight identity and distance on one line with the identity
+        # left-aligned and distance right-aligned (a real board's own
+        # "flight ... status" column split), the real city on its own
+        # line, and a full-width rule between rows -- the actual visual
+        # signature of a split-flap row grid, not a decorative flourish.
         start = self.page * self.ROWS_PER_PAGE
         page_rows = self.rows[start:start + self.ROWS_PER_PAGE]
-        y = 12
-        for r in page_rows:
+        y = 11
+        for i, r in enumerate(page_rows):
             ac = r["ac"]
             status = r["status"]
             col = self.DEPARTING_COL if status == "DEPARTING" else self.ARRIVING_COL
@@ -10801,33 +10812,47 @@ class DepartureBoardEngine(Browsable):
                 rail_k = 0.4 + 0.6 * prox
             else:
                 rail_k = 0.55
-            rail_col = rim(col, rail_k)
+            badge_col = rim(col, rail_k)
             ident_col = (255, 255, 255) if rail_k >= 0.85 else rim((255, 255, 255), max(0.5, rail_k))
-            # Thin status rail, callsign on empty, distance on the right.
-            for by in range(11):
-                put_px(buf, 1, y + by, rail_col)
-                put_px(buf, 2, y + by, rail_col)
-            name_budget = WIDTH - 8 - (text_w(dist_txt) + 2 if dist_txt else 0)
-            draw_text3x5(buf, 5, y, fit_text(ident, name_budget), ident_col)
+
+            # A real filled DEP/ARR badge, left column -- the explicit
+            # direction glyph a real board shows, not a tint. Sized to
+            # actually fit "DEP"/"ARR" at 3x5 scale (text_w("DEP")==11px)
+            # -- a real COLLISION render_audit.py caught here on the
+            # first draft, where the badge was sized before checking the
+            # label's own real drawn width.
+            BADGE_W = 14
+            fill_plate(buf, 1, y, 1 + BADGE_W, y + 7)
+            for by in range(y, y + 7):
+                for bx in range(1, 1 + BADGE_W):
+                    put_px(buf, bx, by, rim(badge_col, 0.55))
+            draw_text3x5(buf, 2, y + 1, tag[:3], (10, 8, 6))
+
+            # Row 1: flight identity, then a dotted leader, then real
+            # distance right-aligned -- the real "flight ... status"
+            # column split a split-flap board uses, not two stacked
+            # lines competing for the same visual weight.
+            ix = 1 + BADGE_W + 3
+            dist_w = text_w(dist_txt) if dist_txt else 0
+            draw_text3x5(buf, ix, y, fit_text(ident, WIDTH - ix - dist_w - 6), ident_col)
             if dist_txt:
-                draw_text3x5(buf, WIDTH - 2 - text_w(dist_txt), y, dist_txt, self.INK_DIM)
-            # Row 2: "> CITY" on the left, DEP/ARR tag on the right. The
-            # left text is the arrow PREFIX plus the fitted city, so its
-            # budget must reserve room for BOTH the arrow and the tag or
-            # a long city ("< RALEIGH/DURHAM") runs straight through the
-            # tag -- a real COLLISION render_audit.py caught here (the
-            # arrow was prepended after fit_text() without being counted).
-            arrow = ">" if status == "DEPARTING" else "<"
-            tag_x = WIDTH - 2 - text_w(tag)
-            prefix = arrow + " "
-            # left text may reach tag_x minus a 2px gap; the fitted city
-            # gets whatever is left after the arrow prefix.
-            city_budget = tag_x - 2 - 5 - text_w(prefix)
-            city = prefix + fit_text(other, max(4, city_budget)) if other else ""
-            if city:
-                draw_text3x5(buf, 5, y + 6, city, self.INK)
-            draw_text3x5(buf, tag_x, y + 6, tag, col)
-            y += 16
+                lead_x0 = ix + text_w(fit_text(ident, WIDTH - ix - dist_w - 6)) + 2
+                lead_x1 = WIDTH - 2 - dist_w - 2
+                for lx in range(lead_x0, lead_x1, 2):
+                    put_px(buf, lx, y + 2, self.INK_DIM)
+                draw_text3x5(buf, WIDTH - 2 - dist_w, y, dist_txt, self.INK_DIM)
+
+            # Row 2: real city/code, full width now that the badge owns
+            # the direction glyph (no arrow prefix needed any more).
+            if other:
+                draw_text3x5(buf, ix, y + 7, fit_text(other, WIDTH - ix - 2), self.INK)
+
+            y += 15
+            # Real row-separator rule -- the actual visual signature of a
+            # split-flap board's row grid. Not drawn after the last row
+            # on the page (the header divider already closes the top).
+            if i < len(page_rows) - 1 and y - 1 <= HEIGHT - 5:
+                draw_divider(buf, y - 1)
             if y > HEIGHT - 5:
                 break
         return bytes(buf)
