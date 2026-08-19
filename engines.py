@@ -14,6 +14,7 @@ Each engine shares one interface so the arcade server can drive any of them:
 Pure standard library. Coordinates: (x, y), origin top-left, y grows downward.
 Polished for LED readability: pure black bg, saturated colours, simple silhouettes.
 """
+import calendar
 import json
 import math
 import random
@@ -39,6 +40,7 @@ import sports
 import news
 import weather
 import airquality
+import moon
 import blog
 import mma
 import gameday
@@ -10467,6 +10469,151 @@ class FollowFlightEngine:
         return bytes(buf)
 
 
+def draw_moon_disc(buf, cx, cy, r, illum_pct, waxing, lit_col, dark_col):
+    """A real geometric moon-phase disc, driven entirely by the real
+    illum_pct (moon.py, USNO) and real waxing/waning (from the real
+    curphase text) -- not an astronomically exact terminator projection
+    (that needs real sub-observer/sub-solar geometry this project does
+    not compute), but the same honest schematic approximation real
+    moon-phase widgets commonly use: the terminator is a vertical line
+    whose x-offset from center is set by the real illumination
+    fraction, so 0% is a fully dark disc, 50% is a half-lit disc split
+    down the middle, 100% is fully lit -- always driven by the real
+    fetched number, never a guessed shape."""
+    frac = clamp((illum_pct or 0) / 100.0, 0.0, 1.0)
+    term_offset = (1.0 - 2.0 * frac) * r   # +r at 0% ... -r at 100%
+    for dy in range(-r, r + 1):
+        half_w = int(math.sqrt(max(0, r * r - dy * dy)))
+        for dx in range(-half_w, half_w + 1):
+            if waxing:
+                lit = dx >= term_offset
+            else:
+                lit = dx <= -term_offset
+            put_px(buf, cx + dx, cy + dy, lit_col if lit else dark_col)
+
+
+class MoonEngine:
+    """MOON -- a real deep-dive for a genuine lunar/space hobbyist,
+    direct owner ask. Real USNO data (curphase, real illumination %,
+    real moonrise/moonset, next real quarter/full/new) + a real next
+    launch (Launch Library 2) -- see moon.py's own docstring for exact
+    field provenance and the honest gap (no Earth-Moon distance /
+    supermoon flag -- no verified free source, and a wrong local
+    formula would be a confidently wrong fact to exactly the audience
+    likely to notice).
+
+    Standalone engine (ENGINES["moon"]), not bolted onto satellite --
+    same reasoning as EventsLogEngine/DepartureBoardEngine: this is
+    real content that doesn't inherently belong to the ISS-pass system
+    satellite.py owns, so a dedicated screen is the honest structural
+    fit, not overloading an unrelated view.
+    """
+
+    name = "moon"
+    tick_rate = 0.2
+
+    BG = (0, 0, 0)
+    ACCENT = (200, 200, 220)
+    INK = (170, 175, 195)
+    INK_DIM = (85, 88, 105)
+    MOON_LIT = (230, 230, 240)
+    MOON_DARK = (30, 30, 42)
+    LAUNCH = (255, 170, 60)
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.data = {}
+        self.ticks = 0
+
+    def has_content(self):
+        return bool(self.data.get("curphase")) or bool(self.data.get("launch"))
+
+    def ambient_weight(self):
+        return 1.3 if self.has_content() else 0.5
+
+    def input(self, cmd):
+        pass
+
+    def auto(self):
+        pass
+
+    def tick(self):
+        self.ticks += 1
+        self.data = moon.FEED.get()
+        self.score = self.data.get("illum_pct") or 0
+
+    @staticmethod
+    def _launch_countdown(net_iso):
+        """Real seconds until a real ISO8601 launch time, or None."""
+        try:
+            t = time.strptime(net_iso, "%Y-%m-%dT%H:%M:%SZ")
+            launch_epoch = calendar.timegm(t)
+        except (ValueError, TypeError):
+            return None
+        return launch_epoch - time.time()
+
+    @staticmethod
+    def _fmt_countdown(secs):
+        secs = max(0, int(secs))
+        d, rem = divmod(secs, 86400)
+        h, rem = divmod(rem, 3600)
+        m, _s = divmod(rem, 60)
+        if d:
+            return f"T-{d}D {h}H"
+        if h:
+            return f"T-{h}H {m:02d}M"
+        return f"T-{m}M"
+
+    def frame(self):
+        buf = blank()
+        fill(buf, self.BG)
+        stale = bool(self.data.get("age") and self.data["age"] > 3600 * 8)
+        draw_header(buf, "MOON", self.ACCENT, stale=stale)
+
+        curphase = self.data.get("curphase")
+        if not curphase:
+            draw_text_centered(buf, 28, "NO SIGNAL" if self.data.get("err") else "LOOKING", self.INK_DIM)
+            draw_text_centered(buf, 36, "FROM USNO", self.INK_DIM)
+            return bytes(buf)
+
+        illum = self.data.get("illum_pct")
+        waxing = "WAXING" in curphase or curphase == "NEW MOON"
+        draw_moon_disc(buf, 15, 22, 11, illum, waxing, self.MOON_LIT, self.MOON_DARK)
+
+        x = 30
+        draw_text3x5(buf, x, 12, fit_text(curphase, WIDTH - x - 2), self.INK)
+        if isinstance(illum, int):
+            draw_text3x5(buf, x, 19, f"{illum}% LIT", self.ACCENT)
+        closest = self.data.get("closest_phase")
+        if closest:
+            draw_text3x5(buf, x, 26, fit_text(closest, WIDTH - x - 2), self.INK_DIM)
+
+        y = 37
+        rise, set_ = self.data.get("moonrise"), self.data.get("moonset")
+        if rise:
+            draw_text3x5(buf, 2, y, fit_text(f"RISE {rise}", WIDTH - 4), self.INK)
+            y += 7
+        if set_:
+            draw_text3x5(buf, 2, y, fit_text(f"SET {set_}", WIDTH - 4), self.INK)
+            y += 7
+
+        launch = self.data.get("launch")
+        if launch and y <= HEIGHT - 12:
+            draw_divider(buf, y + 1)
+            y += 4
+            secs = self._launch_countdown(launch.get("net"))
+            cd = self._fmt_countdown(secs) if secs is not None else ""
+            head = f"{cd} {launch['name']}" if cd else launch["name"]
+            draw_text3x5(buf, 2, y, fit_text(head, WIDTH - 4), self.LAUNCH)
+            y += 7
+            if launch.get("provider") and y <= HEIGHT - 5:
+                draw_text3x5(buf, 2, y, fit_text(launch["provider"], WIDTH - 4), self.INK_DIM)
+        return bytes(buf)
+
+
 class DepartureBoardEngine(Browsable):
     """DEPARTURE BOARD (2026-08-09) -- a real, honest FIDS-style board of
     aircraft currently departing from or arriving at the configured home
@@ -18665,7 +18812,7 @@ class AmbientEngine(Browsable):
     # AUTO acts -- look up, then what's happening, then the board,
     # then today's work note (if set), then one page of reading.
     # Rest is night gallery / quiet clock.
-    ACT_SKY = ("flights", "satellite", "weather")
+    ACT_SKY = ("flights", "satellite", "moon", "weather")
     ACT_PLAY = ("sports", "nowplaying", "followflight")
     ACT_BOARD = ("home", "departures", "ticker")
     ACT_PAGE = ("news", "events", "blog")
@@ -19854,6 +20001,15 @@ class MenuEngine:
             put_px(buf, x0 + 2, y0 + 7, c)
             put_px(buf, x0 + 3, y0 + 6, c)
             put_px(buf, x0 + 4, y0 + 5, w)
+        elif gid == "moon":
+            # A crescent -- a filled disc with a smaller offset dark disc
+            # carved out of it, the universal "moon" glyph shape, distinct
+            # from the satellite's boxy body-and-panels language.
+            for dy in range(-4, 5):
+                hw = int(math.sqrt(max(0, 16 - dy * dy)))
+                for dx in range(-hw, hw + 1):
+                    if (dx - 2) ** 2 + dy * dy > 9:   # outside the carved-out dark disc
+                        put_px(buf, x0 + 5 + dx, y0 + 5 + dy, c)
         elif gid == "flights":
             # A simple swept-wing silhouette pointed up-right, the classic
             # "flight tracker" glyph shape -- reads instantly as aviation,
@@ -22888,6 +23044,7 @@ ENGINES = {
     # local ADS-B traffic classified against the configured home
     # airport, zero new I/O (see DepartureBoardEngine's own docstring).
     "departures": DepartureBoardEngine,
+    "moon": MoonEngine,
     # NOW PLAYING (2026-08-09) -- real track via Last.fm + a real live
     # visualizer off the panel's own mic (see NowPlayingEngine's own
     # docstring for why the mic alone can't do this).

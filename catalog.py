@@ -37,6 +37,8 @@ MODES = (
        note="Left/right steps symbols. HOLD parks the tape."),
     _m("satellite", "ISS", "data", (255, 226, 60), menu=True, sequence=True,
        note="Left/right swaps pass list and live sky. HOLD parks."),
+    _m("moon", "MOON", "data", (200, 200, 220), menu=True, sequence=True,
+       note="Real phase, illumination, rise/set (USNO). Next launch (LL2)."),
     _m("flights", "FLIGHTS", "data", (120, 200, 255), menu=True, sequence=True,
        note="Left/right walks aircraft. HOLD parks the rotation."),
     _m("followflight", "FOLLOW", "data", (255, 200, 90), menu=True, sequence=True,
@@ -89,7 +91,7 @@ def menu_tiles():
 
 # WORLD walk — sky first, not menu-shelf order.
 SEQUENCE = (
-    "flights", "satellite", "weather", "home", "sports", "nowplaying",
+    "flights", "satellite", "moon", "weather", "home", "sports", "nowplaying",
     "followflight", "departures", "ticker", "news", "events",
     "blog", "ownernote", "clock",
 )

@@ -76,6 +76,13 @@ SKIP_KEYS = {
     # it into "hourly_url") -- same URL category as county/forecastZone
     # just above, never drawn, only used to build the next real fetch.
     "forecastHourly", "hourly_url",
+    # moon.py's real USNO moondata[] entries use "phen" ("Rise"/"Upper
+    # Transit"/"Set") as a control token _parse_usno() compares against
+    # -- polluting it breaks the RISE/SET match rather than testing
+    # anything about folding, same reasoning "homeAway"/"state" are
+    # already skipped for above. "net" is LL2's real ISO8601 timestamp,
+    # never drawn as text, only parsed as a date.
+    "phen", "net",
 }
 
 
@@ -255,6 +262,20 @@ def main():
             weather._get_json = _real_get_json
     else:
         print("  %-28s skipped (no hourly URL)" % "weather hourly forecast")
+
+    # moon.py (2026-08-19) -- USNO curphase/closestphase and LL2's real
+    # launch name/provider/status all fold at their own boundary
+    # (_parse_usno()/_parse_launch()). Real live payloads, canary-
+    # injected, same technique as every parser above.
+    import moon as _moon
+    _real_moon_get_json = _moon._get_json
+
+    usno_raw = _real_moon_get_json(_moon.USNO_URL.format(
+        date="2026-08-19", lat=34.0, lon=-81.0, tz=-4))
+    bad += check("moon USNO", lambda: _moon._parse_usno(inject(usno_raw), 0.0))
+
+    launch_raw = _real_moon_get_json(_moon.LL2_URL)
+    bad += check("moon launch (LL2)", lambda: _moon._parse_launch(inject(launch_raw)) or {})
 
     # ---- /api/notify pass-through (2026-08-09) -- the fold lives inline
     # in arcade_server.py ("Fold at the boundary" comment on the /api/notify

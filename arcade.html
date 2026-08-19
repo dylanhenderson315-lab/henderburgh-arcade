@@ -220,6 +220,7 @@
         <button data-mode="followflight" style="--tile:#ffc85a">FOLLOW<small>ICAO only — UAL123, not UA123. Ambient if airborne.</small></button>
         <button data-mode="departures" style="--tile:#78c8ff">MYR LIVE<small>To and from home. Not a scheduled FIDS.</small></button>
         <button data-mode="satellite" style="--tile:#ffe23c">ISS<small>Pass list and live sky. Dead host is not an empty sky.</small></button>
+        <button data-mode="moon" style="--tile:#c8c8dc">MOON<small>Real phase, illumination, rise/set (USNO). Next real launch (LL2).</small></button>
         <button data-mode="weather" style="--tile:#5abeff">WEATHER<small>Hourly glance. Radar when a cell is real.</small></button>
         <button data-mode="home" style="--tile:#ffba5a">HOME<small>What's on in the house. Rooms, not entity ids.</small></button>
       </div>
@@ -810,6 +811,7 @@ const HERO = {
   followflight: ['FOLLOW', 'One ICAO callsign. Type UAL123, not UA123. Ambient only if it is airborne.'],
   departures: ['MYR LIVE', 'Airborne traffic whose route names home. Not a scheduled board.'],
   satellite: ['ISS', 'Pass list and live sky. A dead catalogue is not an empty sky.'],
+  moon: ['MOON', 'Real phase, illumination %, rise/set from USNO. Next real launch from Launch Library 2.'],
   weather: ['WEATHER', 'Hourly when the sky is quiet. Radar when a cell is real.'],
   home: ['HOME', 'House radar. What is on. Empty sensors stay absent.'],
   sports: ['SPORTS', 'The scorebug. DETAIL when it is live. White is the score until the clock earns it.'],
