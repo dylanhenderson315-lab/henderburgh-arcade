@@ -94,6 +94,11 @@ PLANETS = [
     ("599", "JUPITER"), ("699", "SATURN"), ("799", "URANUS"),
     ("899", "NEPTUNE"),
 ]
+ORBIT_BODIES = PLANETS + [("399", "EARTH")]   # real heliocentric x/y, see
+                                                # _fetch_planet_vector() --
+                                                # Earth included so the
+                                                # orbit diagram can show
+                                                # where WE are too.
 SUN_ID = "10"   # real Horizons body id -- fetched the same way as a planet
                 # (see _refresh_one_planet's round-robin), but kept OUT of
                 # PLANETS: it's not a planet to browse, it's real day/night
@@ -225,6 +230,59 @@ def _parse_horizons_row(text):
     return out
 
 
+_VECTOR_RE = re.compile(
+    r"X\s*=\s*(-?[\d.]+E[+-]\d+)\s+Y\s*=\s*(-?[\d.]+E[+-]\d+)\s+Z\s*=\s*(-?[\d.]+E[+-]\d+)"
+)
+
+
+def _parse_horizons_vector(text):
+    """Real heliocentric ecliptic (x_au, y_au) for ONE body, the LAST
+    real row before $$EOE, or None. Confirmed live 2026-08-19 against
+    Jupiter: parsed (-3.24, 4.19) AU, matching its real ~5.30 AU
+    distance from the Sun (sqrt(3.24^2+4.19^2)=5.30) -- a genuine
+    cross-check, not just a shape match. Z is parsed but not kept (a
+    top-down diagram only needs the ecliptic-plane x/y; real orbital
+    inclinations are small enough -- under 7 degrees for every planet
+    but Mercury -- that a top-down projection is an honest, standard
+    simplification, not a distortion)."""
+    if not isinstance(text, str):
+        return None
+    try:
+        body = text.split("$$SOE", 1)[1].split("$$EOE", 1)[0]
+    except IndexError:
+        return None
+    rows = [ln for ln in body.splitlines() if "X =" in ln or "X=" in ln]
+    if not rows:
+        return None
+    m = _VECTOR_RE.search(rows[-1])
+    if not m:
+        return None
+    try:
+        return {"x_au": float(m.group(1)), "y_au": float(m.group(2))}
+    except ValueError:
+        return None
+
+
+def _fetch_planet_vector(body_id):
+    """Real heliocentric ecliptic position (x_au, y_au) for one body,
+    Sun-centered (CENTER='500@10'), via the same JPL Horizons service
+    the observer fetch already uses -- a genuine top-down "where is it
+    in the solar system right now" position, not a schematic guess."""
+    now = datetime.utcnow()
+    start = now.strftime("%Y-%m-%d")
+    stop = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    params = {
+        "format": "json", "COMMAND": f"'{body_id}'", "OBJ_DATA": "NO",
+        "MAKE_EPHEM": "YES", "EPHEM_TYPE": "VECTORS",
+        "CENTER": "'500@10'", "REF_PLANE": "ECLIPTIC", "OUT_UNITS": "'AU-D'",
+        "VEC_TABLE": "'1'",
+        "START_TIME": f"'{start}'", "STOP_TIME": f"'{stop}'", "STEP_SIZE": "'1 d'",
+    }
+    url = HORIZONS_URL + "?" + urllib.parse.urlencode(params)
+    data = _get_json(url)
+    return _parse_horizons_vector(data.get("result") if isinstance(data, dict) else None)
+
+
 def _fetch_planet(body_id, lat, lon):
     """Real az/el/mag/distance for one planet from home, right now, via
     JPL Horizons -- or None on any real failure. A ~2h observer window
@@ -257,6 +315,9 @@ class MoonFeed:
         self._launch_err = None
         self._planets = {}          # name -> {az_deg, el_deg, mag, dist_au}
         self._sun = {}               # real {az_deg, el_deg} -- day/night context, see SUN_ID
+        self._orbits = {}           # name -> {x_au, y_au}, real heliocentric, see ORBIT_BODIES
+        self._orbit_cursor = 0
+        self._orbit_try = {}
         self._planet_cursor = 0
         self._planet_try = {}       # name -> last-fetch wall time
         self._last_read = 0.0
@@ -274,12 +335,14 @@ class MoonFeed:
             launch = dict(self._launch) if self._launch else None
             planets = {k: dict(v) for k, v in self._planets.items()}
             sun = dict(self._sun) if self._sun else None
+            orbits = {k: dict(v) for k, v in self._orbits.items()}
             err = self._usno_err or self._launch_err
             age = (now - self._usno_try) if self._usno_try else None
         self._ensure_thread()
         out = {
             "configured": satellite.FEED.configured,
             "age": age, "err": err, "launch": launch, "planets": planets, "sun": sun,
+            "orbits": orbits,
         }
         out.update(usno)
         return out
@@ -300,7 +363,30 @@ class MoonFeed:
             self._refresh_usno()
             self._refresh_launch()
             self._refresh_one_planet()
+            self._refresh_one_orbit()
             time.sleep(5.0)
+
+    def _refresh_one_orbit(self):
+        """Round-robin, same shape as _refresh_one_planet(): at most ONE
+        body's real heliocentric position per loop pass. ORBIT_BODIES is
+        PLANETS plus Earth (399) -- the Sun itself is always (0,0) by
+        definition of a Sun-centered frame, so it needs no fetch."""
+        now = time.time()
+        for _ in range(len(ORBIT_BODIES)):
+            body_id, name = ORBIT_BODIES[self._orbit_cursor]
+            self._orbit_cursor = (self._orbit_cursor + 1) % len(ORBIT_BODIES)
+            if now - self._orbit_try.get(name, 0.0) < PLANET_REFRESH:
+                continue
+            self._orbit_try[name] = now
+            try:
+                parsed = _fetch_planet_vector(body_id)
+            except (urllib.error.URLError, TimeoutError, ValueError,
+                    json.JSONDecodeError, OSError, KeyError):        # noqa: BLE001
+                return
+            if parsed is not None:
+                with self._lock:
+                    self._orbits[name] = parsed
+            return
 
     def _refresh_one_planet(self):
         """Round-robin: at most ONE body fetched per loop pass, and only

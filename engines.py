@@ -10535,6 +10535,7 @@ class MoonEngine:
         self.ticks = 0
         self.view = "moon"
         self.planet_idx = 0
+        self.planet_view = "orbit"   # "orbit" (real heliocentric top-down) | "dome" (real az/el sky)
 
     def has_content(self):
         return bool(self.data.get("curphase")) or bool(self.data.get("launch"))
@@ -10546,6 +10547,8 @@ class MoonEngine:
         planets = self._visible_planet_names()
         if cmd == "rotate":
             self.view = "planets" if self.view == "moon" else "moon"
+        elif cmd == "drop" and self.view == "planets":
+            self.planet_view = "dome" if self.planet_view == "orbit" else "orbit"
         elif self.view == "planets" and planets and cmd in ("left", "right"):
             step = -1 if cmd == "left" else 1
             self.planet_idx = (self.planet_idx + step) % len(planets)
@@ -10618,7 +10621,129 @@ class MoonEngine:
         el = (sun or {}).get("el_deg")
         return el if isinstance(el, (int, float)) else None
 
+    # Real published semi-major axes (AU) -- reference data (like the
+    # EPA AQI bands or ICAO_TYPE_NAMES elsewhere in this project), used
+    # ONLY to draw each planet's real orbit PATH as a clean circle. The
+    # planet's actual plotted POSITION always comes from the real live
+    # (x_au, y_au) Horizons returned -- this table never substitutes
+    # for real data, it only draws the track the real dot sits near.
+    ORBIT_AU = {
+        "MERCURY": 0.39, "VENUS": 0.72, "EARTH": 1.00, "MARS": 1.52,
+        "JUPITER": 5.20, "SATURN": 9.58, "URANUS": 19.20, "NEPTUNE": 30.05,
+    }
+
     def _frame_planets(self):
+        return self._frame_planets_orbit() if self.planet_view == "orbit" else self._frame_planets_dome()
+
+    def _frame_planets_orbit(self):
+        """A real heliocentric top-down solar system diagram -- direct
+        owner ask ("make the solar system visually stunning... a view
+        of solar system and where everything is live"). The Sun sits at
+        the real centre of this frame (by definition, in a Sun-centered
+        reference); every planet (plus Earth, so a viewer can see
+        "that's us") is plotted at its REAL current position, from
+        moon.py's own real Horizons VECTORS fetch (moon.ORBIT_BODIES) --
+        never a schematic guess, never a computed-locally orbital
+        formula (the exact trap this project's own moon-distance
+        docstring already refused to fall into).
+
+        SQRT-scaled radius (same justified technique flights.py's own
+        radar scope uses for the identical reason: without it, the
+        four inner planets collapse into an unreadable dot at centre
+        while the outer solar system eats all the remaining room).
+        Real orbit-path rings (ORBIT_AU, published reference data) give
+        each planet a track to sit near; the plotted dot itself always
+        comes from the real live x/y, so an eccentric real position
+        (Mercury can sit meaningfully off its own nominal circle) is
+        never hidden.
+        """
+        buf = blank()
+        fill(buf, self.BG)
+        draw_header(buf, "SOLAR SYSTEM", self.ACCENT, right_tag="ORBIT")
+        orbits = self.data.get("orbits") or {}
+        names = self._visible_planet_names()
+
+        cx, cy = 32, 30
+        r_max = 27
+        au_max = max(self.ORBIT_AU.values())
+
+        def scaled_r(au):
+            return r_max * math.sqrt(max(0.0, au) / au_max)
+
+        for sx, sy in self._STARS:
+            put_px(buf, sx, sy, (60, 62, 78))
+
+        # Real orbit-path rings, one per body we have EITHER a real
+        # reference distance for -- drawn faint so the live dots read
+        # as the actual content.
+        for name, au in self.ORBIT_AU.items():
+            rr = scaled_r(au)
+            n = max(20, int(rr * 3.2))
+            for i in range(n):
+                a = 2 * math.pi * i / n
+                put_px(buf, int(round(cx + rr * math.cos(a))),
+                       int(round(cy + rr * math.sin(a))), (26, 30, 46))
+
+        # The Sun -- a small bright core with a soft breathing corona,
+        # same slow-pulse technique this project's own hero silhouettes
+        # already use elsewhere, so it reads as a real light source.
+        pulse = 0.85 + 0.15 * math.sin(self.ticks * 0.05)
+        sun_col = rim((255, 220, 120), pulse)
+        for dx, dy in ((0, 0), (1, 0), (0, 1), (1, 1), (-1, 0), (0, -1)):
+            put_px(buf, cx + dx, cy + dy, sun_col)
+
+        sel_name = names[self.planet_idx % len(names)] if names else None
+
+        # EARTH is real, live data too (moon.ORBIT_BODIES includes it) --
+        # drawn distinctly so a viewer can find "us" on the diagram.
+        earth = orbits.get("EARTH")
+        if earth:
+            ex, ey = self._orbit_xy(earth, cx, cy, scaled_r)
+            put_px(buf, ex, ey, (110, 180, 255))
+            put_px(buf, ex + 1, ey, (110, 180, 255))
+
+        for name, _id in moon.PLANETS:
+            o = orbits.get(name)
+            if not o:
+                continue
+            x, y = self._orbit_xy(o, cx, cy, scaled_r)
+            col = self.PLANET_COLOR.get(name, self.INK)
+            selected = name == sel_name
+            if selected:
+                pulse2 = 0.75 + 0.25 * math.sin(self.ticks * 0.08)
+                ring_white = rim((255, 255, 255), pulse2)
+                for dx, dy in ((0, -3), (0, 3), (-3, 0), (3, 0)):
+                    put_px(buf, x + dx, y + dy, ring_white)
+            big = name in self.PLANET_GIANT
+            put_px(buf, x, y, col)
+            if big or selected:
+                put_px(buf, x + 1, y, col)
+                put_px(buf, x, y + 1, col)
+
+        if sel_name:
+            p = orbits.get(sel_name)
+            y = 57
+            if p:
+                dist = math.hypot(p["x_au"], p["y_au"])
+                draw_text3x5(buf, 2, y,
+                             fit_text(f"{sel_name} {dist:.2f} AU FROM SUN", WIDTH - 4),
+                             self.PLANET_COLOR.get(sel_name, self.INK))
+            else:
+                draw_text3x5(buf, 2, y, fit_text(f"{sel_name} -- LOCATING", WIDTH - 4), self.INK_DIM)
+        return bytes(buf)
+
+    @staticmethod
+    def _orbit_xy(o, cx, cy, scaled_r):
+        """Real (x_au, y_au) -> real panel pixel: real angle
+        (atan2(y, x)) preserved exactly, radius sqrt-scaled by the REAL
+        live distance (hypot(x, y)), not the reference semi-major axis
+        -- so an orbit's real eccentricity is genuinely visible."""
+        au = math.hypot(o["x_au"], o["y_au"])
+        ang = math.atan2(o["y_au"], o["x_au"])
+        rr = scaled_r(au)
+        return int(round(cx + rr * math.cos(ang))), int(round(cy + rr * math.sin(ang)))
+
+    def _frame_planets_dome(self):
         """A real sky-dome diagram -- reuses the EXACT scope_xy()/
         draw_scope_rings()/draw_scope_home() convention SatelliteEngine's
         own dome already established (center = straight up, rim = the
@@ -11029,6 +11154,8 @@ class SpaceHubEngine(Browsable):
         if cmd == "rotate" and self.category == "sky":
             self._sat.view = (self._sat.VIEW_SCOPE if self._sat.view == self._sat.VIEW_PASSES
                               else self._sat.VIEW_PASSES)
+        elif cmd == "rotate" and self.category == "planets":
+            self._moon.planet_view = "dome" if self._moon.planet_view == "orbit" else "orbit"
         elif cmd == "drop" and self.category == "sky":
             self._sat.input("drop")
 
