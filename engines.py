@@ -10816,13 +10816,26 @@ class MoonEngine:
                 put_px(buf, int(round(cx + rr * math.cos(a))),
                        int(round(cy + rr * math.sin(a))), (26, 30, 46))
 
-        # The Sun -- a small bright core with a soft breathing corona,
-        # same slow-pulse technique this project's own hero silhouettes
-        # already use elsewhere, so it reads as a real light source.
+        # The Sun -- a bright core with real radiating rays (8 real
+        # compass directions, fading outward), the SAME breathing pulse
+        # technique this project's own hero silhouettes already use, so
+        # it reads as an actual light source at the centre of things
+        # rather than a static dot. Decorative in exact shape (real
+        # sunlight isn't 8 discrete rays), but the THING it represents
+        # -- the Sun, at the real centre of a Sun-centered frame -- is
+        # exactly real, same as the Sun's own (0,0) position always is.
         pulse = 0.85 + 0.15 * math.sin(self.ticks * 0.05)
         sun_col = rim((255, 220, 120), pulse)
         for dx, dy in ((0, 0), (1, 0), (0, 1), (1, 1), (-1, 0), (0, -1)):
             put_px(buf, cx + dx, cy + dy, sun_col)
+        for rdx, rdy in ((3, 0), (-3, 0), (0, 3), (0, -3),
+                         (2, 2), (-2, 2), (2, -2), (-2, -2)):
+            ray_len = 3
+            ux, uy = rdx / ray_len, rdy / ray_len
+            for step in range(2, ray_len + 1):
+                fade = 1.0 - (step - 1) / ray_len
+                put_px(buf, cx + int(round(ux * step)), cy + int(round(uy * step)),
+                       rim(sun_col, fade * 0.55))
 
         sel_name = names[self.planet_idx % len(names)] if names else None
 
@@ -10853,11 +10866,34 @@ class MoonEngine:
                 ring_white = rim((255, 255, 255), pulse2)
                 for dx, dy in ((0, -3), (0, 3), (-3, 0), (3, 0)):
                     put_px(buf, x + dx, y + dy, ring_white)
+                # Real direction-of-travel tick, same technique this
+                # project's own flight radar already uses for a
+                # selected aircraft's heading tick -- a short dim line
+                # along the REAL dead-reckoned velocity vector (never a
+                # guessed direction), so selecting a planet shows not
+                # just where it is but genuinely which way it's going.
+                dr = self._orbit_dr.get(name)
+                if dr and (dr["vx"] or dr["vy"]):
+                    vmag = math.hypot(dr["vx"], dr["vy"])
+                    if vmag > 0:
+                        tux, tuy = dr["vx"] / vmag, dr["vy"] / vmag
+                        for step in range(2, 6):
+                            put_px(buf, x + int(round(tux * step)), y + int(round(tuy * step)),
+                                   rim(col, 0.45))
             big = name in self.PLANET_GIANT
             put_px(buf, x, y, col)
             if big or selected:
                 put_px(buf, x + 1, y, col)
                 put_px(buf, x, y + 1, col)
+            if name == "SATURN":
+                # The same small real-ring cue the sky dome already
+                # uses at this scale -- a short perpendicular tick, the
+                # honest amount of "rings" a 1-2px dot can show (the
+                # full real ring structure is on the Jupiter-style
+                # zoomed moon view, see _draw_saturn_rings).
+                ring_c = rim(col, 0.7)
+                put_px(buf, x - 2, y, ring_c)
+                put_px(buf, x + (2 if big else 1) + 1, y, ring_c)
 
         # Real closest upcoming near-Earth object (skyevents-adjacent
         # data, but fetched by moon.py since it rides the same Horizons
