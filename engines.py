@@ -13336,6 +13336,36 @@ class SportsEngine(Browsable, BigMomentSource):
                 return field, text
         return None, None
 
+    def _order_footer_lines(self, odds_line=None, series=None, venue=None,
+                             broadcast=None, note=None, prefix=None):
+        """The Tier-3 layout-priority config (layout.py) extended to the
+        six dedicated per-sport renderers, closing the real gap
+        CLAUDE.md's own "Tier-3 layout-priority pilot" note names: the
+        config previously only ever controlled `_footer_pick()`'s single-
+        winner slot on the two GENERIC fallback renderers (golf/tennis/
+        MMA-without-a-card), 2 of 9 sports.
+
+        Deliberately NOT `_footer_pick()`'s single-winner design --
+        that would be a real feature reduction (these renderers show
+        MULTIPLE stacked footer lines on purpose, more real facts than
+        the generic fallback's one-line slot has room for). Instead,
+        this reorders whichever of the CONFIGURED fields
+        (`layout.FOOTER_FIELDS`: odds/series/venue -- class_label is
+        never one of these renderers' own footer fields, so it's simply
+        absent from `fields` and never appears) are actually present,
+        by the owner's configured relative priority, and keeps EVERY
+        one of them -- nothing is dropped. `broadcast`/`note` aren't
+        config fields (layout.py's own FOOTER_FIELDS doesn't cover
+        them), so they always come last, in their original order,
+        unaffected by the config -- same honest scope layout.py's own
+        docstring already states for the fields it actually knows."""
+        order = layout.get_footer_priority()
+        fields = {"odds": odds_line, "series": series, "venue": venue}
+        ordered = [fields[k] for k in order if fields.get(k)]
+        head = [x for x in (prefix or ()) if x]
+        tail = [x for x in (broadcast, note) if x]
+        return head + ordered + tail
+
     def _frame_golf_pinned(self):
         """The pinned player, given the panel.
 
@@ -15031,8 +15061,9 @@ class SportsEngine(Browsable, BigMomentSource):
         if detail in ("FINAL", tag, head):
             detail = ""
         odds_line = self._footer_odds_text(ev)
-        foot_lines = [x for x in (detail, odds_line, ev.get("series"),
-                                  ev.get("venue"), ev.get("broadcast")) if x]
+        foot_lines = self._order_footer_lines(
+            odds_line, ev.get("series"), ev.get("venue"),
+            ev.get("broadcast"), prefix=(detail,))
         for line in foot_lines:
             if y > HEIGHT - 5:
                 break
@@ -15104,7 +15135,8 @@ class SportsEngine(Browsable, BigMomentSource):
             # the generic fallback. Pre-game only (this whole branch
             # already IS the not-live path), leads the same list.
             odds_line = self._footer_odds_text(ev)
-            foot_lines = [x for x in (odds_line, ev.get("series"), ev.get("venue"), ev.get("broadcast")) if x]
+            foot_lines = self._order_footer_lines(
+                odds_line, ev.get("series"), ev.get("venue"), ev.get("broadcast"))
             for line in foot_lines:
                 if y > HEIGHT - 5:
                     break
@@ -15252,8 +15284,9 @@ class SportsEngine(Browsable, BigMomentSource):
         # Odds restored 2026-08-11 (completeness review) -- see
         # basketball's own detail renderer for the full note on why.
         odds_line = self._footer_odds_text(ev)
-        foot_lines = [x for x in (odds_line, ev.get("series"), ev.get("venue"),
-                                  ev.get("broadcast"), ev.get("note")) if x]
+        foot_lines = self._order_footer_lines(
+            odds_line, ev.get("series"), ev.get("venue"),
+            ev.get("broadcast"), ev.get("note"))
         for line in foot_lines:
             if y > HEIGHT - 5:
                 break
@@ -15308,8 +15341,9 @@ class SportsEngine(Browsable, BigMomentSource):
 
         y = self._draw_leaders(buf, ev, y)
         odds_line = self._footer_odds_text(ev)
-        foot_lines = [x for x in (odds_line, ev.get("series"), ev.get("venue"),
-                                  ev.get("broadcast"), ev.get("note")) if x]
+        foot_lines = self._order_footer_lines(
+            odds_line, ev.get("series"), ev.get("venue"),
+            ev.get("broadcast"), ev.get("note"))
         for line in foot_lines:
             if y > HEIGHT - 5:
                 break
@@ -15381,7 +15415,8 @@ class SportsEngine(Browsable, BigMomentSource):
         # Odds restored 2026-08-11 (completeness review) -- see
         # basketball's own detail renderer for the full note on why.
         odds_line = self._footer_odds_text(ev)
-        foot_lines = [x for x in (odds_line, ev.get("venue"), ev.get("broadcast")) if x]
+        foot_lines = self._order_footer_lines(
+            odds_line, None, ev.get("venue"), ev.get("broadcast"))
         for line in foot_lines:
             if y > HEIGHT - 5:
                 break
@@ -15596,8 +15631,9 @@ class SportsEngine(Browsable, BigMomentSource):
                                    self.INK_DIM)
             y = self._draw_leaders(buf, ev, y)
             odds_line = self._footer_odds_text(ev)
-            foot_lines = [x for x in (odds_line, ev.get("series"), ev.get("venue"),
-                                      ev.get("broadcast"), ev.get("note")) if x]
+            foot_lines = self._order_footer_lines(
+                odds_line, ev.get("series"), ev.get("venue"),
+                ev.get("broadcast"), ev.get("note"))
             for line in foot_lines:
                 if y > HEIGHT - 5:
                     break
@@ -15625,8 +15661,9 @@ class SportsEngine(Browsable, BigMomentSource):
         y = self._draw_period_line(buf, ev, y)
         y = self._draw_leaders(buf, ev, y)
         self._draw_win_pct(buf, ev)
-        foot_lines = [x for x in (ev.get("series"), ev.get("venue"),
-                                  ev.get("broadcast"), ev.get("note")) if x]
+        foot_lines = self._order_footer_lines(
+            None, ev.get("series"), ev.get("venue"),
+            ev.get("broadcast"), ev.get("note"))
         for line in foot_lines:
             if y > HEIGHT - 5:
                 break
@@ -15685,8 +15722,9 @@ class SportsEngine(Browsable, BigMomentSource):
         # same footer list, real data restored without collapsing the
         # richer multi-line footer these dedicated renderers earned.
         odds_line = self._footer_odds_text(ev)
-        foot_lines = [x for x in (odds_line, ev.get("series"), ev.get("venue"),
-                                  ev.get("broadcast"), ev.get("note")) if x]
+        foot_lines = self._order_footer_lines(
+            odds_line, ev.get("series"), ev.get("venue"),
+            ev.get("broadcast"), ev.get("note"))
         for line in foot_lines:
             if y > HEIGHT - 5:
                 break

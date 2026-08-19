@@ -2040,15 +2040,17 @@ automatically with no special-casing needed.
   view correctly transitioned back to UPCOMING within the next poll once
   the pass genuinely ended. Real orbital timing driving real on-panel
   motion, not a loop or a static frame.
-- **Real finding from that same capture, not yet fixed**: two objects
-  (OAO 3, peak 75.8°, and SEASAT 1, peak 19.8°) went overhead in the same
-  tick. The "newly overhead -> jump cursor" logic in `tick()` iterates
-  the pass list and keeps whichever match it finds LAST, which is
-  arbitrary tie-breaking, not a deliberate choice -- the lower, less
-  impressive pass could win over a dramatically better one purely by
-  list order. Worth a small fix: prefer the higher `quality_rank` (or
-  peak elevation) when multiple passes become overhead in the same tick,
-  rather than "whichever the loop saw last".
+- **Real finding from that same capture, FIXED same session (2026-08-01,
+  see the dedicated commit)**: two objects (OAO 3, peak 75.8°, and
+  SEASAT 1, peak 19.8°) went overhead in the same tick. The old "newly
+  overhead -> jump cursor" logic in `tick()` kept whichever match the
+  loop found LAST, arbitrary tie-breaking rather than a deliberate
+  choice. Fixed via `best_new = (rank, peak_el, index)`, keeping the
+  candidate with the higher `quality_rank` (tie-broken by peak
+  elevation) among everything that went overhead in the same tick,
+  verified against a synthetic two-simultaneous-pass tick. This note
+  previously said "not yet fixed" well after the fix landed -- stale
+  documentation, not a real gap; corrected 2026-08-18.
 
 **Global severe-weather takeover** — an Extreme/Severe NWS alert
 preempts **any** mode (game, video, mirror, anything), not just weather.
@@ -3291,7 +3293,7 @@ Direct owner ask: "let's look at all implementations created, let's make everyth
 
 **Real gaps found, deliberately NOT fixed this pass, documented instead of silently dropped:**
 - **The Tier-3 layout-priority pilot (`layout.py`) genuinely only controls 2 of 9 sports' footer content** (the same two generic-fallback renderers odds had the same problem in) -- the six dedicated renderers' footer order is still hardcoded, not config-driven, contradicting the pilot's own stated "one config, both views agree" intent. NOT unified this pass: `_footer_pick()`'s whole design picks ONE winning field for a single-line slot, while the six dedicated renderers deliberately show MULTIPLE stacked footer lines -- forcing them through the single-winner design would be a real architecture change and a real feature reduction (fewer facts shown), not a small fix. Worth a real design discussion before touching it, not a quiet fix bundled into this pass.
-- **Hockey has a dedicated DETAIL renderer but still no dedicated MAIN renderer** -- `SPORT_RENDERERS` has no `"hockey"` key, so hockey's live/main ticker view still falls through to the generic fallback while its detail view (reached by pressing select) is fully custom. Real, but the practical impact is narrow (the main ticker row already shows real data via the generic renderer; only the promoted-screen treatment is missing) and building a from-scratch main renderer is real, if modest, new scope -- flagged rather than rushed into this review pass.
+- ~~Hockey has a dedicated DETAIL renderer but still no dedicated MAIN renderer~~ -- **FIXED** (landed in a later concurrent-tool checkpoint, confirmed 2026-08-18): `SPORT_RENDERERS["hockey"] = _render_hockey` now exists, period/clock/strength badge on the main row, same shape as football/basketball's own MAIN renderers. `render_audit.py sports` clean. This note previously said "still no MAIN renderer" after the fix had already landed -- stale documentation, not a real gap.
 
 **Weather icons, skin scope, player-badge scope, shot-court scope, racing's fallback safety, and the four consistent hero-geometry conventions were all checked and confirmed genuinely correct** -- no changes needed, not a lack of looking.
 
