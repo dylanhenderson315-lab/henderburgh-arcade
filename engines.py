@@ -10772,14 +10772,18 @@ class MoonEngine:
     # so every ring is wide enough to read as its own orbit and every
     # dot sits far enough from its neighbors to stay distinguishable.
     # Capped at 16 (not the panel's own max radius) -- the selection
-    # ring + direction tick add up to 6px BEYOND a planet's own ring
-    # radius (see _frame_planets_orbit), and the header/footer text
-    # rows leave roughly a 45px vertical window to work with; 16 + 6
-    # fits that window with real margin on every side, checked directly
-    # via render_audit.Audit before this value was picked.
+    # Pushed as large as the panel allows -- direct owner ask ("make it
+    # as big as possible for it to be visually stunning"). The
+    # selection ring + direction tick add up to 4px BEYOND a planet's
+    # own ring radius (see _frame_planets_orbit), and the header/footer
+    # text rows leave roughly a 47px vertical window; 19 + 4 fits that
+    # window with real margin, found by empirically stress-testing
+    # increasing radii via render_audit.Audit (every planet, 8 worst-
+    # case angles, selected) until clipping appeared, then backing off
+    # -- not hand-derived and hoped correct.
     ORBIT_RADIUS = {
-        "MERCURY": 5, "VENUS": 7, "EARTH": 9, "MARS": 11,
-        "JUPITER": 13, "SATURN": 14, "URANUS": 15, "NEPTUNE": 16,
+        "MERCURY": 6, "VENUS": 8, "EARTH": 10, "MARS": 12,
+        "JUPITER": 15, "SATURN": 16, "URANUS": 18, "NEPTUNE": 19,
     }
     # Real relative size tier -- Venus/Earth genuinely larger than
     # Mercury/Mars; Jupiter/Saturn genuinely dwarf Uranus/Neptune. Not
@@ -10834,7 +10838,7 @@ class MoonEngine:
         names = self._orbit_selectable()
         sel_name = names[self.planet_idx % len(names)] if names else None
 
-        cx, cy = 32, 34
+        cx, cy = 32, 33
 
         # Real fixed orbit rings -- faint, so the planets read as the
         # actual content, but present enough that the circular
@@ -10881,7 +10885,7 @@ class MoonEngine:
             if selected:
                 pulse2 = 0.75 + 0.25 * math.sin(self.ticks * 0.08)
                 ring_white = rim((255, 255, 255), pulse2)
-                reach = half + 2
+                reach = half + 1
                 for ddx, ddy in ((0, -reach), (0, reach), (-reach, 0), (reach, 0)):
                     put_px(buf, x + ddx, y + ddy, ring_white)
                 if o is not None:
@@ -10894,7 +10898,7 @@ class MoonEngine:
                         vmag = math.hypot(dr["vx"], dr["vy"])
                         if vmag > 0:
                             tux, tuy = dr["vx"] / vmag, dr["vy"] / vmag
-                            for step in range(reach, reach + 3):
+                            for step in range(reach, reach + 2):
                                 put_px(buf, x + int(round(tux * step)), y + int(round(tuy * step)),
                                        rim(col, 0.45))
                 if name == "SATURN":
