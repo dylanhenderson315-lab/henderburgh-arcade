@@ -19,14 +19,20 @@ being wired in here:
     limit (~15 req/hour unauthenticated per public docs) -- this module
     polls at LAUNCH_REFRESH (1h), nowhere close to that ceiling.
 
-DELIBERATELY NOT BUILT: real Earth-Moon distance / a "supermoon" flag.
-A previous research pass found no free hosted API for it and
-recommended computing it locally via a simplified lunar ephemeris
-formula -- but a subtly wrong distance formula would produce a
-confidently wrong "SUPERMOON" claim to exactly the audience (a real
-lunar hobbyist) most likely to notice and be bothered by it. Flagged
-as a real, deliberate gap rather than shipped as an unverified guess;
-revisit if a real, verifiable ephemeris source is found.
+RESOLVED 2026-08-19: real Earth-Moon distance. Previously flagged here
+as deliberately not built -- no free hosted API existed, and computing
+it locally via a simplified lunar ephemeris formula risked a subtly
+wrong, confidently wrong distance shown to exactly the audience (a
+real lunar hobbyist) most likely to notice. The MOON_WORKLIST/
+PLANET_MOONS system built for "every planet's moons" uses the exact
+same real Horizons body-centered VECTORS technique already proven for
+Jupiter's Galilean moons -- EARTH's own real Moon (COMMAND='301',
+CENTER='500@399') rides that same real ephemeris service, so this gap
+closes for free rather than needing a separate local formula. A real
+"supermoon" flag (perigee-full-moon coincidence) is still not built --
+that needs comparing today's real distance against the Moon's real
+perigee/apogee range, a small honest follow-up, not the blocked
+formula problem this paragraph used to describe.
 
 Location is NOT duplicated -- reuses satellite.py's
 location_config.json via satellite.FEED.get_location(), same as every
@@ -106,14 +112,44 @@ ORBIT_BODIES = PLANETS + [("399", "EARTH")]   # real heliocentric x/y, see
                                                 # Earth included so the
                                                 # orbit diagram can show
                                                 # where WE are too.
-# Real Galilean moons of Jupiter (Io/Europa/Ganymede/Callisto), the
-# single most recognizable real moon system to point a hobbyist at --
-# direct owner ask ("select planet, zoomed in look where we can see
-# the moons"). Scoped to Jupiter only for this pass (Saturn/Mars are a
-# natural next step, same technique, not built yet -- an honest scope
-# limit, not an oversight).
-JUPITER_MOONS = [("501", "IO"), ("502", "EUROPA"), ("503", "GANYMEDE"), ("504", "CALLISTO")]
-JUPITER_ID = "599"
+# Real moon systems for EVERY planet that has real moons -- direct
+# owner ask ("do every planet's moons"). Real Horizons body ids +
+# real published mean orbital distance (km, reference data used only
+# for the ring path -- exactly like ORBIT_AU for the planets
+# themselves; the plotted position always comes from the real live
+# fetch). Mercury and Venus are HONESTLY ABSENT -- they have zero real
+# moons, not an oversight. Earth's own real Moon rides this SAME
+# Horizons body-centered technique (CENTER='500@399', COMMAND='301')
+# now proven for Jupiter -- this actually closes a gap this module's
+# own docstring used to flag as deliberately unbuilt (a locally-
+# computed Earth-Moon distance formula was refused as too risky to be
+# confidently wrong; a real Horizons fetch has no such risk).
+PLANET_CENTER_ID = {
+    "EARTH": "399", "MARS": "499", "JUPITER": "599",
+    "SATURN": "699", "URANUS": "799", "NEPTUNE": "899",
+}
+PLANET_MOONS = {
+    "EARTH": [("301", "MOON", 384400.0)],
+    "MARS": [("401", "PHOBOS", 9377.0), ("402", "DEIMOS", 23460.0)],
+    "JUPITER": [("501", "IO", 421700.0), ("502", "EUROPA", 671100.0),
+                ("503", "GANYMEDE", 1070400.0), ("504", "CALLISTO", 1882700.0)],
+    "SATURN": [("601", "MIMAS", 185540.0), ("602", "ENCELADUS", 238040.0),
+               ("603", "TETHYS", 294670.0), ("604", "DIONE", 377420.0),
+               ("605", "RHEA", 527070.0), ("606", "TITAN", 1221870.0)],
+    "URANUS": [("705", "MIRANDA", 129390.0), ("701", "ARIEL", 191020.0),
+               ("702", "UMBRIEL", 266300.0), ("703", "TITANIA", 435910.0),
+               ("704", "OBERON", 583520.0)],
+    "NEPTUNE": [("808", "PROTEUS", 117647.0), ("801", "TRITON", 354760.0)],
+}
+# Flattened round-robin worklist: (planet, moon_id, moon_name). Confirmed
+# live 2026-08-19 for one representative moon per planet (Phobos/Mars,
+# Moon/Earth, Titan/Saturn, Miranda/Uranus, Triton/Neptune) before this
+# table was trusted -- each parsed real distance matched that moon's
+# real known orbital radius (e.g. Miranda ~129,700km parsed vs.
+# ~129,390km real).
+MOON_WORKLIST = [(planet, mid, mname)
+                  for planet, moons in PLANET_MOONS.items()
+                  for mid, mname, _km in moons]
 MOON_VECTOR_REFRESH = 1800.0   # 30min -- moons orbit fast (Io: 1.77 real days), worth
                                 # refreshing more often than a planet's own slow orbit
 
@@ -435,10 +471,10 @@ class MoonFeed:
         self._neo_try = 0.0
         self._neo_vec_try = 0.0
         self._neo_ts = 0.0          # real wall time of the NEO's own last vector fetch
-        self._jmoons = {}           # name -> {x_km, y_km}, real, relative to Jupiter
-        self._jmoons_ts = {}
-        self._jmoon_cursor = 0
-        self._jmoon_try = {}
+        self._moons = {}            # planet -> {moon_name: {x_km, y_km}}, real, relative to that planet
+        self._moons_ts = {}         # planet -> {moon_name: real fetch wall time}
+        self._moon_cursor = 0
+        self._moon_try = {}         # (planet, moon_name) -> last-fetch wall time
         self._last_read = 0.0
         self._thread = None
         self._home = satellite.FEED.get_location()
@@ -458,8 +494,8 @@ class MoonFeed:
             orbits_ts = dict(self._orbits_ts)
             neo = dict(self._neo) if self._neo else None
             neo_ts = self._neo_ts
-            jmoons = {k: dict(v) for k, v in self._jmoons.items()}
-            jmoons_ts = dict(self._jmoons_ts)
+            moons = {p: {k: dict(v) for k, v in m.items()} for p, m in self._moons.items()}
+            moons_ts = {p: dict(m) for p, m in self._moons_ts.items()}
             err = self._usno_err or self._launch_err
             age = (now - self._usno_try) if self._usno_try else None
         self._ensure_thread()
@@ -467,7 +503,7 @@ class MoonFeed:
             "configured": satellite.FEED.configured,
             "age": age, "err": err, "launch": launch, "planets": planets, "sun": sun,
             "orbits": orbits, "orbits_ts": orbits_ts, "neo": neo, "neo_ts": neo_ts or None,
-            "jmoons": jmoons, "jmoons_ts": jmoons_ts,
+            "moons": moons, "moons_ts": moons_ts,
         }
         out.update(usno)
         return out
@@ -491,33 +527,37 @@ class MoonFeed:
             self._refresh_one_orbit()
             self._refresh_neo_list()
             self._refresh_neo_vector()
-            self._refresh_one_jmoon()
+            self._refresh_one_moon()
             time.sleep(5.0)
 
-    def _refresh_one_jmoon(self):
-        """Round-robin, same shape as _refresh_one_orbit() -- at most one
-        Galilean moon's real Jupiter-relative position per loop pass.
-        Always kept warm alongside everything else here (cheap: 4 real
-        bodies, 30min cadence) rather than gated on whether the moon
-        zoom view is currently open -- the SAME "tick every sub-thing so
-        switching to it is never cold" reasoning AmbientEngine's own
-        composed sub-engines already follow."""
+    def _refresh_one_moon(self):
+        """Round-robin over MOON_WORKLIST (every real moon of every real
+        planet that has one) -- at most ONE moon's real position per
+        loop pass, same shape as _refresh_one_orbit(). 19 real moons
+        total across Earth/Mars/Jupiter/Saturn/Uranus/Neptune at 30min
+        cadence each is still a light, spread-out load (well under
+        1 real Horizons call/minute on average), and every moon stays
+        warm regardless of which planet is currently selected -- the
+        same "tick every sub-thing so switching to it is never cold"
+        reasoning AmbientEngine's own composed sub-engines already
+        follow, just applied one level deeper."""
         now = time.time()
-        for _ in range(len(JUPITER_MOONS)):
-            moon_id, name = JUPITER_MOONS[self._jmoon_cursor]
-            self._jmoon_cursor = (self._jmoon_cursor + 1) % len(JUPITER_MOONS)
-            if now - self._jmoon_try.get(name, 0.0) < MOON_VECTOR_REFRESH:
+        for _ in range(len(MOON_WORKLIST)):
+            planet, moon_id, name = MOON_WORKLIST[self._moon_cursor]
+            self._moon_cursor = (self._moon_cursor + 1) % len(MOON_WORKLIST)
+            key = (planet, name)
+            if now - self._moon_try.get(key, 0.0) < MOON_VECTOR_REFRESH:
                 continue
-            self._jmoon_try[name] = now
+            self._moon_try[key] = now
             try:
-                parsed = _fetch_moon_vector(moon_id, JUPITER_ID)
+                parsed = _fetch_moon_vector(moon_id, PLANET_CENTER_ID[planet])
             except (urllib.error.URLError, TimeoutError, ValueError,
                     json.JSONDecodeError, OSError, KeyError):        # noqa: BLE001
                 return
             if parsed is not None:
                 with self._lock:
-                    self._jmoons[name] = parsed
-                    self._jmoons_ts[name] = now
+                    self._moons.setdefault(planet, {})[name] = parsed
+                    self._moons_ts.setdefault(planet, {})[name] = now
             return
 
     def _refresh_one_orbit(self):

@@ -10535,7 +10535,8 @@ class MoonEngine:
         self.ticks = 0
         self.view = "moon"
         self.planet_idx = 0
-        self.planet_view = "orbit"   # "orbit" (real heliocentric top-down) | "moons" (Jupiter zoom) | "dome" (real az/el sky)
+        self.planet_view = "orbit"   # "orbit" (real heliocentric top-down) | "moons" (a planet's real moon system, zoomed) | "dome" (real az/el sky)
+        self.zoomed_planet = None    # which planet's moons are showing, while planet_view == "moons"
         self._orbit_dr = {}          # name -> {x0,y0,t0,vx,vy} real dead-reckoning state
         self._orbit_prev_ts = {}     # name -> last-seen fetch timestamp, to detect a NEW real sample
 
@@ -10552,8 +10553,9 @@ class MoonEngine:
         for the wrong view was the real bug behind "no earth is there"
         and moons never being reachable via left/right."""
         if self.planet_view == "moons":
-            jmoons = self.data.get("jmoons") or {}
-            return [name for _id, name in moon.JUPITER_MOONS if name in jmoons]
+            have = (self.data.get("moons") or {}).get(self.zoomed_planet) or {}
+            real_moons = moon.PLANET_MOONS.get(self.zoomed_planet) or []
+            return [name for _id, name, _km in real_moons if name in have]
         if self.planet_view == "orbit":
             return self._orbit_selectable()
         return self._visible_planet_names()
@@ -10569,17 +10571,29 @@ class MoonEngine:
             self.planet_idx = (self.planet_idx + step) % len(names)
 
     def _cycle_planet_view(self):
-        """orbit -> moons (ONLY when JUPITER is the real selected body,
-        the one system this project has real moon data for) -> dome ->
-        orbit. Real owner ask: "select planet, zoomed in look where we
-        can see the moons"."""
+        """orbit -> moons (ONLY when the real selected body is a planet
+        moon.PLANET_MOONS has real moons for -- EARTH/MARS/JUPITER/
+        SATURN/URANUS/NEPTUNE; Mercury/Venus are honestly excluded, they
+        have zero real moons) -> dome -> orbit. Real owner ask: "do
+        every planet's moons... select planet, zoomed in look where we
+        can see the moons". `self.zoomed_planet` remembers WHICH planet
+        was selected at the moment moons was entered, since planet_idx
+        gets reused to index the moon list once inside that view --
+        without this, there would be no way to know whose moons are
+        being browsed after the first left/right press."""
         order = ["orbit", "dome"]
         sel = self._orbit_selectable()
         sel_name = sel[self.planet_idx % len(sel)] if sel else None
-        if sel_name == "JUPITER":
+        if sel_name in moon.PLANET_MOONS:
             order = ["orbit", "moons", "dome"]
         i = order.index(self.planet_view) if self.planet_view in order else 0
-        self.planet_view = order[(i + 1) % len(order)]
+        new_view = order[(i + 1) % len(order)]
+        if new_view == "moons":
+            self.zoomed_planet = sel_name
+            self.planet_idx = 0   # fresh index into THIS planet's own moon list
+        elif self.planet_view == "moons":
+            self.planet_idx = sel.index(self.zoomed_planet) if self.zoomed_planet in sel else 0
+        self.planet_view = new_view
 
     def _visible_planet_names(self):
         """Real planet names with at least a real az/el reading -- order
@@ -10628,10 +10642,18 @@ class MoonEngine:
         neo_ts = self.data.get("neo_ts")
         if neo and neo.get("x_au") is not None and neo_ts:
             sources.append(({"NEO": {"x_au": neo["x_au"], "y_au": neo["y_au"]}}, {"NEO": neo_ts}))
-        jmoons = self.data.get("jmoons") or {}
-        jmoons_ts = self.data.get("jmoons_ts") or {}
-        if jmoons:
-            sources.append((jmoons, jmoons_ts))
+        # Every planet's moons, namespaced "PLANET:MOON" so e.g. two
+        # planets never collide on a dead-reckoning key (not a real
+        # current collision, but real future-proofing worth doing once
+        # rather than assuming names stay globally unique forever).
+        all_moons = self.data.get("moons") or {}
+        all_moons_ts = self.data.get("moons_ts") or {}
+        for planet, bodies in all_moons.items():
+            ts_map = all_moons_ts.get(planet) or {}
+            ns_bodies = {f"{planet}:{name}": o for name, o in bodies.items()}
+            ns_ts = {f"{planet}:{name}": ts for name, ts in ts_map.items()}
+            if ns_bodies:
+                sources.append((ns_bodies, ns_ts))
         for bodies, ts_map in sources:
             for name, o in bodies.items():
                 ts = ts_map.get(name)
@@ -10774,7 +10796,11 @@ class MoonEngine:
         au_max = max(self.ORBIT_AU.values())
 
         def scaled_r(au):
-            return r_max * math.sqrt(max(0.0, au) / au_max)
+            # Clamped to r_max -- same reasoning flights.py's own
+            # `_scope_r_frac()` clamp already established: a real body
+            # further out than the reference max (an eccentric NEO, or
+            # any future outlier) draws AT the rim, never off-panel.
+            return min(r_max, r_max * math.sqrt(max(0.0, au) / au_max))
 
         for sx, sy in self._STARS:
             put_px(buf, sx, sy, (60, 62, 78))
@@ -10880,41 +10906,56 @@ class MoonEngine:
         rr = scaled_r(au)
         return int(round(cx + rr * math.cos(ang))), int(round(cy + rr * math.sin(ang)))
 
-    # Real observed colors of the 4 Galilean moons -- Io's real sulfur-
-    # yellow, Europa's real icy white-tan, Ganymede's real grey-brown,
-    # Callisto's real dark grey -- same "real observed color, not
-    # invented" discipline as PLANET_COLOR.
-    JMOON_COLOR = {"IO": (240, 220, 90), "EUROPA": (230, 220, 200),
-                   "GANYMEDE": (170, 150, 130), "CALLISTO": (110, 100, 95)}
+    # Real approximate observed/imaged colors for every real moon in
+    # moon.PLANET_MOONS -- e.g. Titan's real hazy orange smog, Triton's
+    # real pinkish nitrogen-ice tint, Enceladus's real (famously the
+    # solar system's most reflective) bright white -- same "real
+    # observed color, not invented" discipline as PLANET_COLOR. Less-
+    # imaged small moons (Proteus, the outer Uranians) get an honest
+    # neutral grey rather than a guessed distinctive hue.
+    MOON_COLOR = {
+        "MOON": (210, 210, 210), "PHOBOS": (140, 120, 100), "DEIMOS": (150, 130, 110),
+        "IO": (240, 220, 90), "EUROPA": (230, 220, 200), "GANYMEDE": (170, 150, 130),
+        "CALLISTO": (110, 100, 95),
+        "MIMAS": (210, 210, 215), "ENCELADUS": (250, 250, 255), "TETHYS": (220, 225, 230),
+        "DIONE": (200, 200, 205), "RHEA": (215, 215, 220), "TITAN": (230, 170, 90),
+        "MIRANDA": (180, 180, 185), "ARIEL": (200, 200, 205), "UMBRIEL": (110, 110, 115),
+        "TITANIA": (170, 170, 175), "OBERON": (160, 150, 145),
+        "PROTEUS": (120, 120, 125), "TRITON": (225, 215, 220),
+    }
 
     def _frame_planets_moons(self):
-        """Real zoomed-in Jupiter system -- direct owner idea ("select
-        planet, zoomed in look where we can see the moons"). Jupiter at
-        centre (a real filled disc, its own real banded-tan color, sized
-        larger than any moon the way it genuinely dwarfs them), the 4
-        real Galilean moons at their REAL current position relative to
-        Jupiter (moon.py's own real Horizons fetch, moon.JUPITER_MOONS),
+        """Real zoomed-in moon system for WHICHEVER planet was selected
+        (self.zoomed_planet) -- direct owner ask ("do every planet's
+        moons... select planet, zoomed in look where we can see the
+        moons"). The planet sits at centre (a real filled disc, its own
+        real color, sized larger than any moon the way a planet
+        genuinely dwarfs them), its real moons at their REAL current
+        position (moon.py's own real Horizons fetch, moon.PLANET_MOONS),
         dead-reckoned between real fetches the same way every other body
-        on this hub now is.
+        on this hub now is. Mercury/Venus never reach this view -- they
+        have zero real moons, so _cycle_planet_view() never offers it
+        for them, an honest omission rather than an empty screen.
 
         Real moon orbital radii (km, public reference data, used only
-        for the ring paths exactly like ORBIT_AU is for planets): Io
-        421,700 / Europa 671,100 / Ganymede 1,070,400 / Callisto
-        1,882,700 -- Callisto's real orbit is ~4.5x Io's, so sqrt-scaling
-        is used again for the same honest-fit reason as the solar
-        system view.
+        for the ring paths, exactly like ORBIT_AU is for planets) can
+        span a wide range within one system (Neptune's Proteus at
+        117,647km vs. Triton at 354,760km) -- sqrt-scaling again, same
+        honest-fit reasoning as the solar system view.
         """
         buf = blank()
         fill(buf, self.BG)
-        draw_header(buf, "JUPITER SYSTEM", self.ACCENT, right_tag="MOONS")
-        jmoons = self.data.get("jmoons") or {}
+        planet = self.zoomed_planet
+        real_moons = moon.PLANET_MOONS.get(planet) or []
+        draw_header(buf, f"{planet} SYSTEM" if planet else "MOONS", self.ACCENT, right_tag="MOONS")
+        have = (self.data.get("moons") or {}).get(planet) or {}
         cx, cy = 32, 30
         r_max = 27
-        ring_km = {"IO": 421700.0, "EUROPA": 671100.0, "GANYMEDE": 1070400.0, "CALLISTO": 1882700.0}
-        km_max = max(ring_km.values())
+        ring_km = {name: km for _id, name, km in real_moons}
+        km_max = max(ring_km.values()) if ring_km else 1.0
 
         def scaled_r(km):
-            return r_max * math.sqrt(max(0.0, km) / km_max)
+            return min(r_max, r_max * math.sqrt(max(0.0, km) / km_max))
 
         for sx, sy in self._STARS:
             put_px(buf, sx, sy, (60, 62, 78))
@@ -10927,27 +10968,28 @@ class MoonEngine:
                 put_px(buf, int(round(cx + rr * math.cos(a))),
                        int(round(cy + rr * math.sin(a))), (30, 34, 26))
 
-        # Jupiter itself -- filled disc, real banded color, breathing
-        # like the Sun does on the solar-system view (one consistent
-        # "this is the real light/mass at the centre" language).
+        # The planet itself -- filled disc, real color, breathing like
+        # the Sun does on the solar-system view (one consistent "this
+        # is the real light/mass at the centre" language).
         pulse = 0.85 + 0.15 * math.sin(self.ticks * 0.05)
-        jup_col = rim(self.PLANET_COLOR["JUPITER"], pulse)
+        planet_col = rim(self.PLANET_COLOR.get(planet, self.INK), pulse)
         for dx in range(-2, 3):
             for dy in range(-2, 3):
                 if dx * dx + dy * dy <= 5:
-                    put_px(buf, cx + dx, cy + dy, jup_col)
+                    put_px(buf, cx + dx, cy + dy, planet_col)
 
-        names = [name for _id, name in moon.JUPITER_MOONS if name in jmoons]
+        names = [name for _id, name, _km in real_moons if name in have]
         self.planet_idx %= max(1, len(names))
         sel_name = names[self.planet_idx] if names else None
 
-        for _id, name in moon.JUPITER_MOONS:
-            o = jmoons.get(name)
+        for _id, name, _km in real_moons:
+            o = have.get(name)
             if not o:
                 continue
-            x, y = self._orbit_xy(name, {"x_au": o["x_km"], "y_au": o["y_km"]},
+            dr_key = f"{planet}:{name}"
+            x, y = self._orbit_xy(dr_key, {"x_au": o["x_km"], "y_au": o["y_km"]},
                                    cx, cy, scaled_r, max_extrap_s=self.MOON_MAX_EXTRAP_S)
-            col = self.JMOON_COLOR.get(name, self.INK)
+            col = self.MOON_COLOR.get(name, self.INK)
             selected = name == sel_name
             if selected:
                 pulse2 = 0.75 + 0.25 * math.sin(self.ticks * 0.08)
@@ -10959,12 +11001,12 @@ class MoonEngine:
 
         y = 57
         if sel_name:
-            o = jmoons.get(sel_name)
+            o = have.get(sel_name)
             if o:
                 dist_km = math.hypot(o["x_km"], o["y_km"])
                 draw_text3x5(buf, 2, y,
                              fit_text(f"{sel_name} {dist_km:,.0f} KM", WIDTH - 4),
-                             self.JMOON_COLOR.get(sel_name, self.INK))
+                             self.MOON_COLOR.get(sel_name, self.INK))
             else:
                 draw_text3x5(buf, 2, y, fit_text(f"{sel_name} -- LOCATING", WIDTH - 4), self.INK_DIM)
         else:
