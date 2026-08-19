@@ -107,6 +107,18 @@ FOLLOW_REG_SOURCES = (
 )
 
 RADIUS_NM = 40                # "in the local sky" -- roughly a 15 min drive's worth of horizon
+WELCOME_BACK_MIN_S = 86400.0  # a real absence, not a lap of the pattern -- see the WELCOME BACK note below
+
+
+def _fmt_gap_days(gap_s):
+    """Real elapsed time since a tail's last sighting, in whichever
+    whole unit reads best -- days when it's been a real day-plus (the
+    only range WELCOME_BACK_MIN_S ever calls this with), hours below
+    that. Never a guessed round number."""
+    days = gap_s / 86400.0
+    if days >= 1:
+        return f"{days:.0f}D AGO" if days >= 1.5 else "1D AGO"
+    return f"{gap_s / 3600.0:.0f}H AGO"
 MAX_TRACKED = 8                 # nearest N, so the mode has a bounded, meaningful list
 MAX_LOOKUPS_PER_REFRESH = 8     # radar 8 + board candidates; cache means this is burst-only
 
@@ -1491,10 +1503,26 @@ class FlightFeed:
         # cadence. Only aircraft that actually broadcast a registration
         # are recorded -- see hangar.py's own docstring on why a bare
         # hex isn't treated as a substitute tail number.
+        # WELCOME BACK -- a favorited tail genuinely returning after a
+        # real absence, direct owner ask. Only for `favorite_aircraft`
+        # (a deliberate owner choice, same "the owner's own pick earns
+        # this" reasoning FAVORITE_BOOST/FAVORITE_GLOW_FLOOR already use)
+        # and only past a real threshold (WELCOME_BACK_MIN_S, 1 real day)
+        # -- record_sighting()'s own VISIT_GAP_S (30min) is the right
+        # threshold for "is this a new visit" but far too twitchy for an
+        # event worth surfacing; a favorite circling the pattern for 35
+        # minutes must not fire a "welcome back" every lap.
         for ac in sky:
-            if ac["reg"]:
-                hangar.LOG.record_sighting(
-                    ac["reg"], ac["type"], (ac.get("route") or {}).get("airline"))
+            if not ac["reg"]:
+                continue
+            gap = hangar.LOG.record_sighting(
+                ac["reg"], ac["type"], (ac.get("route") or {}).get("airline"))
+            if (ac.get("is_favorite") and gap is not None
+                    and gap >= WELCOME_BACK_MIN_S):
+                label = _ident(ac)
+                gap_txt = _fmt_gap_days(gap)
+                summary = f"{label} IS BACK -- LAST SEEN {gap_txt}"
+                events_log.LOG.record("plane", paneltext.panel_text(summary))
 
         # PLANE-IN-WINDOW TAKEOVER -- one-shot "newly entered the window"
         # detection, hooked into this SAME refresh cycle (zero new I/O,

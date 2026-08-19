@@ -8252,6 +8252,7 @@ class FlightEngine(Browsable, BigMomentSource):
         # against the CURRENT list at every read for the same reason.
         self.menu_idx = 0
         self.favorite_aircraft = set()
+        self._hangar_seen_regs = None   # see _tag_new_hangar_weather()
         self.hold = 0
         self.cycling = True
         self.ticks = 0
@@ -8688,6 +8689,7 @@ class FlightEngine(Browsable, BigMomentSource):
         # this project uses so a shrinking list (a real eviction at the
         # cap) can never IndexError or strand the cursor.
         self.hangar_entries = hangar.LOG.get()
+        self._tag_new_hangar_weather()
         if self.hangar_entries:
             self.hangar_idx %= len(self.hangar_entries)
             if self.view == self.VIEW_HANGAR:
@@ -9512,6 +9514,45 @@ class FlightEngine(Browsable, BigMomentSource):
         if m:
             return f"{m}M {s:02d}S"
         return f"{s}S"
+
+    def _tag_new_hangar_weather(self):
+        """"Seen in the rain" -- direct owner ask, wired at the RENDER
+        layer (here, engines.py) rather than flights.py, on direct
+        correction: flights.py must stay exactly as ignorant of
+        weather.py as it already is (importing weather.py there would
+        start weather's background poll thread as a side effect of
+        every Hangar sighting, a real ongoing I/O cost this project
+        does not casually accept). engines.py already imports BOTH --
+        the correct seam for an opportunistic cross-engine read.
+
+        weather.FEED.peek() (weather.py, new) is a PASSIVE read: real cached
+        conditions if weather's feed thread is already alive with real
+        data, None immediately otherwise -- it NEVER calls
+        weather.FEED.get() and never starts the thread itself. So this
+        only ever tags a Hangar entry when weather happens to already
+        be warm for some other real reason (someone is on weather mode,
+        or the severe-alert takeover has it running); most of the time
+        it will honestly tag nothing, and that is correct, not a gap.
+
+        Diffs THE HANGAR's own registration set tick-to-tick (adopt on
+        the first read, same idiom as every other one-shot detector in
+        this project) so only a GENUINELY NEW entry gets tagged --
+        never a historical one re-tagged with today's weather, which
+        would misrepresent a sighting from days/weeks ago."""
+        regs = {e.get("reg") for e in self.hangar_entries if e.get("reg")}
+        if self._hangar_seen_regs is None:
+            self._hangar_seen_regs = regs
+            return
+        new_regs = regs - self._hangar_seen_regs
+        self._hangar_seen_regs = regs
+        if not new_regs:
+            return
+        cond = weather.FEED.peek()
+        text = (cond or {}).get("text")
+        if not text:
+            return
+        for reg in new_regs:
+            hangar.LOG.tag_weather(reg, text)
 
     def _hangar_dossier(self, e):
         """Zero I/O -- hangar.SHEETS is last-good cache."""
@@ -18674,6 +18715,7 @@ class AmbientEngine(Browsable):
         self._storm_key = None           # last weather-track set, for the steal
         self._page_slot = 0              # which ACT_PAGE name this AUTO lap shows
         self._channel_flash = 0
+        self._last_sky_share = 0.0       # see _check_sky_share()
         # DIRECTOR state -- open on a montage so the very first thing
         # anyone sees is the wall surveying what is happening, not a
         # cold single card.
@@ -19075,6 +19117,41 @@ class AmbientEngine(Browsable):
             pass
 
     # ---- simulation --------------------------------------------------------
+    SKY_SHARE_COOLDOWN_S = 600.0   # both conditions can each persist for many
+                                    # real minutes on their own; this is a real
+                                    # one-time "moment", not a repeating alert
+
+    def _check_sky_share(self):
+        """SKY-SHARE MOMENT, direct owner ask: a genuinely tracked aircraft
+        and a genuinely visible satellite/ISS pass sharing the same real
+        sky right now. Both facts are already computed by flights.py and
+        skypass.py -- this only NOTICES the real coincidence and logs it,
+        never invents a relationship between them (no claim they are
+        anywhere near each other, just that both are real and current at
+        the same moment). Zero new I/O: reads flights.FEED.get() and the
+        satellite sub-engine's own already-ticked self.sky, both already
+        warm whenever ambient is running (both are in ACT_SKY)."""
+        now = time.time()
+        if now - self._last_sky_share < self.SKY_SHARE_COOLDOWN_S:
+            return
+        sat = self.engines.get("satellite")
+        if not sat:
+            return
+        sky_now = (sat.sky or {}).get("sky_now") or []
+        obj = next((o for o in sky_now if o.get("visible")), None)
+        if not obj:
+            return
+        aircraft = (flights.FEED.get() or {}).get("sky") or []
+        ac = next((a for a in aircraft if isinstance(a.get("alt_ft"), (int, float))), None)
+        if not ac:
+            return
+        self._last_sky_share = now
+        label = flights._ident(ac)
+        alt = int(ac["alt_ft"])
+        obj_name = obj.get("name") or "AN OBJECT"
+        summary = paneltext.panel_text(f"{obj_name} OVERHEAD WHILE {label} CLIMBS THROUGH {alt}FT")
+        events_log.LOG.record("plane", summary)
+
     def tick(self):
         self.ticks += 1
         self._scroll_tick()
@@ -19087,6 +19164,8 @@ class AmbientEngine(Browsable):
         for n, e in self.engines.items():
             if n in wanted:
                 e.tick()
+        if "flights" in wanted and "satellite" in wanted:
+            self._check_sky_share()
         try:
             self.current.auto()
         except Exception:                      # noqa: BLE001

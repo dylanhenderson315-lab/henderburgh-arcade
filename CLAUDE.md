@@ -6652,3 +6652,76 @@ real ink extent of a glyph, not a guessed advance amount.
 - The user runs this session-by-session and steps away for days at a
   time; leave in-progress work in a clearly-described, non-broken state
   (as above) rather than mid-refactor.
+
+## Cross-engine opportunistic reads: the `peek()` pattern (2026-08-19)
+
+**The problem this solves**: `FEED.get()` on every module here is the
+one call that keeps a feed's background poll thread alive (`_ensure_
+thread()`/`IDLE_STOP`). That is exactly right for a mode that's actually
+showing that data -- but it means a DIFFERENT module that only wants to
+OPPORTUNISTICALLY read another feed's data (real data, only if it
+happens to already be warm for some other reason, never worth starting
+a whole new poll cadence for) cannot safely call `get()` without a real,
+ongoing I/O cost it didn't ask for.
+
+**First real use**: Hangar's "seen in the rain" weather tag
+(`FlightEngine._tag_new_hangar_weather()`, engines.py). The obvious-
+looking wrong approach was `flights.py` importing `weather.py` directly
+so THE HANGAR's own recording code (which runs on `flights.py`'s
+background poll thread) could read a condition -- rejected on direct
+correction, because it would silently start `weather.FEED`'s poll
+thread as a side effect of every single new Hangar sighting, a real
+ongoing NWS-polling cost with no relationship to whether anyone is
+actually looking at weather.
+
+**The pattern**: a `peek()` method on the FEED class (not the engine),
+alongside its existing `get()`:
+- Reads the SAME cached instance state `get()` would (`self._cond` etc.,
+  under the same lock).
+- **Never calls `_ensure_thread()`.** Confirm the real one call site of
+  `_ensure_thread()` in the module before writing `peek()` -- if
+  anything else in that module also starts the thread, `peek()` isn't
+  safe until that's accounted for too.
+- **Never touches `_last_read`/whatever timestamp the poll loop's
+  `IDLE_STOP` check reads.** Only `get()` should extend a thread's
+  life; `peek()` free-rides on whichever real caller is already doing
+  that, or honestly returns `None` if nobody is.
+- Returns `None` immediately (never blocks, never guesses) when the
+  thread isn't alive or no real value has landed yet -- the caller must
+  treat `None` as a legitimate, common, correct answer, not an error.
+
+**Wiring stays out of the passive module.** `weather.py` gained `peek()`
+but was NOT given any awareness of Hangar/flights -- the actual tagging
+logic lives in `engines.py`, which already imports both `flights` and
+`weather` for unrelated reasons, the correct seam for a cross-engine
+read. `flights.py` remains exactly as ignorant of `weather.py` as it
+was before this feature existed.
+
+**Verified, specifically proving the decoupling, not just asserting
+it**: 200 direct `peek()` calls against a cold `weather.FEED` singleton
+-- zero thread starts (`weather.FEED._thread` stayed `None` the whole
+time), confirmed against `threading.active_count()`. A single real
+`get()` call immediately after started the thread as expected --
+proving `peek()`'s absence of a side effect isn't just "the test never
+happened to trigger it." A second test simulated 50 real `FlightEngine`
+ticks recording 50 new real-shaped Hangar entries with weather NEVER
+touched -- zero thread starts, zero entries tagged (the honest correct
+outcome). A third test warmed `weather.FEED` with real-shaped cached
+data and confirmed tagging actually fires for a genuinely new entry,
+and that a SECOND new entry with different real conditions does not
+retroactively retag the first (each tag is a one-time snapshot of what
+was true when that tail was first seen, never overwritten later).
+
+**Real-world note, not a caveat that weakens the design**: in production
+this feature will actually fire often, not rarely -- the global severe-
+weather takeover (`arcade_server._severe_alert_frame()`) already reads
+`weather.FEED.get()` on every render tick from every mode, so weather's
+poll thread is realistically almost always warm regardless of what mode
+is showing. `peek()` correctly free-rides on that existing keep-alive
+rather than adding a second one -- exactly the point of the pattern.
+
+**Use this exact shape for the next cross-engine opportunistic read**
+this project inevitably wants (a satellite pass tagging a flight
+sighting, a sports score tagging a note, etc.) -- don't reach for a
+direct cross-module import of a `FEED`-shaped class, and don't call
+`get()` from a module that has no business keeping that feed warm.

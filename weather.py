@@ -1374,6 +1374,28 @@ class WeatherFeed:
             "err": err,
         }
 
+    def peek(self):
+        """PASSIVE real-conditions read -- a template for any future
+        cross-engine opportunistic read in this project (2026-08-19,
+        the Hangar "seen in the rain" tag is the first user).
+
+        NEVER calls _ensure_thread() and NEVER touches _last_read (the
+        one signal `_loop()`'s IDLE_STOP check reads). get() is the
+        ONLY place `_ensure_thread()` is called, so a caller that only
+        ever calls peek() can NEVER start this feed's background poll
+        thread -- confirmed by reading _ensure_thread()'s one real call
+        site before writing this. If the thread is already alive for
+        some OTHER real reason (weather mode is on, or the severe-alert
+        takeover is reading it), peek() sees real cached data; if not,
+        it returns None immediately, an honest "not available right
+        now" -- never a forced poll, never a guess."""
+        with self._lock:
+            if not (self._thread and self._thread.is_alive()):
+                return None
+            if not self._cond:
+                return None
+            return dict(self._cond)
+
     # ---- polling -----------------------------------------------------
     def _ensure_thread(self):
         with self._lock:

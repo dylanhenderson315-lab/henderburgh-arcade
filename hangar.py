@@ -98,7 +98,14 @@ class HangarLog:
         airline data seen on a LATER sighting fills in a gap from an
         earlier one (e.g. adsbdb's route lookup resolving the airline a
         cycle or two after the aircraft was first logged) rather than
-        leaving it stuck missing forever."""
+        leaving it stuck missing forever.
+
+        Returns the real gap in seconds since this tail's last real
+        sighting (0.0 on a continuous pass, None on a brand-new entry --
+        there is no real prior sighting to gap from) so a caller can
+        decide whether a genuine return-after-absence is worth a real
+        event, without re-deriving VISIT_GAP_S's own threshold logic a
+        second time."""
         with self._lock:
             self._ensure_loaded()
             now = time.time()
@@ -109,18 +116,39 @@ class HangarLog:
                     "first_seen": now, "last_seen": now, "times_seen": 1,
                 }
                 self._evict_if_over_cap()
-            else:
-                if ac_type and not e.get("type"):
-                    e["type"] = ac_type
-                if airline and not e.get("airline"):
-                    e["airline"] = airline
-                # Increment only on a new VISIT. last_seen is refreshed
-                # every poll while the aircraft stays in range, so a
-                # continuous pass keeps the same times_seen. A gap longer
-                # than VISIT_GAP_S is a real departure and return.
-                if now - float(e.get("last_seen") or 0) >= VISIT_GAP_S:
-                    e["times_seen"] = e.get("times_seen", 1) + 1
-                e["last_seen"] = now
+                self._save()
+                return None
+            if ac_type and not e.get("type"):
+                e["type"] = ac_type
+            if airline and not e.get("airline"):
+                e["airline"] = airline
+            # Increment only on a new VISIT. last_seen is refreshed
+            # every poll while the aircraft stays in range, so a
+            # continuous pass keeps the same times_seen. A gap longer
+            # than VISIT_GAP_S is a real departure and return.
+            gap = now - float(e.get("last_seen") or 0)
+            if gap >= VISIT_GAP_S:
+                e["times_seen"] = e.get("times_seen", 1) + 1
+            e["last_seen"] = now
+            self._save()
+            return gap
+
+    def tag_weather(self, reg, condition_text):
+        """"Seen in the rain" -- a real snapshot of the real condition
+        text at the moment a NEW tail first entered the collection,
+        called from engines.py's cross-engine opportunistic read (see
+        weather.FEED.peek()). Only ever sets this ONCE -- a later call
+        for the same reg (should one ever happen) does not overwrite a
+        real recorded condition with a different later one, since the
+        whole point is "what it was like when this was first seen",
+        not "what it's like now". No-op if the tail isn't in the
+        collection at all (a real race with eviction, harmless)."""
+        with self._lock:
+            self._ensure_loaded()
+            e = self._entries.get(reg)
+            if e is None or e.get("weather"):
+                return
+            e["weather"] = condition_text
             self._save()
 
     def _evict_if_over_cap(self):
@@ -494,6 +522,9 @@ def dossier(entry, entries, sheet=None, now=None):
     ordinal, n_all = bird_ordinal(entries, e.get("reg"))
     if ordinal and n_all:
         here.append("BIRD %d/%d" % (ordinal, n_all))
+    weather_txt = e.get("weather")
+    if weather_txt and len(here) < 4:
+        here.append("SEEN IN %s" % weather_txt)
     if here:
         pages.append(here[:4])
 
