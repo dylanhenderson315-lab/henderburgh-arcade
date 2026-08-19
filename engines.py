@@ -10861,17 +10861,6 @@ class MoonEngine:
 
         cx, cy = 32, 32
 
-        # Real fixed orbit rings -- faint, so the planets read as the
-        # actual content, but present enough that the circular
-        # "orbiting the Sun" picture is unmistakable at a glance.
-        for name in self.ORBIT_ORDER:
-            rr = self.ORBIT_RADIUS[name]
-            n = max(20, int(rr * 3.2))
-            for i in range(n):
-                a = 2 * math.pi * i / n
-                put_px(buf, int(round(cx + rr * math.cos(a))),
-                       int(round(cy + rr * math.sin(a))), (24, 28, 40))
-
         # The Sun -- real centre, breathing core + radiating rays.
         pulse = 0.85 + 0.15 * math.sin(self.ticks * 0.05)
         sun_col = rim((255, 220, 120), pulse)
@@ -10993,9 +10982,9 @@ class MoonEngine:
         """A real top-down annulus using Saturn's own real ring extents
         -- not a decorative flourish, the actual structure (three real
         bands with a real gap at the Cassini Division). Drawn as
-        several concentric circle outlines per band (same technique
-        the orbit-path rings already use) rather than a filled disc,
-        so the real Cassini Division gap is genuinely visible as a
+        several concentric circle outlines per band rather than a
+        filled disc, so the real Cassini Division gap is genuinely
+        visible as a
         dark ring between B and A."""
         for lo_km, hi_km, col in self.SATURN_RING_BANDS:
             r_lo, r_hi = scaled_r(lo_km), scaled_r(hi_km)
@@ -11061,13 +11050,6 @@ class MoonEngine:
             if not mimas_km or not mimas_r:
                 return 0.0
             return min(mimas_r - 1, km / mimas_km * mimas_r)
-
-        for name, rr in slot_r.items():
-            n_pts = max(20, int(rr * 3.2))
-            for i in range(n_pts):
-                a = 2 * math.pi * i / n_pts
-                put_px(buf, int(round(cx + rr * math.cos(a))),
-                       int(round(cy + rr * math.sin(a))), (30, 34, 26))
 
         # The planet itself -- filled disc, real color, breathing like
         # the Sun does on the solar-system view (one consistent "this
