@@ -136,6 +136,43 @@ ISS_NORAD_ID = 25544
 CSS_NORAD_ID = 48274     # CSS / Tianhe -- the other CelesTrak `stations` object
 
 
+# ---- moon phase ---------------------------------------------------------
+# Zero network cost, zero API -- real deterministic ephemeris arithmetic,
+# the same category of "computed, not invented" fact this project's sun-
+# position math (weather's sunrise/sunset gating, the clock's sun-locked
+# dial) already relies on. Real known new-moon reference epoch (2000-01-06
+# 18:14 UTC, public astronomical constant) + the real mean synodic month
+# length (29.530588861 real days). Accurate to roughly half a day over any
+# realistic span -- more than enough for a small panel icon, and never
+# claims better precision than that.
+_MOON_SYNODIC_DAYS = 29.530588861
+_MOON_REF_NEW_MOON_JD = 2451550.1
+
+
+def moon_phase_frac(ts=None):
+    """0..1 through the current synodic month -- 0/1 = new moon, 0.5 =
+    full. Pure math, no I/O."""
+    now = time.time() if ts is None else ts
+    jd = now / 86400.0 + 2440587.5   # unix epoch -> Julian Date
+    days_since = jd - _MOON_REF_NEW_MOON_JD
+    return (days_since % _MOON_SYNODIC_DAYS) / _MOON_SYNODIC_DAYS
+
+
+_MOON_PHASE_NAMES = (
+    (0.0625, "NEW MOON"), (0.1875, "WAXING CRESCENT"), (0.3125, "FIRST QUARTER"),
+    (0.4375, "WAXING GIBBOUS"), (0.5625, "FULL MOON"), (0.6875, "WANING GIBBOUS"),
+    (0.8125, "LAST QUARTER"), (0.9375, "WANING CRESCENT"),
+)
+
+
+def moon_phase_name(frac):
+    """Real 8-phase name for a 0..1 fraction from moon_phase_frac()."""
+    for edge, name in _MOON_PHASE_NAMES:
+        if frac < edge:
+            return name
+    return "NEW MOON"
+
+
 # ---- astronomy ---------------------------------------------------------
 def _gmst(jd):
     """Greenwich mean sidereal time, radians."""

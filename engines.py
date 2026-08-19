@@ -17878,8 +17878,20 @@ class ClockEngine:
         # something a clock alone cannot. Costs nothing: weather.FEED is
         # already read every tick for the temperature.
         sun = self._sun_line()
-        if sun and y <= HEIGHT - 6:
-            draw_text_centered(buf, y, sun, self.SUN)
+        if sun:
+            if y <= HEIGHT - 6:
+                draw_text_centered(buf, y, sun, self.SUN)
+                y += 8
+        # Moon phase -- real deterministic ephemeris math (skypass.
+        # moon_phase_frac(), a real known new-moon epoch + the real
+        # synodic month length), zero I/O, always available, so this is
+        # a genuine y-cursor row rather than an honest-absence one. Only
+        # drawn when the sun/temp/ISS rows above left real room, same
+        # "don't crowd the hero digits" discipline every other row here
+        # already follows.
+        if y <= HEIGHT - 6:
+            moon = skypass.moon_phase_name(skypass.moon_phase_frac())
+            draw_text_centered(buf, y, fit_text(moon, WIDTH - 4), self.DIM)
 
         return bytes(buf)
 
