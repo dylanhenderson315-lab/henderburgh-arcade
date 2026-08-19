@@ -562,6 +562,16 @@
     <div id="gd-event" class="hint"></div>
   </div>
 
+  <!-- SPACE hub page select -->
+  <div id="spacecard" class="card hide">
+    <h2>Space — sky · moon · events</h2>
+    <div class="hint" style="margin:0 0 9px;">SKY: ISS + every bright satellite (up/down for
+      pass list vs. live dome, left/right to browse). MOON: real phase/rise-set/next launch
+      (rotate for the real planet dome, left/right to pick a planet). EVENTS: aurora forecast,
+      next meteor shower, next launch distance.</div>
+    <div class="row" id="space-pages"></div>
+  </div>
+
   <!-- Mirror settings -->
   <div id="mirrorcard" class="card hide">
     <h2>Mirror — screen → panel</h2>
@@ -1065,6 +1075,23 @@ function addSymbol(inputId, sym){
   $(inputId).value = cur.join(', ');
   mark();
 }
+const SPACE_PAGE_LABEL = {sky: 'SKY', moon: 'MOON', events: 'EVENTS'};
+async function loadSpacePage(){
+  try{
+    const j = await (await fetch('/api/space/page')).json();
+    if (j.mode !== 'space') return;
+    const el = $('space-pages'); if (!el) return;
+    el.innerHTML = (j.pages || []).map(p =>
+      `<button data-space-page="${p}" class="${p === j.page ? 'active' : ''}">${SPACE_PAGE_LABEL[p] || p}</button>`
+    ).join('');
+    el.querySelectorAll('[data-space-page]').forEach(b => b.addEventListener('click', async () => {
+      await fetch('/api/space/page', {method:'POST', headers:{'Content-Type':'application/json'},
+                                       body: JSON.stringify({page: b.dataset.spacePage})});
+      loadSpacePage();
+    }));
+  }catch(_){}
+}
+
 async function loadTicker(){
   try{ const j = await (await fetch('/api/ticker/symbols')).json();
        $('tk-crypto').value = (j.crypto || []).join(', ');
@@ -1630,6 +1657,9 @@ function syncUI(){
   $('mirrorcard').classList.toggle('hide', !mirroring);
   $('videocard').classList.toggle('hide', curMode !== 'video');
   $('castcard').classList.toggle('hide', curMode !== 'cast');
+  const inSpace = base === 'space';
+  $('spacecard').classList.toggle('hide', !inSpace);
+  if (inSpace) loadSpacePage();
 
   // Per-mode config. The location card is shared by the three modes that
   // actually use location_config.json, rather than duplicated per mode.

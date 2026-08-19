@@ -10587,29 +10587,88 @@ class MoonEngine:
             return f"T-{h}H {m:02d}M"
         return f"T-{m}M"
 
+    # Real observed colors of each planet as seen from Earth -- a
+    # standard astronomy reference (Mercury reads gray, Venus pale
+    # cream, Mars rust-orange, Jupiter tan/cream banded, Saturn pale
+    # gold, Uranus pale cyan, Neptune blue) -- not an invented palette.
+    PLANET_COLOR = {
+        "MERCURY": (170, 170, 175), "VENUS": (240, 225, 180),
+        "MARS": (230, 120, 70), "JUPITER": (220, 190, 140),
+        "SATURN": (225, 200, 150), "URANUS": (150, 220, 225),
+        "NEPTUNE": (90, 130, 240),
+    }
+    # Real gas giants (Jupiter/Saturn/Uranus/Neptune) get the bigger
+    # dot -- their real equatorial radii (24,600-69,900km) genuinely
+    # dwarf the terrestrial planets shown here (2,440-6,050km), a real
+    # public fact, not a styling choice.
+    PLANET_GIANT = {"JUPITER", "SATURN", "URANUS", "NEPTUNE"}
+
+    DOME_CX, DOME_CY, DOME_R = 32, 25, 15
+
     def _frame_planets(self):
+        """A real sky-dome diagram -- reuses the EXACT scope_xy()/
+        draw_scope_rings()/draw_scope_home() convention SatelliteEngine's
+        own dome already established (center = straight up, rim = the
+        horizon, 0deg = north = up, clockwise), so a planet's dot lands
+        exactly where the ISS/satellite dots would for the same real
+        az/el. One consistent "sky dome" visual language across the
+        whole SPACE hub, not a second one invented for planets.
+
+        Only planets with a real el_deg > 0 (genuinely above the
+        horizon right now) are placed on the dome -- a planet below the
+        horizon isn't really "in the sky" to plot, and is listed in the
+        text strip below instead. Selecting (left/right) a below-horizon
+        planet still shows its real stats, just with no dot on the dome.
+        """
         buf = blank()
         fill(buf, self.BG)
         draw_header(buf, "PLANETS", self.ACCENT)
         names = self._visible_planet_names()
         planets = self.data.get("planets") or {}
+        cx, cy, r = self.DOME_CX, self.DOME_CY, self.DOME_R
+        draw_scope_rings(buf, (0.5, 1.0), (24, 28, 40), cx, cy, r)
+        draw_scope_crosshair(buf, (24, 28, 40), cx, cy, r)
+        draw_scope_home(buf, self.INK_DIM, cx, cy)
+
         if not names:
-            draw_text_centered(buf, 28, "LOOKING", self.INK_DIM)
-            draw_text_centered(buf, 36, "FROM HORIZONS", self.INK_DIM)
+            draw_text_centered(buf, 46, "LOOKING", self.INK_DIM)
+            draw_text_centered(buf, 54, "FROM HORIZONS", self.INK_DIM)
             return bytes(buf)
         self.planet_idx %= len(names)
-        name = names[self.planet_idx]
-        p = planets[name]
-        up = isinstance(p.get("el_deg"), (int, float)) and p["el_deg"] > 0
-        col = self.PLANET_UP if up else self.PLANET_DOWN
-        draw_text3x5(buf, 2, 12, fit_text(name, WIDTH - 4), col, scale=2)
-        draw_text3x5(buf, 2, 24, "UP NOW" if up else "BELOW HORIZON", col)
-        y = 33
+        sel_name = names[self.planet_idx]
+
+        for name in names:
+            p = planets.get(name) or {}
+            el, az = p.get("el_deg"), p.get("az_deg")
+            if not (isinstance(el, (int, float)) and el > 0 and isinstance(az, (int, float))):
+                continue
+            r_frac = 1.0 - min(90.0, el) / 90.0     # overhead -> center, horizon -> rim
+            x, y = scope_xy(az, r_frac, cx, cy, r)
+            x, y = int(round(x)), int(round(y))
+            col = self.PLANET_COLOR.get(name, self.INK)
+            selected = name == sel_name
+            if selected:
+                for dx, dy in ((0, -3), (0, 3), (-3, 0), (3, 0)):
+                    put_px(buf, x + dx, y + dy, (255, 255, 255))
+            big = name in self.PLANET_GIANT
+            put_px(buf, x, y, col)
+            if big or selected:
+                put_px(buf, x + 1, y, col)
+                put_px(buf, x, y + 1, col)
+                put_px(buf, x + 1, y + 1, col)
+
+        p = planets.get(sel_name) or {}
         el = p.get("el_deg")
+        col = self.PLANET_COLOR.get(sel_name, self.INK)
+        y = 44
+        draw_text3x5(buf, 2, y, fit_text(sel_name, WIDTH - 4), col, scale=1)
+        y += 6
         az = p.get("az_deg")
         if isinstance(el, (int, float)) and isinstance(az, (int, float)):
             draw_text3x5(buf, 2, y, fit_text(f"ALT {el:.0f}  AZ {az:.0f}", WIDTH - 4), self.INK)
-            y += 7
+        else:
+            draw_text3x5(buf, 2, y, "BELOW HORIZON", self.INK_DIM)
+        y += 6
         mag = p.get("mag")
         dist = p.get("dist_au")
         if isinstance(mag, (int, float)) or isinstance(dist, (int, float)):
@@ -10619,8 +10678,6 @@ class MoonEngine:
             if isinstance(dist, (int, float)):
                 parts.append(f"{dist:.2f} AU")
             draw_text3x5(buf, 2, y, fit_text("  ".join(parts), WIDTH - 4), self.INK)
-            y += 7
-        draw_dots(buf, HEIGHT - 4, len(names), self.planet_idx, self.ACCENT, self.INK_DIM)
         return bytes(buf)
 
     def frame(self):
