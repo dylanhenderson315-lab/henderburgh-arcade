@@ -17536,6 +17536,21 @@ class WeatherEngine:
             draw_text3x5(buf, WIDTH - 2 - text_w(vtxt), y, vtxt, self.INK)
             y += 7
 
+        # Real thunder probability, confirmed live 2026-08-19 on NWS's
+        # own raw gridpoint endpoint (probabilityOfThunder), a genuinely
+        # new field this project didn't parse until now -- see
+        # weather._fetch_gridpoint_extra()'s own docstring. Only shown
+        # when genuinely notable (>=20%) so a routine 2% doesn't compete
+        # with the real diagnostic rows above for this desk's tight
+        # budget; a 0% or absent value is honestly just not drawn.
+        thunder = self.data.get("thunder_pct")
+        if isinstance(thunder, (int, float)) and thunder >= 20 and y <= 52:
+            tcol = (255, 90, 70) if thunder >= 50 else (255, 190, 90)
+            draw_text3x5(buf, 2, y, "THUNDER", self.INK_DIM)
+            draw_text3x5(buf, WIDTH - 2 - text_w(f"{thunder:.0f}%"), y,
+                         f"{thunder:.0f}%", tcol)
+            y += 7
+
         clouds = cond.get("clouds") or []
         layer = next((c for c in clouds if c.get("base_ft") is not None),
                      clouds[0] if clouds else None)

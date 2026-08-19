@@ -76,6 +76,11 @@ SKIP_KEYS = {
     # it into "hourly_url") -- same URL category as county/forecastZone
     # just above, never drawn, only used to build the next real fetch.
     "forecastHourly", "hourly_url",
+    # weather._fetch_point()'s real gridpoint URL field (2026-08-19,
+    # feeds weather._fetch_gridpoint_extra()'s thunder-probability
+    # fetch) -- same URL category as hourly_url just above, never
+    # drawn, only used to build the next real fetch.
+    "forecastGridData", "gridpoint_url",
     # moon.py's real USNO moondata[] entries use "phen" ("Rise"/"Upper
     # Transit"/"Set") as a control token _parse_usno() compares against
     # -- polluting it breaks the RISE/SET match rather than testing
@@ -243,7 +248,8 @@ def main():
     try:
         bad += check("weather point (city/state)",
                      lambda: weather._fetch_point(34.0, -81.0),
-                     ignore_paths=("stations", "station", "forecast_url", "hourly_url"))
+                     ignore_paths=("stations", "station", "forecast_url", "hourly_url",
+                                   "gridpoint_url"))
     finally:
         weather._get_json = _real_get_json
 

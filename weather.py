@@ -66,6 +66,7 @@ CONDITIONS_REFRESH = 600.0    # quiet sky -- observations update ~hourly
 CONDITIONS_REFRESH_LIVE = 90.0  # a warning is out -- pressure/gust must move
 FORECAST_REFRESH = 3600.0     # high/low changes slowly; one request an hour
 HOURLY_REFRESH = 1800.0       # hourly forecast periods change slowly too -- 30 min is plenty
+GRIDPOINT_REFRESH = 1800.0    # same cadence class as hourly -- real thunder-probability data, not minute-to-minute
 HOURLY_MAX_PERIODS = 18       # ~18 real hours ahead is plenty for a wall-panel forecast view
 ALERTS_REFRESH = 120.0        # quiet
 ALERTS_REFRESH_LIVE = 30.0    # cells move; 2 min is a whole storm life
@@ -278,6 +279,35 @@ def _fetch_hourly(hourly_url):
     return out
 
 
+def _fetch_gridpoint_extra(gridpoint_url):
+    """Real fields from the RAW gridpoint endpoint (no `/forecast`
+    suffix) that this project didn't parse until 2026-08-19 --
+    `probabilityOfThunder` and `lightningActivityLevel`, both real
+    NWS time-series with `values: [{validTime, value}, ...]`.
+
+    CONFIRMED live 2026-08-19: `lightningActivityLevel` is frequently
+    an honestly EMPTY `values: []` (no active lightning threat tracked
+    right now, not a fetch failure) while `probabilityOfThunder` is
+    almost always populated with real real percentage values for the
+    next several days. Only the FIRST (current) value of each is kept
+    -- same "first entry is now" convention _fetch_hourly() already
+    uses for NWS's own real time-series shape."""
+    d = _get_json(gridpoint_url)
+    props = d.get("properties") or {}
+
+    def _first_value(key):
+        vals = (props.get(key) or {}).get("values") or []
+        if not vals or not isinstance(vals[0], dict):
+            return None
+        v = vals[0].get("value")
+        return v if isinstance(v, (int, float)) else None
+
+    return {
+        "thunder_pct": _first_value("probabilityOfThunder"),
+        "lightning_level": _first_value("lightningActivityLevel"),
+    }
+
+
 def _zone_id_from_url(url):
     """https://api.weather.gov/zones/county/SCC051 -> "SCC051". NWS's
     /points response gives full zone URLs, not bare UGC codes; the
@@ -319,7 +349,7 @@ def _fetch_point(lat, lon):
     zones = [z for z in dict.fromkeys(zones) if z]   # dedup, drop None, keep order
     return {"stations": stations, "station": stations[0], "city": city, "state": state,
             "forecast_url": props.get("forecast"), "hourly_url": props.get("forecastHourly"),
-            "zones": zones}
+            "gridpoint_url": props.get("forecastGridData"), "zones": zones}
 
 
 def _cloud_layers(raw):
@@ -1316,6 +1346,8 @@ class WeatherFeed:
         self._fc_try = 0.0
         self._hourly = []
         self._hourly_try = 0.0
+        self._gridpoint_extra = {}
+        self._gridpoint_try = 0.0
         self._pressure_hist = []   # [(epoch, inhg), ...] our own samples
         self._echoes = []
         self._echo_frames = []
@@ -1339,6 +1371,7 @@ class WeatherFeed:
             point = dict(self._point) if self._point else None
             fc = dict(self._fc)
             hourly = [dict(h) for h in self._hourly]
+            gridpoint_extra = dict(self._gridpoint_extra)
             phist = list(self._pressure_hist)
             echoes = [dict(e) for e in self._echoes]
             echo_frames = [dict(f) for f in self._echo_frames]
@@ -1357,6 +1390,8 @@ class WeatherFeed:
             "tracks": tracks_from_alerts(alerts),
             "high_f": fc.get("high_f"), "low_f": fc.get("low_f"),
             "hourly": hourly,
+            "thunder_pct": gridpoint_extra.get("thunder_pct"),
+            "lightning_level": gridpoint_extra.get("lightning_level"),
             "pressure_hist": phist,
             "pressure_trend": pressure_trend(phist),
             "storm_log": STORM_LOG.get(),
@@ -1416,6 +1451,7 @@ class WeatherFeed:
             self._refresh_alerts()
             self._refresh_forecast()
             self._refresh_hourly()
+            self._refresh_gridpoint_extra()
             self._refresh_echoes()
             time.sleep(2.0)
 
@@ -1554,6 +1590,26 @@ class WeatherFeed:
             hourly = _fetch_hourly(url)
             with self._lock:
                 self._hourly = hourly
+        except Exception:                                # noqa: BLE001
+            pass          # conditions already report errors; don't double up
+
+    def _refresh_gridpoint_extra(self):
+        """Real thunder-probability / lightning-activity from the RAW
+        gridpoint endpoint (2026-08-19) -- same cadence discipline as
+        _refresh_hourly() (this data changes slowly)."""
+        now = time.time()
+        with self._lock:
+            if now - self._gridpoint_try < GRIDPOINT_REFRESH:
+                return
+            point = self._point
+            if not point or not point.get("gridpoint_url"):
+                return
+            self._gridpoint_try = now
+            url = point["gridpoint_url"]
+        try:
+            extra = _fetch_gridpoint_extra(url)
+            with self._lock:
+                self._gridpoint_extra = extra
         except Exception:                                # noqa: BLE001
             pass          # conditions already report errors; don't double up
 
