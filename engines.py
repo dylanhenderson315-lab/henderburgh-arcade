@@ -12583,6 +12583,13 @@ class SportsEngine(Browsable, BigMomentSource):
     name = "sports"
     tick_rate = 0.05
 
+    # False for the standalone `sports` mode's own instance; set True
+    # only on the separate instance AmbientEngine composes (see its
+    # __init__). Gates the live-game auto-follow in tick() -- see that
+    # block's own comment for why standalone must never cycle a person
+    # out of a detail view they deliberately opened.
+    IN_AMBIENT = False
+
     # LEFT/RIGHT walks games, UP/DOWN walks leagues. Grouping is by LEAGUE
     # rather than sport: ESPN nests sports -> leagues -> events, so sport is
     # the native outer key, but people name LEAGUES ("is the NWSL game
@@ -13402,10 +13409,18 @@ class SportsEngine(Browsable, BigMomentSource):
 
         self._detect_big_moments()
 
-        # Live slate owns the walk. DETAIL stays open so every live
-        # game is the in-depth card, not a ticker row. Drop/rotate
-        # still pauses via cycling / _browse_auto_ok. Off nights keep
-        # the old panel tour (pinned, standings, started games).
+        # Live slate owns the walk -- IN AMBIENT ONLY. DETAIL stays open
+        # so every live game is the in-depth card, not a ticker row, and
+        # cycles to the next live game every LIVE_DETAIL_TICKS. Direct
+        # owner report 2026-08-19: this was ALSO firing in the standalone
+        # `sports` mode, cycling someone out of a game's in-depth view
+        # they had deliberately opened -- "only in ambient should it
+        # switch games." Gated on IN_AMBIENT (True only on the separate
+        # instance AmbientEngine composes) so standalone falls through to
+        # the plain panel/ticker tour below instead, which never touches
+        # self.detail once a person has set it. Drop/rotate still pauses
+        # via cycling / _browse_auto_ok either way. Off nights keep the
+        # old panel tour (pinned, standings, started games).
         if self._score_lock_ticks > 0:
             self._score_lock_ticks -= 1
             if self._score_lock_ticks <= 0:
@@ -13413,7 +13428,7 @@ class SportsEngine(Browsable, BigMomentSource):
         live = self._live_indices()
         locked = bool(self._score_lock_id and self._score_lock_ticks > 0)
         if self.cycling and self._browse_auto_ok and self.panels and not locked:
-            walking_live = bool(live)
+            walking_live = bool(live) and self.IN_AMBIENT
             if walking_live or self.detail is None:
                 self.hold += 1
                 if walking_live:
@@ -19377,6 +19392,18 @@ class AmbientEngine(Browsable):
                 if n not in names:
                     names.append(n)
         self.engines = {n: ENGINES[n]() for n in names if n in ENGINES}
+        # SportsEngine's live-game auto-follow (see its own tick()) is
+        # only correct for the AMBIENT rotation -- "ambient" means "keep
+        # showing me what's happening," so a live game pulling the
+        # camera to itself is the point. Standalone `sports` mode is a
+        # person deliberately looking at ONE game's in-depth view; direct
+        # owner report 2026-08-19: it was cycling them away from that
+        # view, which only makes sense in ambient. This instance is
+        # composed here, inside ambient, so it gets the flag; the
+        # separate SportsEngine `arcade_server` constructs for the
+        # standalone `sports` mode never does.
+        if "sports" in self.engines:
+            self.engines["sports"].IN_AMBIENT = True
         # Dedicated fallback instance -- if clock is already in SEQUENCE
         # we still keep one that is never mid-rotation, so an all-empty
         # world still has a clean analog face.
