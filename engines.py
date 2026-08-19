@@ -10913,58 +10913,66 @@ class RacingEngine:
         return self._frame_nascar() if self.page == "nascar" else self._frame_f1()
 
 
-class SpaceHubEngine:
+class SpaceHubEngine(Browsable):
     """SPACE -- one unified app for "what's up there right now", direct
     owner ask (2026-08-19): "combine the satellites into this space hub
     ... they should be combined into one not separate. the moon should
     also be in it."
 
-    Composes REAL instances of SatelliteEngine and MoonEngine and
-    delegates tick()/frame()/input() to whichever is on screen -- the
-    SAME "compose real instances, delegate, nothing reimplemented"
-    pattern AmbientEngine itself already uses for its own sub-modes, so
-    both sub-engines look and behave identically to how they always
-    have; this is a presentation layer on top, not a rewrite of either.
+    REWORKED 2026-08-19, direct owner feedback: "make it work like
+    sports or flight engine. i cant scroll easily to see everything."
+    The first version hid MOON/PLANETS/EVENTS behind an undiscoverable
+    `drop`-cycles-pages scheme with no relationship to how every other
+    data mode in this project actually browses. This version is a real
+    `Browsable` (VERTICAL_BROWSE = True), the SAME two-axis contract
+    SportsEngine/FlightEngine use:
+
+        up/down    -- switch CATEGORY (SKY/MOON/PLANETS/EVENTS), same
+                       role as "switch league" in sports -- tap steps,
+                       hold accelerates, via the shared Scroller.
+        left/right -- browse WITHIN the current category (satellite
+                       passes on SKY, individual planets on PLANETS),
+                       same role as "switch game" in sports. A category
+                       with nothing to browse (MOON, EVENTS) just no-ops.
+        rotate     -- select-to-expand, SKY only: toggles
+                       SatelliteEngine's own UPCOMING <-> OVERHEAD-NOW
+                       view, the same real feature it always had, now
+                       reachable directly instead of stolen by paging.
+        drop       -- pause/resume SKY's own auto-cycle (forwarded to
+                       SatelliteEngine.input("drop") only while on the
+                       SKY category), matching every other mode's
+                       drop-pauses-auto-advance convention.
+
+    Composes REAL instances of SatelliteEngine and MoonEngine, but NO
+    LONGER delegates their own input() wholesale -- SpaceHubEngine now
+    owns navigation itself and calls their internal stepping/view
+    primitives directly (SatelliteEngine._step()/`.view`,
+    MoonEngine.planet_idx/`.view`), the same way SportsEngine drives its
+    own panels rather than asking each panel to interpret raw input.
+    Both sub-engines still render themselves unmodified -- only WHO
+    decides what to browse changed, not how either one draws.
 
     `satellite`/`moon` STAY separately registered in ENGINES and in
     catalog.py's SEQUENCE -- AmbientEngine's own WORLD rotation, the sky-
     share detector, and the big-moment queue all key off
-    `self.engines.get("satellite")` by name, and unwinding that coupling
-    was a much larger, riskier change than what the owner actually asked
-    for (one selectable app for a person browsing the menu). Only the
-    MENU-visible identity of the two was merged -- `catalog.py` marks
-    both `menu=False` now, so neither shows as its own tile; `space` is
-    the one tile a person actually picks.
+    `self.engines.get("satellite")` by name; unwinding that coupling was
+    a much larger, riskier change than what the owner asked for. Only
+    the MENU-visible identity of the two was merged (catalog.py marks
+    both `menu=False`; `space` is the one tile a person actually picks).
 
-    THREE pages: SKY (the real SatelliteEngine, unmodified -- UPCOMING/
-    OVERHEAD-NOW/dome, its own full pass-browsing input), MOON (the real
-    MoonEngine, unmodified -- phase/rise-set/launch, its own internal
-    MOON/PLANETS toggle), and EVENTS (new, skyevents.py -- real aurora
-    visibility from the current NOAA Kp index, the next real meteor
-    shower, and the next real launch's distance from home when it
-    confidently matches a known real launch site). `drop` cycles
-    SKY -> MOON -> EVENTS -> SKY; every other button is handed straight
-    to whichever page is showing, so nothing about SKY/MOON's own
-    controls changed -- the one real tradeoff, stated plainly:
-    SatelliteEngine's own `drop` (its auto-cycle pause toggle) is not
-    reachable from inside the combined hub, since `drop` is now the page
-    switch. Its `up`/`down` (scope <-> pass-list) and `left`/`right`
-    (pass browsing) still work exactly as before.
-
-    A small 3-dot page indicator is composited into the bottom-right
-    corner of every frame (2026-08-19, direct owner feedback that the
-    hub "only shows satellites and radar" -- the MOON/EVENTS pages
-    existed but were not discoverable with no on-screen sign there was
-    more than one page). Placement (x=58/60/62, y=61) was checked
-    against real rendered frames from both SKY's pass-list state AND its
-    OVERHEAD-NOW dome state before picking it -- both leave that corner
-    genuinely empty.
+    A category dot-row (bottom-right, like the panel-rail convention
+    elsewhere) shows which of the 4 categories is active -- each
+    category's own screen already names itself in its header (SKY's
+    real title, "MOON", "PLANETS", "SKY EVENTS"), so the dots are a
+    position indicator, not the only way to tell what's showing.
     """
 
     name = "space"
     tick_rate = 0.05
+    VERTICAL_BROWSE = True
 
-    PAGES = ("sky", "moon", "events")
+    CATEGORIES = ("sky", "moon", "planets", "events")
+    CAT_LABEL = {"sky": "SKY", "moon": "MOON", "planets": "PLANETS", "events": "EVENTS"}
     DOT_ON = (200, 200, 220)
     DOT_OFF = (40, 42, 54)
 
@@ -10972,14 +10980,18 @@ class SpaceHubEngine:
         self.score = 0
         self._sat = SatelliteEngine()
         self._moon = MoonEngine()
-        self.page = "sky"
-        self.events = {}
+        self.reset()
 
     def reset(self):
         self._sat.reset()
         self._moon.reset()
-        self.page = "sky"
+        self.cat_i = 0
+        self._init_scroll()
         self.events = {}
+
+    @property
+    def category(self):
+        return self.CATEGORIES[self.cat_i % len(self.CATEGORIES)]
 
     def has_content(self):
         return self._sat.has_content() or self._moon.has_content()
@@ -10987,25 +10999,49 @@ class SpaceHubEngine:
     def ambient_weight(self):
         return max(self._sat.ambient_weight(), self._moon.ambient_weight())
 
+    def _step(self, direction):
+        """LEFT/RIGHT -- browse WITHIN the current category."""
+        cat = self.category
+        if cat == "sky":
+            self._sat._step(direction)
+        elif cat == "planets":
+            names = self._moon._visible_planet_names()
+            if names:
+                self._moon.planet_idx = (self._moon.planet_idx + direction) % len(names)
+        # moon/events: nothing to browse, real no-op.
+
+    def _step_v(self, direction):
+        """UP/DOWN -- switch CATEGORY, same role _step_v plays in
+        SportsEngine (switch league). Keeps MoonEngine's own internal
+        `view` in sync so it always shows exactly the category picked
+        here -- the hub decides MOON vs PLANETS now, not a second,
+        independent toggle inside MoonEngine."""
+        self.cat_i = (self.cat_i + direction) % len(self.CATEGORIES)
+        cat = self.category
+        if cat == "moon":
+            self._moon.view = "moon"
+        elif cat == "planets":
+            self._moon.view = "planets"
+
     def input(self, cmd):
-        if cmd == "drop":
-            i = self.PAGES.index(self.page)
-            self.page = self.PAGES[(i + 1) % len(self.PAGES)]
+        if self._browse_input(cmd):
             return
-        if self.page == "sky":
-            self._sat.input(cmd)
-        elif self.page == "moon":
-            self._moon.input(cmd)
+        if cmd == "rotate" and self.category == "sky":
+            self._sat.view = (self._sat.VIEW_SCOPE if self._sat.view == self._sat.VIEW_PASSES
+                              else self._sat.VIEW_PASSES)
+        elif cmd == "drop" and self.category == "sky":
+            self._sat.input("drop")
 
     def auto(self):
         self._sat.auto()
         self._moon.auto()
 
     def tick(self):
+        self._scroll_tick()
         # Tick both real sub-engines every tick, same reasoning
         # AmbientEngine ticks every sub-mode every tick: tick() is what
         # calls each FEED.get(), and an unread feed idles out -- ticking
-        # only the visible page would make the OTHER page come up cold
+        # only the visible category would make the OTHERS come up cold
         # the moment someone switches. skyevents' aurora feed is read
         # here too so it stays warm the same way.
         self._sat.tick()
@@ -11058,19 +11094,20 @@ class SpaceHubEngine:
             y += 7
             mi = self.events.get("launch_mi")
             if isinstance(mi, (int, float)) and y <= HEIGHT - 5:
-                draw_text3x5(buf, 2, y, f"{mi:.0f} MI FROM HOME", (170, 175, 195))
+                draw_text3x5(buf, 2, y, fit_text(f"{mi:.0f} MI FROM HOME", WIDTH - 4), (170, 175, 195))
         return bytes(buf)
 
     def frame(self):
-        if self.page == "sky":
+        cat = self.category
+        if cat == "sky":
             f = self._sat.frame()
-        elif self.page == "moon":
+        elif cat in ("moon", "planets"):
             f = self._moon.frame()
         else:
             f = self._frame_events()
         buf = bytearray(f)
-        i = self.PAGES.index(self.page)
-        for k, px in enumerate((58, 60, 62)):
+        i = self.CATEGORIES.index(cat)
+        for k, px in enumerate((51, 54, 57, 60)):
             col = self.DOT_ON if k == i else self.DOT_OFF
             put_px(buf, px, 61, col)
         return bytes(buf)

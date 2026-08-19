@@ -564,11 +564,11 @@
 
   <!-- SPACE hub page select -->
   <div id="spacecard" class="card hide">
-    <h2>Space — sky · moon · events</h2>
-    <div class="hint" style="margin:0 0 9px;">SKY: ISS + every bright satellite (up/down for
-      pass list vs. live dome, left/right to browse). MOON: real phase/rise-set/next launch
-      (rotate for the real planet dome, left/right to pick a planet). EVENTS: aurora forecast,
-      next meteor shower, next launch distance.</div>
+    <h2>Space — sky · moon · planets · events</h2>
+    <div class="hint" style="margin:0 0 9px;">Same controls as Sports/Flights: <b>up/down</b>
+      switches SKY / MOON / PLANETS / EVENTS, <b>left/right</b> browses within it (satellite
+      passes on SKY, planets on PLANETS), <b>rotate</b> toggles SKY's pass-list vs. live dome,
+      <b>drop</b> pauses SKY's auto-cycle. Click a button below for the same jump.</div>
     <div class="row" id="space-pages"></div>
   </div>
 
@@ -1075,7 +1075,7 @@ function addSymbol(inputId, sym){
   $(inputId).value = cur.join(', ');
   mark();
 }
-const SPACE_PAGE_LABEL = {sky: 'SKY', moon: 'MOON', events: 'EVENTS'};
+const SPACE_PAGE_LABEL = {sky: 'SKY', moon: 'MOON', planets: 'PLANETS', events: 'EVENTS'};
 async function loadSpacePage(){
   try{
     const j = await (await fetch('/api/space/page')).json();
@@ -1795,7 +1795,7 @@ const keyHeld = {};
    acceleration, so they are listed separately and described honestly
    rather than promising a hold behaviour they do not implement. */
 const BROWSABLE = new Set(['ticker','flights','sports','news','blog',
-                           'ambient','gameday']);
+                           'ambient','gameday','space']);
 const STEPPABLE = new Set(['satellite','weather','clock']);
 function renderLegend(){
   const el = $('keylegend'); if (!el) return;

@@ -1391,15 +1391,16 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/dnd":
             self._json(dnd.load_config())
         elif path == "/api/space/page":
-            # Direct page state for the SPACE hub -- companion-page
-            # equivalent of the physical DROP button, added because the
-            # control-panel keyboard binding alone (Space -> drop) is not
-            # a discoverable way to reach the MOON/EVENTS pages (direct
-            # owner feedback 2026-08-19). Real engine state, not guessed.
+            # Direct category state for the SPACE hub -- companion-page
+            # equivalent of pressing up/down on the real dpad. REWORKED
+            # 2026-08-19 alongside SpaceHubEngine's own rework (real
+            # Browsable up/down category switch, not a hidden drop-cycle)
+            # -- this endpoint now reads/writes `.category`/`.CATEGORIES`
+            # to match. Real engine state, not guessed.
             eng = ARCADE.engine
-            page = getattr(eng, "page", None) if ARCADE.mode == "space" else None
-            self._json({"mode": ARCADE.mode, "page": page,
-                        "pages": list(getattr(eng, "PAGES", ())) if ARCADE.mode == "space" else []})
+            cat = getattr(eng, "category", None) if ARCADE.mode == "space" else None
+            self._json({"mode": ARCADE.mode, "page": cat,
+                        "pages": list(getattr(eng, "CATEGORIES", ())) if ARCADE.mode == "space" else []})
         elif path == "/api/skins":
             cfg = skins.load_config()
             self._json({"skin": cfg["skin"], "options": skins.list_skins()})
@@ -1850,19 +1851,26 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, KeyError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/space/page":
-            # {"page": "sky"|"moon"|"events"} -- sets the real engine
-            # attribute directly (only meaningful while mode == "space";
-            # a stale POST from a page left open in another mode is a
-            # real no-op, not an error, matching every other mode-gated
-            # endpoint's honest-no-op convention here).
+            # {"page": "sky"|"moon"|"planets"|"events"} -- sets the real
+            # engine's category index directly (only meaningful while
+            # mode == "space"; a stale POST from a page left open in
+            # another mode is a real no-op, not an error, matching every
+            # other mode-gated endpoint's honest-no-op convention here).
+            # `.category` is now a read-only property derived from
+            # `.cat_i` (see SpaceHubEngine's Browsable rework), so this
+            # sets `.cat_i`, not `.page`/`.category` directly.
             try:
                 j = json.loads(body or b"{}")
                 want = j.get("page")
                 eng = ARCADE.engine
-                pages = list(getattr(eng, "PAGES", ()))
+                pages = list(getattr(eng, "CATEGORIES", ()))
                 if ARCADE.mode == "space" and want in pages:
-                    eng.page = want
-                    self._json({"ok": True, "page": eng.page})
+                    eng.cat_i = pages.index(want)
+                    if want == "moon":
+                        eng._moon.view = "moon"
+                    elif want == "planets":
+                        eng._moon.view = "planets"
+                    self._json({"ok": True, "page": eng.category})
                 else:
                     self._json({"ok": False, "error": "not in space mode or invalid page"}, 400)
             except (ValueError, AttributeError, TypeError) as e:
