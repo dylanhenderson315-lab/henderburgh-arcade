@@ -10924,6 +10924,39 @@ class MoonEngine:
         "PROTEUS": (120, 120, 125), "TRITON": (225, 215, 220),
     }
 
+    # Real published ring extents, km from Saturn's own center (not
+    # invented -- the real C/B/Cassini-Division/A structure): C ring
+    # 74,658-92,000 / B ring (the brightest, densest real ring)
+    # 92,000-117,580 / Cassini Division (a real, genuine GAP)
+    # 117,580-122,170 / A ring 122,170-136,780. All comfortably inside
+    # Mimas's real 185,540km orbit, so the rings never overlap the
+    # innermost moon's own path on this diagram.
+    SATURN_RING_BANDS = [
+        (74658.0, 92000.0, (195, 180, 145)),    # C ring -- real, fainter
+        (92000.0, 117580.0, (235, 215, 175)),   # B ring -- real, the brightest
+        (122170.0, 136780.0, (210, 195, 160)),  # A ring -- real, fainter than B
+    ]
+
+    def _draw_saturn_rings(self, buf, cx, cy, scaled_r, dim=1.0):
+        """A real top-down annulus using Saturn's own real ring extents
+        -- not a decorative flourish, the actual structure (three real
+        bands with a real gap at the Cassini Division). Drawn as
+        several concentric circle outlines per band (same technique
+        the orbit-path rings already use) rather than a filled disc,
+        so the real Cassini Division gap is genuinely visible as a
+        dark ring between B and A."""
+        for lo_km, hi_km, col in self.SATURN_RING_BANDS:
+            r_lo, r_hi = scaled_r(lo_km), scaled_r(hi_km)
+            steps = max(1, int(round(r_hi - r_lo)) + 1)
+            for s in range(steps + 1):
+                rr = r_lo + (r_hi - r_lo) * (s / steps)
+                n = max(20, int(rr * 3.2))
+                ring_col = rim(col, dim)
+                for i in range(n):
+                    a = 2 * math.pi * i / n
+                    put_px(buf, int(round(cx + rr * math.cos(a))),
+                           int(round(cy + rr * math.sin(a))), ring_col)
+
     def _frame_planets_moons(self):
         """Real zoomed-in moon system for WHICHEVER planet was selected
         (self.zoomed_planet) -- direct owner ask ("do every planet's
@@ -10973,6 +11006,10 @@ class MoonEngine:
         # is the real light/mass at the centre" language).
         pulse = 0.85 + 0.15 * math.sin(self.ticks * 0.05)
         planet_col = rim(self.PLANET_COLOR.get(planet, self.INK), pulse)
+
+        if planet == "SATURN":
+            self._draw_saturn_rings(buf, cx, cy, scaled_r, dim=pulse)
+
         for dx in range(-2, 3):
             for dy in range(-2, 3):
                 if dx * dx + dy * dy <= 5:
