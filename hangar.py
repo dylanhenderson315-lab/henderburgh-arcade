@@ -393,6 +393,30 @@ def rarity_line(type_code, type_counts, total):
     return "%d %s" % (n, t)
 
 
+def revisit_rhythm(first_seen, last_seen, times_seen):
+    """How often this tail tends to come back, as real arithmetic over
+    the two real timestamps and visit count this project already
+    stores -- (last_seen - first_seen) / (times_seen - 1). None below
+    3 real visits: a 2-visit average is a single real gap dressed up as
+    a rhythm, not a reliable pattern, and this project doesn't present
+    a guess-shaped number as a real fact. Never a fabricated interval
+    -- purely derived from data already on disk, same category as
+    bird_ordinal()/rarity_line() above."""
+    try:
+        times = int(times_seen)
+        fs, ls = float(first_seen), float(last_seen)
+    except (TypeError, ValueError):
+        return None
+    if times < 3 or ls <= fs:
+        return None
+    avg_days = (ls - fs) / (86400.0 * (times - 1))
+    if avg_days < 1:
+        return "EVERY <1D"
+    if avg_days < 21:
+        return "EVERY ~%dD" % round(avg_days)
+    return "EVERY ~%dW" % round(avg_days / 7)
+
+
 def bird_ordinal(entries, reg):
     """This tail's place in the collection by first_seen, oldest first."""
     if not reg:
@@ -499,6 +523,9 @@ def dossier(entry, entries, sheet=None, now=None):
         log.append("FIRST %s" % first)
     if last:
         log.append("LAST %s" % last)
+    rhythm = revisit_rhythm(e.get("first_seen"), e.get("last_seen"), times)
+    if rhythm:
+        log.append(rhythm)
     if leftover_year:
         log.append("SINCE %s" % facts["year"])
     if icao:

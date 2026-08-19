@@ -2231,7 +2231,7 @@ class BigMomentSource:
         # itself documents.
         if system == SYSTEM_SPORTS:
             summary = f"{kind}: {line1}" if line1 else kind
-            events_log.LOG.record("sports", summary)
+            events_log.LOG.record("sports", summary, tier=tier)
         if tier == TIER_FLASH:
             self._flash = moment
             self._flash_t = TIER_TICKS[TIER_FLASH]
@@ -10552,12 +10552,23 @@ class DepartureBoardEngine(Browsable):
             tag = "DEP" if status == "DEPARTING" else "ARR"
             dist = ac.get("dist_nm")
             dist_txt = f"{dist:.0f}NM" if isinstance(dist, (int, float)) else ""
+            # Importance hierarchy, same "nearer = brighter" convention
+            # the flight radar scope already established (SCOPE_TARGET_
+            # FLOOR/NOTABLE_GLOW_FLOOR) -- real dist_nm, no invented
+            # urgency score. Floored so a far row never reads as absent.
+            if isinstance(dist, (int, float)):
+                prox = 1.0 - clamp(dist / flights.RADIUS_NM, 0.0, 1.0)
+                rail_k = 0.4 + 0.6 * prox
+            else:
+                rail_k = 0.55
+            rail_col = rim(col, rail_k)
+            ident_col = (255, 255, 255) if rail_k >= 0.85 else rim((255, 255, 255), max(0.5, rail_k))
             # Thin status rail, callsign on empty, distance on the right.
             for by in range(11):
-                put_px(buf, 1, y + by, col)
-                put_px(buf, 2, y + by, col)
+                put_px(buf, 1, y + by, rail_col)
+                put_px(buf, 2, y + by, rail_col)
             name_budget = WIDTH - 8 - (text_w(dist_txt) + 2 if dist_txt else 0)
-            draw_text3x5(buf, 5, y, fit_text(ident, name_budget), (255, 255, 255))
+            draw_text3x5(buf, 5, y, fit_text(ident, name_budget), ident_col)
             if dist_txt:
                 draw_text3x5(buf, WIDTH - 2 - text_w(dist_txt), y, dist_txt, self.INK_DIM)
             # Row 2: "> CITY" on the left, DEP/ARR tag on the right. The
@@ -18323,10 +18334,26 @@ class EventsLogEngine(Browsable):
             kind = e.get("kind") or "notify"
             color = self.KIND_COLOR.get(kind, self.INK)
             tag_txt = self.KIND_TAG.get(kind, kind.upper()[:6])
+            # Real-tier hierarchy, same "important = brighter" convention
+            # flights/Hangar already use -- only sports moments carry a
+            # real BigMomentSource tier today (see _set_big_moment()'s
+            # events_log.LOG.record() call), so every other kind (plane/
+            # notify/home) stays at normal brightness rather than a
+            # guessed weight. A TIER_TAKEOVER row is a small pip brighter
+            # than TIER_INTERRUPT, which is brighter than untiered rows
+            # -- never additive past white, always a real int comparison.
+            tier = e.get("tier")
+            if tier == TIER_TAKEOVER:
+                color = tuple(min(255, int(c * 1.15) + 20) for c in color)
+                ink = (255, 255, 255)
+            elif tier == TIER_INTERRUPT:
+                ink = (245, 248, 255)
+            else:
+                ink = self.INK
             age = FlightEngine._fmt_age_long(max(0.0, now - e.get("ts", now)))
             draw_text3x5(buf, 2, y, fit_text(f"{tag_txt} {age} AGO", WIDTH - 4), color)
             summary = fit_text(e.get("summary") or "", WIDTH - 4)
-            draw_text3x5(buf, 2, y + 6, summary, self.INK)
+            draw_text3x5(buf, 2, y + 6, summary, ink)
             y += 15
             if y > HEIGHT - 5:
                 break

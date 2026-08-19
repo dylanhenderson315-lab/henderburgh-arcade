@@ -77,13 +77,18 @@ class EventsLog:
         self._entries = entries
         self._loaded = True
 
-    def record(self, kind, summary, detail=None):
+    def record(self, kind, summary, detail=None, tier=None):
         """Append one real event. `summary` must already be a real,
         non-empty, folded display string -- the caller folds it, this
         function trusts it and never invents one. `detail` is optional,
         stored verbatim (real data only, e.g. a real aircraft dict or
         real ESPN play text) for a future richer view; never required by
-        get()."""
+        get(). `tier` is the same real BigMomentSource.TIER_* int the
+        caller already computed for this exact event when one exists
+        (only sports moments pass one today) -- never re-derived here,
+        never guessed for a kind that doesn't have a real tier. Absent
+        (None) is honest: not every event kind has a real importance
+        signal, and this must not fabricate one just to rank rows."""
         if not summary:
             return
         with self._lock:
@@ -91,6 +96,8 @@ class EventsLog:
             e = {"ts": time.time(), "kind": kind, "summary": summary}
             if detail is not None:
                 e["detail"] = detail
+            if tier is not None:
+                e["tier"] = tier
             self._entries.append(e)
             self._evict_if_over_cap()
             self._save()
