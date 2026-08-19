@@ -1230,6 +1230,48 @@ def _boxscore_stats(data):
     return out
 
 
+def _boxscore_team_stats(data):
+    """Real TEAM-level boxscore stats, one entry per side, from
+    `boxscore.teams[]` -- a DIFFERENT real shape from `_boxscore_stats()`
+    above (that one is per-ATHLETE, `labels`/`stats` parallel lists under
+    `boxscore.players[]`; this is per-TEAM, `{name, displayValue}` pairs
+    under `boxscore.teams[]`). Confirmed live 2026-08-19 across NFL
+    (firstDowns/thirdDownEff), NBA (fieldGoalPct/threePointFieldGoalsMade-
+    ...Attempted/totalRebounds/assists), NHL (powerPlayGoals/
+    powerPlayOpportunities/powerPlayPct/faceoffPercent/shotsTotal/hits/
+    blockedShots/giveaways), and EPL soccer (possessionPct/totalShots/
+    shotsOnTarget/foulsCommitted/yellowCards/redCards).
+
+    This closes a real, confirmed gap: hockey's own detail renderer
+    docstring previously said power-play couldn't be built because "no
+    field name for it could be confirmed" -- that was true of `situation`
+    specifically, but the field exists here, under boxscore.teams, not
+    situation. Same "check the real payload before declaring a field
+    absent" lesson the baseball pitch-count fix already taught.
+
+    Keyed by whatever real identity ESPN actually sent (`homeAway`,
+    team id, abbreviation) -- callers match on whichever one their own
+    event dict already carries, never a guessed join. Returns a list,
+    not a dict, since which key is reliable varies by sport/endpoint."""
+    out = []
+    for team in (data.get("boxscore") or {}).get("teams") or []:
+        tm = team.get("team") or {}
+        row = {}
+        for s in team.get("statistics") or []:
+            name = s.get("name")
+            val = s.get("displayValue")
+            if name and val not in (None, ""):
+                row[name] = paneltext.panel_text(str(val))
+        if row:
+            out.append({
+                "home_away": team.get("homeAway"),
+                "team_id": str(tm.get("id")) if tm.get("id") else None,
+                "abbr": paneltext.panel_text(tm.get("abbreviation") or ""),
+                "stats": row,
+            })
+    return out
+
+
 def fetch_baseball_matchup(league, event_id, data=None):
     """The real current pitcher-vs-batter matchup for a live MLB game,
     with the real stats a broadcast scorebug actually shows.
@@ -1593,6 +1635,7 @@ def summarize_payload(league, event_id, data):
         "atbat_pitches": last_atbat_pitches(_mlb_pitches_from_payload(data)),
         "line_score": _mlb_line_score_from_payload(data),
         "leaders": _leaders_from_payload(data),
+        "team_boxscore": _boxscore_team_stats(data),
     }
 
 

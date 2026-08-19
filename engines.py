@@ -13366,6 +13366,28 @@ class SportsEngine(Browsable, BigMomentSource):
         tail = [x for x in (broadcast, note) if x]
         return head + ordered + tail
 
+    def _team_box_side(self, ev, home_away):
+        """Real team-boxscore stats (sports._boxscore_team_stats) for one
+        side of ev, matched by home_away first (the most reliable real
+        field every side reliably carries), falling back to abbreviation.
+        {} when the summary hasn't landed yet or ESPN sent no boxscore.teams
+        block for this event -- never a guessed number. ZERO new I/O: the
+        summary was already fetched by _want_summary_ev()/want_summary()
+        for whichever game is expanded or the pinned favorite's own live
+        game, same as _refresh_matchup()'s own reasoning."""
+        bun = sports.FEED.get_summary(ev.get("id"))
+        rows = (bun or {}).get("team_boxscore") or []
+        for r in rows:
+            if r.get("home_away") == home_away:
+                return r.get("stats") or {}
+        want_abbr = next((c.get("abbr") for c in ev.get("competitors") or []
+                          if c.get("home_away") == home_away), None)
+        if want_abbr:
+            for r in rows:
+                if r.get("abbr") == want_abbr:
+                    return r.get("stats") or {}
+        return {}
+
     def _frame_golf_pinned(self):
         """The pinned player, given the panel.
 
@@ -15263,6 +15285,21 @@ class SportsEngine(Browsable, BigMomentSource):
             if scorer:
                 y = draw_text_on_empty(buf, y, fit_person(scorer, WIDTH - 8), self.INK)
             y = self._draw_period_line(buf, ev, y)
+            # Possession + shots on target -- real fields, confirmed live
+            # on boxscore.teams[].statistics[] (possessionPct/
+            # shotsOnTarget). Home side only, one compact line.
+            if y <= HEIGHT - 5:
+                box = self._team_box_side(ev, "home")
+                poss = box.get("possessionPct")
+                sot = box.get("shotsOnTarget")
+                bits = []
+                if poss:
+                    bits.append(f"POSS {poss}")
+                if sot:
+                    bits.append(f"SOT {sot}")
+                if bits:
+                    y = draw_text_on_empty(buf, y, fit_text(" ".join(bits), WIDTH - 8),
+                                           self.INK_DIM)
         else:
             draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
                                color_on_dark(accent), x_min=3)
@@ -15331,6 +15368,24 @@ class SportsEngine(Browsable, BigMomentSource):
                                        self.INK)
             y = self._draw_last_play(buf, ev, y)
             y = self._draw_period_line(buf, ev, y)
+            # Power-play + faceoff% -- real fields, confirmed live on
+            # boxscore.teams[].statistics[] (powerPlayGoals/
+            # powerPlayOpportunities/faceoffPercent), NOT on `situation`
+            # where this renderer previously (correctly) declined to
+            # guess. Home team's real numbers only -- one line, not a
+            # full stat table, matching this card's already-tight budget.
+            if y <= HEIGHT - 5:
+                box = self._team_box_side(ev, "home")
+                pp = box.get("powerPlayGoals"), box.get("powerPlayOpportunities")
+                fo = box.get("faceoffPercent")
+                bits = []
+                if pp[0] is not None and pp[1] is not None:
+                    bits.append(f"PP {pp[0]}/{pp[1]}")
+                if fo:
+                    bits.append(f"FO {fo}")
+                if bits:
+                    y = draw_text_on_empty(buf, y, fit_text(" ".join(bits), WIDTH - 8),
+                                           self.INK_DIM)
         else:
             draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
                                color_on_dark(accent), x_min=3)
@@ -15411,6 +15466,25 @@ class SportsEngine(Browsable, BigMomentSource):
                 b = "-" if rv is None else str(int(rv))
                 y = draw_text_on_empty(buf, y, fit_text(f"SIG {a}-{b}", WIDTH - 8),
                                        self.INK)
+            # Takedowns + control time -- real fields mma.py already
+            # fetches and caches (mma._STAT_KEYS: td_landed/td_att/
+            # control_time, confirmed live UFC 330) but this view
+            # discarded every stat but sig strikes. Zero new I/O --
+            # same `stats` dict already read above.
+            ltd = (left or {}).get("td_landed")
+            rtd = (right or {}).get("td_landed")
+            if (ltd is not None or rtd is not None) and y <= HEIGHT - 5:
+                a = "-" if ltd is None else str(int(ltd))
+                b = "-" if rtd is None else str(int(rtd))
+                y = draw_text_on_empty(buf, y, fit_text(f"TD {a}-{b}", WIDTH - 8),
+                                       self.INK)
+            lctl = (left or {}).get("control_time")
+            rctl = (right or {}).get("control_time")
+            if (lctl or rctl) and y <= HEIGHT - 5:
+                a = lctl or "-"
+                b = rctl or "-"
+                y = draw_text_on_empty(buf, y, fit_text(f"CTRL {a}-{b}", WIDTH - 8),
+                                       self.INK_DIM)
 
         # Odds restored 2026-08-11 (completeness review) -- see
         # basketball's own detail renderer for the full note on why.
@@ -15661,6 +15735,21 @@ class SportsEngine(Browsable, BigMomentSource):
         y = self._draw_period_line(buf, ev, y)
         y = self._draw_leaders(buf, ev, y)
         self._draw_win_pct(buf, ev)
+        # First downs + 3rd-down efficiency -- real fields, confirmed
+        # live on boxscore.teams[].statistics[] (firstDowns/
+        # thirdDownEff). Home side only, one compact line.
+        if y <= HEIGHT - 5:
+            box = self._team_box_side(ev, "home")
+            fd = box.get("firstDowns")
+            td3 = box.get("thirdDownEff")
+            bits = []
+            if fd:
+                bits.append(f"1ST {fd}")
+            if td3:
+                bits.append(f"3RD {td3}")
+            if bits:
+                y = draw_text_on_empty(buf, y, fit_text(" ".join(bits), WIDTH - 8),
+                                       self.INK_DIM)
         foot_lines = self._order_footer_lines(
             None, ev.get("series"), ev.get("venue"),
             ev.get("broadcast"), ev.get("note"))
@@ -15705,6 +15794,27 @@ class SportsEngine(Browsable, BigMomentSource):
             y = self._draw_last_play(buf, ev, y)
             y = self._draw_period_line(buf, ev, y)
             self._draw_win_pct(buf, ev)
+            # Team shooting line -- real fields, confirmed live on
+            # boxscore.teams[].statistics[] (fieldGoalPct/
+            # totalRebounds/assists). No bonus/foul/timeout guess (see
+            # docstring above) -- this is a DIFFERENT, confirmed real
+            # field set (team totals, not situation), not a reversal of
+            # that standing gap.
+            if y <= HEIGHT - 5:
+                box = self._team_box_side(ev, "home")
+                fg = box.get("fieldGoalPct")
+                reb = box.get("totalRebounds")
+                ast = box.get("assists")
+                bits = []
+                if fg:
+                    bits.append(f"FG {fg}")
+                if reb:
+                    bits.append(f"REB {reb}")
+                if ast:
+                    bits.append(f"AST {ast}")
+                if bits:
+                    y = draw_text_on_empty(buf, y, fit_text(" ".join(bits), WIDTH - 8),
+                                           self.INK_DIM)
         else:
             draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
                                color_on_dark(accent), x_min=3)
