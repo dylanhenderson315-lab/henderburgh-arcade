@@ -10771,21 +10771,24 @@ class MoonEngine:
     # Real ORDER is preserved exactly; real SPACING is not, on purpose,
     # so every ring is wide enough to read as its own orbit and every
     # dot sits far enough from its neighbors to stay distinguishable.
-    # Pushed to the real panel limit -- direct owner ask, twice over:
-    # "make it as big as possible", then "make it even bigger... not
-    # all bunched together". GENUINELY EVENLY SPACED (~2.4px steps),
-    # not proportional to real AU or a sqrt curve -- both of those
-    # compressed the outer four rings against each other, which is
-    # exactly the "bunched together" complaint. The selection ring +
-    # direction tick add up to 4px beyond a planet's own ring (see
-    # _frame_planets_orbit), and the minimal header + footer text row
-    # leave a real ~54px vertical window; 23 + 4 fits with real margin,
-    # found by empirically stress-testing increasing radii via
-    # render_audit.Audit (every planet, 8 worst-case angles, selected)
-    # until clipping appeared, then backing off -- not hand-derived.
+    # Pushed to the TRUE panel limit -- direct owner ask, three rounds
+    # over: "as big as possible", "even bigger... not bunched
+    # together", then "the legit max size allowed." GENUINELY EVENLY
+    # SPACED, not proportional to real AU or a sqrt curve -- both
+    # compressed the outer four rings together, the "bunched together"
+    # complaint. The selection ring + direction tick add up to 4px
+    # beyond a planet's own ring (see _frame_planets_orbit); with NO
+    # header reserved at all this round and a footer text row that the
+    # diagram is now allowed to draw UNDER (text draws last, so it
+    # wins the overlap -- not a collision, since the render-audit
+    # collision check is text-vs-text only), the real usable radius
+    # from a true-centre (32,32) is the full 31px to the panel edge.
+    # 27 + 4 = 31 was found empirically (render_audit.Audit, every
+    # planet at 8 worst-case angles, selected) as the largest value
+    # that still stays on-panel -- not hand-derived and hoped correct.
     ORBIT_RADIUS = {
-        "MERCURY": 6, "VENUS": 8, "EARTH": 11, "MARS": 13,
-        "JUPITER": 16, "SATURN": 18, "URANUS": 20, "NEPTUNE": 23,
+        "MERCURY": 8, "VENUS": 11, "EARTH": 14, "MARS": 16,
+        "JUPITER": 19, "SATURN": 22, "URANUS": 24, "NEPTUNE": 27,
     }
     # Real relative size tier -- Venus/Earth genuinely larger than
     # Mercury/Mars; Jupiter/Saturn genuinely dwarf Uranus/Neptune. Not
@@ -10835,26 +10838,28 @@ class MoonEngine:
         "i literally do not see them... want to see every planet and
         distinguish which one", then "the planets have to be orbiting
         the sun", then "make it even bigger... not all bunched
-        together."
+        together", then "it needs to be the legit max size allowed."
 
         Every real planet ALWAYS draws (never blocked on live Horizons
         data having arrived), at a real size tier, on its own FIXED,
         EVENLY-SPACED ring (ORBIT_RADIUS -- real Mercury-outward order
-        preserved, but spaced in genuinely equal ~2-3px steps, not
-        real AU proportions, specifically so the outer four rings
-        never bunch up against each other the way a proportional or
-        sqrt scale both did), at its REAL current angle around the Sun.
-        The header is deliberately minimal (see _minimal_header) to
-        give the diagram the most real room this panel can spare.
+        preserved, but spaced in genuinely equal steps, not real AU
+        proportions, specifically so the outer four rings never bunch
+        up against each other the way a proportional or sqrt scale
+        both did), at its REAL current angle around the Sun. NO header
+        at all this time (not even the minimal accent rule the first
+        size pass kept) -- the SPACE hub's own page-dot indicator plus
+        the bottom info line (which names whatever's selected) already
+        say what screen this is, and every remaining pixel of the true
+        64x64 canvas goes to the diagram itself.
         """
         buf = blank()
         fill(buf, self.BG)
-        self._minimal_header(buf, self.ACCENT)
         orbits = self.data.get("orbits") or {}
         names = self._orbit_selectable()
         sel_name = names[self.planet_idx % len(names)] if names else None
 
-        cx, cy = 32, 30
+        cx, cy = 32, 32
 
         # Real fixed orbit rings -- faint, so the planets read as the
         # actual content, but present enough that the circular
@@ -11029,16 +11034,19 @@ class MoonEngine:
         fill(buf, self.BG)
         planet = self.zoomed_planet
         real_moons = moon.PLANET_MOONS.get(planet) or []
-        self._minimal_header(buf, self.ACCENT)
         have = (self.data.get("moons") or {}).get(planet) or {}
-        cx, cy = 32, 30
+        cx, cy = 32, 32
 
         # Evenly spaced real orbital slots -- innermost real moon at
-        # MOON_INNER_R, outermost at MOON_OUTER_R, real order preserved,
-        # real distance NOT (that was the bunching bug). A single-moon
+        # inner_r, outermost at outer_r, real order preserved, real
+        # distance NOT (that was the bunching bug). A single-moon
         # system (Earth, Neptune's headline Triton aside) still gets a
-        # generous ring rather than sitting right on the planet.
-        inner_r, outer_r = 7, 23
+        # generous ring rather than sitting right on the planet. Pushed
+        # to the true panel limit (no header reserved at all, same as
+        # the solar-system view) -- the selection ring here is a fixed
+        # +3px reach, so 27 + 3 = 30 stays safely inside the 31px true
+        # radius from a (32,32) centre.
+        inner_r, outer_r = 9, 27
         n = max(1, len(real_moons))
         step = (outer_r - inner_r) / (n - 1) if n > 1 else 0
         slot_r = {name: inner_r + step * i for i, (_id, name, _km) in enumerate(real_moons)}
