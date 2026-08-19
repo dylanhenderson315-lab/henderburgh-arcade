@@ -10763,169 +10763,160 @@ class MoonEngine:
             return self._frame_planets_moons()
         return self._frame_planets_orbit() if self.planet_view == "orbit" else self._frame_planets_dome()
 
-    def _frame_planets_orbit(self):
-        """A real heliocentric top-down solar system diagram -- direct
-        owner ask ("make the solar system visually stunning... a view
-        of solar system and where everything is live"). The Sun sits at
-        the real centre of this frame (by definition, in a Sun-centered
-        reference); every planet (plus Earth, so a viewer can see
-        "that's us") is plotted at its REAL current position, from
-        moon.py's own real Horizons VECTORS fetch (moon.ORBIT_BODIES) --
-        never a schematic guess, never a computed-locally orbital
-        formula (the exact trap this project's own moon-distance
-        docstring already refused to fall into).
+    # Real orbital order, Sun outward.
+    ORBIT_ORDER = ["MERCURY", "VENUS", "EARTH", "MARS", "JUPITER", "SATURN", "URANUS", "NEPTUNE"]
+    # FIXED orbit radii, one guaranteed-legible ring per real planet in
+    # real outward order -- NOT sqrt-scaled from real AU (that collapsed
+    # the inner planets onto the Sun and made them unselectably tiny).
+    # Real ORDER is preserved exactly; real SPACING is not, on purpose,
+    # so every ring is wide enough to read as its own orbit and every
+    # dot sits far enough from its neighbors to stay distinguishable.
+    # Capped at 16 (not the panel's own max radius) -- the selection
+    # ring + direction tick add up to 6px BEYOND a planet's own ring
+    # radius (see _frame_planets_orbit), and the header/footer text
+    # rows leave roughly a 45px vertical window to work with; 16 + 6
+    # fits that window with real margin on every side, checked directly
+    # via render_audit.Audit before this value was picked.
+    ORBIT_RADIUS = {
+        "MERCURY": 5, "VENUS": 7, "EARTH": 9, "MARS": 11,
+        "JUPITER": 13, "SATURN": 14, "URANUS": 15, "NEPTUNE": 16,
+    }
+    # Real relative size tier -- Venus/Earth genuinely larger than
+    # Mercury/Mars; Jupiter/Saturn genuinely dwarf Uranus/Neptune. Not
+    # to true scale (impossible at this resolution) but the real ORDER
+    # of "which is bigger" is preserved.
+    ORBIT_SIZE = {
+        "MERCURY": 1, "MARS": 1, "VENUS": 2, "EARTH": 2,
+        "URANUS": 2, "NEPTUNE": 2, "JUPITER": 3, "SATURN": 3,
+    }
 
-        SQRT-scaled radius (same justified technique flights.py's own
-        radar scope uses for the identical reason: without it, the
-        four inner planets collapse into an unreadable dot at centre
-        while the outer solar system eats all the remaining room).
-        Real orbit-path rings (ORBIT_AU, published reference data) give
-        each planet a track to sit near; the plotted dot itself always
-        comes from the real live x/y, so an eccentric real position
-        (Mercury can sit meaningfully off its own nominal circle) is
-        never hidden.
+    def _orbit_angle(self, name, o):
+        """Real angle (radians) for `name` around the Sun -- from the
+        real live dead-reckoned position when we have one (see
+        _extrapolated_xy), else a stable fallback so the planet is
+        never simply MISSING before its first real fetch lands. The
+        fallback is each planet's fixed real ORBIT_ORDER index spread
+        evenly around the circle -- an honest placeholder, replaced the
+        moment real data arrives (real data always wins, same rule
+        dead-reckoning already follows for a fresh sample)."""
+        if o is not None:
+            x, y = self._extrapolated_xy(name, o["x_au"], o["y_au"], self.ORBIT_MAX_EXTRAP_S)
+            return math.atan2(y, x)
+        idx = self.ORBIT_ORDER.index(name) if name in self.ORBIT_ORDER else 0
+        return 2 * math.pi * idx / len(self.ORBIT_ORDER)
+
+    def _frame_planets_orbit(self):
+        """Every real planet, ALWAYS visible, ALWAYS distinguishable,
+        AND genuinely orbiting the Sun -- direct owner feedback across
+        two rounds: first "i literally do not see them on the led
+        board... want to see every planet and distinguish which one",
+        then "the planets have to be orbiting the sun" once a fixed
+        grid layout fixed visibility but stopped looking like a solar
+        system.
+
+        This version keeps what fixed the visibility bug (every planet
+        ALWAYS draws, at a real size tier, never blocked on live data
+        having arrived yet) while restoring the actual orbit picture:
+        the Sun sits at the real centre, and every planet sits on its
+        own FIXED, WIDELY-SPACED ring (ORBIT_RADIUS, real outward
+        order preserved, real AU spacing deliberately NOT used -- that
+        was the original design's failure mode, collapsing the inner
+        planets onto the Sun) at its REAL current angle around the Sun
+        (from moon.py's real Horizons position, dead-reckoned the same
+        as always -- see _orbit_angle()). A planet with no live angle
+        yet still sits on its own real ring, at an honest placeholder
+        angle, rather than vanishing.
         """
         buf = blank()
         fill(buf, self.BG)
-        draw_header(buf, "SOLAR SYSTEM", self.ACCENT, right_tag="ORBIT")
+        draw_header(buf, "SOLAR SYSTEM", self.ACCENT)
         orbits = self.data.get("orbits") or {}
         names = self._orbit_selectable()
+        sel_name = names[self.planet_idx % len(names)] if names else None
 
-        cx, cy = 32, 30
-        r_max = 27
-        au_max = max(self.ORBIT_AU.values())
+        cx, cy = 32, 34
 
-        def scaled_r(au):
-            # Clamped to r_max -- same reasoning flights.py's own
-            # `_scope_r_frac()` clamp already established: a real body
-            # further out than the reference max (an eccentric NEO, or
-            # any future outlier) draws AT the rim, never off-panel.
-            return min(r_max, r_max * math.sqrt(max(0.0, au) / au_max))
-
-        for sx, sy in self._STARS:
-            put_px(buf, sx, sy, (60, 62, 78))
-
-        # Real orbit-path rings, one per body we have EITHER a real
-        # reference distance for -- drawn faint so the live dots read
-        # as the actual content.
-        for name, au in self.ORBIT_AU.items():
-            rr = scaled_r(au)
+        # Real fixed orbit rings -- faint, so the planets read as the
+        # actual content, but present enough that the circular
+        # "orbiting the Sun" picture is unmistakable at a glance.
+        for name in self.ORBIT_ORDER:
+            rr = self.ORBIT_RADIUS[name]
             n = max(20, int(rr * 3.2))
             for i in range(n):
                 a = 2 * math.pi * i / n
                 put_px(buf, int(round(cx + rr * math.cos(a))),
-                       int(round(cy + rr * math.sin(a))), (26, 30, 46))
+                       int(round(cy + rr * math.sin(a))), (24, 28, 40))
 
-        # The Sun -- a bright core with real radiating rays (8 real
-        # compass directions, fading outward), the SAME breathing pulse
-        # technique this project's own hero silhouettes already use, so
-        # it reads as an actual light source at the centre of things
-        # rather than a static dot. Decorative in exact shape (real
-        # sunlight isn't 8 discrete rays), but the THING it represents
-        # -- the Sun, at the real centre of a Sun-centered frame -- is
-        # exactly real, same as the Sun's own (0,0) position always is.
+        # The Sun -- real centre, breathing core + radiating rays.
         pulse = 0.85 + 0.15 * math.sin(self.ticks * 0.05)
         sun_col = rim((255, 220, 120), pulse)
         for dx, dy in ((0, 0), (1, 0), (0, 1), (1, 1), (-1, 0), (0, -1)):
             put_px(buf, cx + dx, cy + dy, sun_col)
         for rdx, rdy in ((3, 0), (-3, 0), (0, 3), (0, -3),
                          (2, 2), (-2, 2), (2, -2), (-2, -2)):
-            ray_len = 3
-            ux, uy = rdx / ray_len, rdy / ray_len
-            for step in range(2, ray_len + 1):
-                fade = 1.0 - (step - 1) / ray_len
+            ux, uy = rdx / 3, rdy / 3
+            for step in range(2, 4):
+                fade = 1.0 - (step - 1) / 3
                 put_px(buf, cx + int(round(ux * step)), cy + int(round(uy * step)),
                        rim(sun_col, fade * 0.55))
 
-        sel_name = names[self.planet_idx % len(names)] if names else None
-
-        # EARTH is real, live data too, real dead-reckoning applied same
-        # as every planet -- drawn distinctly so a viewer can find "us".
-        earth = orbits.get("EARTH")
-        earth_col = (110, 180, 255)
-        if earth:
-            ex, ey = self._orbit_xy("EARTH", earth, cx, cy, scaled_r)
-            selected = sel_name == "EARTH"
-            if selected:
-                pulse2 = 0.75 + 0.25 * math.sin(self.ticks * 0.08)
-                ring_white = rim((255, 255, 255), pulse2)
-                for dx, dy in ((0, -3), (0, 3), (-3, 0), (3, 0)):
-                    put_px(buf, ex + dx, ey + dy, ring_white)
-            put_px(buf, ex, ey, earth_col)
-            put_px(buf, ex + 1, ey, earth_col)
-
-        for name, _id in moon.PLANETS:
+        for name in self.ORBIT_ORDER:
             o = orbits.get(name)
-            if not o:
-                continue
-            x, y = self._orbit_xy(name, o, cx, cy, scaled_r)
+            ang = self._orbit_angle(name, o)
+            rr = self.ORBIT_RADIUS[name]
+            x = int(round(cx + rr * math.cos(ang)))
+            y = int(round(cy + rr * math.sin(ang)))
             col = self.PLANET_COLOR.get(name, self.INK)
+            size = self.ORBIT_SIZE[name]
             selected = name == sel_name
+            have_data = o is not None
+
+            draw_size = size + 1 if selected else size
+            base_col = col if have_data else rim(col, 0.55)   # dim, not absent, while still locating
+            half = draw_size // 2
+            for dx in range(-half, draw_size - half):
+                for dy in range(-half, draw_size - half):
+                    put_px(buf, x + dx, y + dy, base_col)
+
             if selected:
                 pulse2 = 0.75 + 0.25 * math.sin(self.ticks * 0.08)
                 ring_white = rim((255, 255, 255), pulse2)
-                for dx, dy in ((0, -3), (0, 3), (-3, 0), (3, 0)):
-                    put_px(buf, x + dx, y + dy, ring_white)
-                # Real direction-of-travel tick, same technique this
-                # project's own flight radar already uses for a
-                # selected aircraft's heading tick -- a short dim line
-                # along the REAL dead-reckoned velocity vector (never a
-                # guessed direction), so selecting a planet shows not
-                # just where it is but genuinely which way it's going.
-                dr = self._orbit_dr.get(name)
-                if dr and (dr["vx"] or dr["vy"]):
-                    vmag = math.hypot(dr["vx"], dr["vy"])
-                    if vmag > 0:
-                        tux, tuy = dr["vx"] / vmag, dr["vy"] / vmag
-                        for step in range(2, 6):
-                            put_px(buf, x + int(round(tux * step)), y + int(round(tuy * step)),
-                                   rim(col, 0.45))
-            big = name in self.PLANET_GIANT
-            put_px(buf, x, y, col)
-            if big or selected:
-                put_px(buf, x + 1, y, col)
-                put_px(buf, x, y + 1, col)
-            if name == "SATURN":
-                # The same small real-ring cue the sky dome already
-                # uses at this scale -- a short perpendicular tick, the
-                # honest amount of "rings" a 1-2px dot can show (the
-                # full real ring structure is on the Jupiter-style
-                # zoomed moon view, see _draw_saturn_rings).
-                ring_c = rim(col, 0.7)
-                put_px(buf, x - 2, y, ring_c)
-                put_px(buf, x + (2 if big else 1) + 1, y, ring_c)
-
-        # Real closest upcoming near-Earth object (skyevents-adjacent
-        # data, but fetched by moon.py since it rides the same Horizons
-        # infra) -- a fast-moving streak-style marker, distinct from any
-        # planet, with its own breathing pulse so it reads as "moving
-        # fast" even between real fetches.
-        neo = self.data.get("neo")
-        if neo and neo.get("x_au") is not None:
-            nx, ny = self._orbit_xy("NEO", neo, cx, cy, scaled_r, max_extrap_s=self.NEO_MAX_EXTRAP_S)
-            neo_pulse = 0.6 + 0.4 * abs(math.sin(self.ticks * 0.15))
-            neo_col = rim((255, 90, 220), neo_pulse)
-            put_px(buf, nx, ny, neo_col)
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                put_px(buf, nx + dx, ny + dy, rim(neo_col, 0.5))
+                reach = half + 2
+                for ddx, ddy in ((0, -reach), (0, reach), (-reach, 0), (reach, 0)):
+                    put_px(buf, x + ddx, y + ddy, ring_white)
+                if o is not None:
+                    # Real direction-of-travel tick along the real
+                    # dead-reckoned velocity, same technique this
+                    # project's flight radar already uses for a
+                    # selected aircraft's heading.
+                    dr = self._orbit_dr.get(name)
+                    if dr and (dr["vx"] or dr["vy"]):
+                        vmag = math.hypot(dr["vx"], dr["vy"])
+                        if vmag > 0:
+                            tux, tuy = dr["vx"] / vmag, dr["vy"] / vmag
+                            for step in range(reach, reach + 3):
+                                put_px(buf, x + int(round(tux * step)), y + int(round(tuy * step)),
+                                       rim(col, 0.45))
+                if name == "SATURN":
+                    ring_c = rim(col, 0.7)
+                    put_px(buf, x - half - 2, y, ring_c)
+                    put_px(buf, x + half + 2, y, ring_c)
 
         if sel_name:
-            y = 57
-            if sel_name == "EARTH":
-                draw_text3x5(buf, 2, y, "EARTH -- HOME", earth_col if earth else self.INK_DIM)
+            y = 58
+            p = orbits.get(sel_name)
+            if p:
+                dist = math.hypot(p["x_au"], p["y_au"])
+                label = "EARTH -- HOME" if sel_name == "EARTH" else f"{sel_name} {dist:.2f} AU FROM SUN"
+                draw_text3x5(buf, 2, y, fit_text(label, WIDTH - 4), self.PLANET_COLOR.get(sel_name, self.INK))
             else:
-                p = orbits.get(sel_name)
-                if p:
-                    dist = math.hypot(p["x_au"], p["y_au"])
-                    draw_text3x5(buf, 2, y,
-                                 fit_text(f"{sel_name} {dist:.2f} AU FROM SUN", WIDTH - 4),
-                                 self.PLANET_COLOR.get(sel_name, self.INK))
-                else:
-                    draw_text3x5(buf, 2, y, fit_text(f"{sel_name} -- LOCATING", WIDTH - 4), self.INK_DIM)
-        elif neo:
-            draw_text3x5(buf, 2, 57,
-                         fit_text(f"{neo['des']} {neo.get('dist_au', 0):.4f} AU {neo.get('cd', '')}", WIDTH - 4),
-                         rim((255, 90, 220), 1.0))
+                draw_text3x5(buf, 2, y, fit_text(f"{sel_name} -- LOCATING", WIDTH - 4), self.INK_DIM)
+        else:
+            neo = self.data.get("neo")
+            if neo:
+                draw_text3x5(buf, 2, 58,
+                             fit_text(f"{neo['des']} {neo.get('dist_au', 0):.4f} AU {neo.get('cd', '')}", WIDTH - 4),
+                             rim((255, 90, 220), 1.0))
         return bytes(buf)
 
     def _orbit_xy(self, name, o, cx, cy, scaled_r, max_extrap_s=None):
