@@ -10519,6 +10519,10 @@ class MoonEngine:
     MOON_LIT = (230, 230, 240)
     MOON_DARK = (30, 30, 42)
     LAUNCH = (255, 170, 60)
+    PLANET_UP = (140, 230, 160)   # above the horizon right now -- real, from Horizons el_deg
+    PLANET_DOWN = (95, 100, 118)
+
+    VIEWS = ["moon", "planets"]
 
     def __init__(self):
         self.score = 0
@@ -10527,6 +10531,8 @@ class MoonEngine:
     def reset(self):
         self.data = {}
         self.ticks = 0
+        self.view = "moon"
+        self.planet_idx = 0
 
     def has_content(self):
         return bool(self.data.get("curphase")) or bool(self.data.get("launch"))
@@ -10535,7 +10541,19 @@ class MoonEngine:
         return 1.3 if self.has_content() else 0.5
 
     def input(self, cmd):
-        pass
+        planets = self._visible_planet_names()
+        if cmd == "rotate":
+            self.view = "planets" if self.view == "moon" else "moon"
+        elif self.view == "planets" and planets and cmd in ("left", "right"):
+            step = -1 if cmd == "left" else 1
+            self.planet_idx = (self.planet_idx + step) % len(planets)
+
+    def _visible_planet_names(self):
+        """Real planet names with at least a real az/el reading -- order
+        follows moon.PLANETS (Mercury..Neptune), not sorted by brightness
+        or elevation, so the list order is stable tick to tick."""
+        have = self.data.get("planets") or {}
+        return [name for _, name in moon.PLANETS if name in have]
 
     def auto(self):
         pass
@@ -10567,7 +10585,45 @@ class MoonEngine:
             return f"T-{h}H {m:02d}M"
         return f"T-{m}M"
 
+    def _frame_planets(self):
+        buf = blank()
+        fill(buf, self.BG)
+        draw_header(buf, "PLANETS", self.ACCENT)
+        names = self._visible_planet_names()
+        planets = self.data.get("planets") or {}
+        if not names:
+            draw_text_centered(buf, 28, "LOOKING", self.INK_DIM)
+            draw_text_centered(buf, 36, "FROM JPL HORIZONS", self.INK_DIM)
+            return bytes(buf)
+        self.planet_idx %= len(names)
+        name = names[self.planet_idx]
+        p = planets[name]
+        up = isinstance(p.get("el_deg"), (int, float)) and p["el_deg"] > 0
+        col = self.PLANET_UP if up else self.PLANET_DOWN
+        draw_text3x5(buf, 2, 12, fit_text(name, WIDTH - 4), col, scale=2)
+        draw_text3x5(buf, 2, 24, "UP NOW" if up else "BELOW HORIZON", col)
+        y = 33
+        el = p.get("el_deg")
+        az = p.get("az_deg")
+        if isinstance(el, (int, float)) and isinstance(az, (int, float)):
+            draw_text3x5(buf, 2, y, fit_text(f"ALT {el:.0f}  AZ {az:.0f}", WIDTH - 4), self.INK)
+            y += 7
+        mag = p.get("mag")
+        dist = p.get("dist_au")
+        if isinstance(mag, (int, float)) or isinstance(dist, (int, float)):
+            parts = []
+            if isinstance(mag, (int, float)):
+                parts.append(f"MAG {mag:.1f}")
+            if isinstance(dist, (int, float)):
+                parts.append(f"{dist:.2f} AU")
+            draw_text3x5(buf, 2, y, fit_text("  ".join(parts), WIDTH - 4), self.INK)
+            y += 7
+        draw_dots(buf, HEIGHT - 4, len(names), self.planet_idx, self.ACCENT, self.INK_DIM)
+        return bytes(buf)
+
     def frame(self):
+        if self.view == "planets":
+            return self._frame_planets()
         buf = blank()
         fill(buf, self.BG)
         stale = bool(self.data.get("age") and self.data["age"] > 3600 * 8)
@@ -10612,6 +10668,85 @@ class MoonEngine:
             if launch.get("provider") and y <= HEIGHT - 5:
                 draw_text3x5(buf, 2, y, fit_text(launch["provider"], WIDTH - 4), self.INK_DIM)
         return bytes(buf)
+
+
+class SpaceHubEngine:
+    """SPACE -- one unified app for "what's up there right now", direct
+    owner ask (2026-08-19): "combine the satellites into this space hub
+    ... they should be combined into one not separate. the moon should
+    also be in it."
+
+    Composes REAL instances of SatelliteEngine and MoonEngine and
+    delegates tick()/frame()/input() to whichever is on screen -- the
+    SAME "compose real instances, delegate, nothing reimplemented"
+    pattern AmbientEngine itself already uses for its own sub-modes, so
+    both sub-engines look and behave identically to how they always
+    have; this is a presentation layer on top, not a rewrite of either.
+
+    `satellite`/`moon` STAY separately registered in ENGINES and in
+    catalog.py's SEQUENCE -- AmbientEngine's own WORLD rotation, the sky-
+    share detector, and the big-moment queue all key off
+    `self.engines.get("satellite")` by name, and unwinding that coupling
+    was a much larger, riskier change than what the owner actually asked
+    for (one selectable app for a person browsing the menu). Only the
+    MENU-visible identity of the two was merged -- `catalog.py` marks
+    both `menu=False` now, so neither shows as its own tile; `space` is
+    the one tile a person actually picks.
+
+    Two pages: SKY (the real SatelliteEngine, unmodified -- UPCOMING/
+    OVERHEAD-NOW/dome, its own full pass-browsing input) and MOON (the
+    real MoonEngine, unmodified -- phase/rise-set/launch, its own
+    internal MOON/PLANETS toggle). `drop` switches between the two pages;
+    every other button is handed straight to whichever page is showing,
+    so nothing about either sub-engine's own controls changed -- the one
+    real tradeoff, stated plainly: SatelliteEngine's own `drop` (its
+    auto-cycle pause toggle) is not reachable from inside the combined
+    hub, since `drop` is now the page switch instead. Its `up`/`down`
+    (scope <-> pass-list) and `left`/`right` (pass browsing) still work
+    exactly as before.
+    """
+
+    name = "space"
+    tick_rate = 0.05
+
+    def __init__(self):
+        self.score = 0
+        self._sat = SatelliteEngine()
+        self._moon = MoonEngine()
+        self.page = "sky"
+
+    def reset(self):
+        self._sat.reset()
+        self._moon.reset()
+        self.page = "sky"
+
+    def has_content(self):
+        return self._sat.has_content() or self._moon.has_content()
+
+    def ambient_weight(self):
+        return max(self._sat.ambient_weight(), self._moon.ambient_weight())
+
+    def input(self, cmd):
+        if cmd == "drop":
+            self.page = "moon" if self.page == "sky" else "sky"
+            return
+        (self._sat if self.page == "sky" else self._moon).input(cmd)
+
+    def auto(self):
+        self._sat.auto()
+        self._moon.auto()
+
+    def tick(self):
+        # Tick both, same reasoning AmbientEngine ticks every sub-mode
+        # every tick: tick() is what calls each FEED.get(), and an
+        # unread feed idles out -- ticking only the visible page would
+        # make the OTHER page come up cold the moment someone switches.
+        self._sat.tick()
+        self._moon.tick()
+        self.score = self._sat.score + self._moon.score
+
+    def frame(self):
+        return self._sat.frame() if self.page == "sky" else self._moon.frame()
 
 
 class DepartureBoardEngine(Browsable):
@@ -20041,10 +20176,14 @@ class MenuEngine:
             put_px(buf, x0 + 2, y0 + 7, c)
             put_px(buf, x0 + 3, y0 + 6, c)
             put_px(buf, x0 + 4, y0 + 5, w)
-        elif gid == "moon":
+        elif gid in ("moon", "space"):
             # A crescent -- a filled disc with a smaller offset dark disc
             # carved out of it, the universal "moon" glyph shape, distinct
-            # from the satellite's boxy body-and-panels language.
+            # from the satellite's boxy body-and-panels language. Reused
+            # for "space" (2026-08-19) -- the combined sky+moon+planets
+            # hub -- rather than a third shape; the crescent already
+            # reads as "space/sky" and the hub's own header text (SKY vs
+            # MOON) disambiguates which page is showing once inside it.
             for dy in range(-4, 5):
                 hw = int(math.sqrt(max(0, 16 - dy * dy)))
                 for dx in range(-hw, hw + 1):
@@ -23085,6 +23224,10 @@ ENGINES = {
     # airport, zero new I/O (see DepartureBoardEngine's own docstring).
     "departures": DepartureBoardEngine,
     "moon": MoonEngine,
+    # SPACE (2026-08-19) -- unified sky+moon+planets app, combining the
+    # two above into one selectable mode; see SpaceHubEngine's own
+    # docstring for why "satellite"/"moon" stay registered too.
+    "space": SpaceHubEngine,
     # NOW PLAYING (2026-08-09) -- real track via Last.fm + a real live
     # visualizer off the panel's own mic (see NowPlayingEngine's own
     # docstring for why the mic alone can't do this).

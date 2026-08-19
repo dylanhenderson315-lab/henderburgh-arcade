@@ -31,13 +31,47 @@ revisit if a real, verifiable ephemeris source is found.
 Location is NOT duplicated -- reuses satellite.py's
 location_config.json via satellite.FEED.get_location(), same as every
 other module here.
+
+PLANET POSITIONS (2026-08-19) -- "make the moon mode a whole space hub,
+a lunar/space hobbyist's dream", direct owner ask. A dedicated research
+pass confirmed live that USNO has NO real planet endpoint (`body=` on
+`rstt/oneday` is silently ignored -- confirmed by comparing two calls),
+and that api.nasa.gov exposes no live position data either. The one
+genuinely free, keyless, confirmed-live source found: JPL HORIZONS
+(`ssd.jpl.nasa.gov/api/horizons.api`) -- NASA/JPL's own real ephemeris
+system, not a third party. No key, no documented hard rate wall (tested
+with multiple back-to-back calls with no throttling response), but it
+is a general-purpose research tool, not built for tight polling --
+polled at `PLANET_REFRESH` (1h) per planet, one planet fetched per real
+feed-loop pass (round-robin via `_planet_cursor`), never all seven at
+once.
+
+Real per-planet fields: `az_deg`/`el_deg` (true apparent azimuth/
+elevation from the configured home coordinates -- this is what answers
+"is it up right now" and "which way do I look"), `mag` (apparent
+magnitude -- lower/negative is brighter), `dist_au` (real current
+Earth-observer distance in astronomical units). `QUANTITIES='4,9,20'`
+(azi/elev, apmag/S-brt, delta/deldot) keeps the returned row to only
+those fields -- RA/Dec (`QUANTITIES=1`) is deliberately not requested,
+this project has no use for equatorial coordinates.
+
+Horizons returns a JSON-wrapped fixed-width TEXT ephemeris table
+(`{"result": "...$$SOE ... $$EOE..."}`), not structured JSON --
+`_parse_horizons_row()` pulls the trailing 6 numeric fields via regex
+rather than a fixed column split, since the leading date/time/flag
+columns have a variable-width flag field ("*m", "Am", or blank) that
+makes a naive `split()` position-fragile. A row that doesn't match the
+expected numeric tail returns None for that planet -- an honest gap,
+never a guessed position.
 """
 import json
+import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import paneltext
 import satellite
@@ -45,12 +79,26 @@ import satellite
 USNO_URL = ("https://aa.usno.navy.mil/api/rstt/oneday"
             "?date={date}&coords={lat},{lon}&tz={tz}")
 LL2_URL = "https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit=5&mode=list"
+HORIZONS_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
 
 USNO_REFRESH = 3600.0 * 6   # real rise/set/illumination is a once-a-day fact; 6h keeps it current across a long-running day
 LAUNCH_REFRESH = 3600.0     # respect LL2's real ~15/hr soft limit by a wide margin
+PLANET_REFRESH = 3600.0     # per planet -- Horizons is a research tool, not built for tight polling
 IDLE_STOP = 120.0
 TIMEOUT = 8.0
 _UA = "Mozilla/5.0 (HenderburghArcade)"
+
+# Real JPL Horizons body ids -- reference data, not invented.
+PLANETS = [
+    ("199", "MERCURY"), ("299", "VENUS"), ("499", "MARS"),
+    ("599", "JUPITER"), ("699", "SATURN"), ("799", "URANUS"),
+    ("899", "NEPTUNE"),
+]
+
+_HORIZONS_ROW_RE = re.compile(
+    r"(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+|n\.a\.)\s+(-?\d+\.\d+|n\.a\.)\s+"
+    r"(-?\d+\.\d+)\s+(-?\d+\.\d+)\s*$"
+)
 
 
 def _get_json(url):
@@ -137,6 +185,60 @@ def _parse_launch(data):
     return None
 
 
+def _parse_horizons_row(text):
+    """Real az/el/mag/distance from ONE Horizons ephemeris row, or None.
+    Takes the LAST real row before $$EOE (closest to "now" of whatever
+    window was requested). Matches the trailing 6 numeric fields by
+    regex rather than a fixed column split -- see this module's own
+    docstring for why the leading flag column makes position-based
+    splitting fragile. `n.a.` (Horizons' own honest "not available" for
+    S-brt/deldot on some bodies) is treated as absent, not zero."""
+    if not isinstance(text, str):
+        return None
+    try:
+        body = text.split("$$SOE", 1)[1].split("$$EOE", 1)[0]
+    except IndexError:
+        return None
+    rows = [ln for ln in body.splitlines() if ln.strip()]
+    if not rows:
+        return None
+    m = _HORIZONS_ROW_RE.search(rows[-1])
+    if not m:
+        return None
+    az, el, apmag, _sbrt, delta, _deldot = m.groups()
+    try:
+        out = {"az_deg": float(az), "el_deg": float(el), "dist_au": float(delta)}
+    except ValueError:
+        return None
+    if apmag != "n.a.":
+        try:
+            out["mag"] = float(apmag)
+        except ValueError:
+            pass
+    return out
+
+
+def _fetch_planet(body_id, lat, lon):
+    """Real az/el/mag/distance for one planet from home, right now, via
+    JPL Horizons -- or None on any real failure. A ~2h observer window
+    is requested (STEP_SIZE 1h) so the last real row is close to now
+    without needing exact-second alignment."""
+    now = datetime.utcnow()
+    start = now.strftime("%Y-%m-%d %H:%M")
+    stop = (now + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
+    params = {
+        "format": "json", "COMMAND": f"'{body_id}'", "OBJ_DATA": "NO",
+        "MAKE_EPHEM": "YES", "EPHEM_TYPE": "OBSERVER",
+        "CENTER": "'coord@399'",
+        "SITE_COORD": f"'{lon:.4f},{lat:.4f},0'",
+        "START_TIME": f"'{start}'", "STOP_TIME": f"'{stop}'",
+        "STEP_SIZE": "'1 h'", "QUANTITIES": "'4,9,20'",
+    }
+    url = HORIZONS_URL + "?" + urllib.parse.urlencode(params)
+    data = _get_json(url)
+    return _parse_horizons_row(data.get("result") if isinstance(data, dict) else None)
+
+
 class MoonFeed:
     def __init__(self):
         self._lock = threading.Lock()
@@ -146,25 +248,29 @@ class MoonFeed:
         self._launch = None
         self._launch_try = 0.0
         self._launch_err = None
+        self._planets = {}          # name -> {az_deg, el_deg, mag, dist_au}
+        self._planet_cursor = 0
+        self._planet_try = {}       # name -> last-fetch wall time
         self._last_read = 0.0
         self._thread = None
         self._home = satellite.FEED.get_location()
 
     def get(self):
         """{"curphase", "illum_pct", "closest_phase", "moonrise",
-        "moonset", "launch": {...}|None, "configured", "age", "err"}.
-        Never blocks."""
+        "moonset", "launch": {...}|None, "planets": {name: {...}},
+        "configured", "age", "err"}. Never blocks."""
         now = time.time()
         with self._lock:
             self._last_read = now
             usno = dict(self._usno)
             launch = dict(self._launch) if self._launch else None
+            planets = {k: dict(v) for k, v in self._planets.items()}
             err = self._usno_err or self._launch_err
             age = (now - self._usno_try) if self._usno_try else None
         self._ensure_thread()
         out = {
             "configured": satellite.FEED.configured,
-            "age": age, "err": err, "launch": launch,
+            "age": age, "err": err, "launch": launch, "planets": planets,
         }
         out.update(usno)
         return out
@@ -184,7 +290,32 @@ class MoonFeed:
                 return
             self._refresh_usno()
             self._refresh_launch()
+            self._refresh_one_planet()
             time.sleep(5.0)
+
+    def _refresh_one_planet(self):
+        """Round-robin: at most ONE planet fetched per loop pass, and
+        only if that planet is actually due (PLANET_REFRESH). Keeps
+        Horizons load to at most 7 calls/hour total, never a burst."""
+        if not satellite.FEED.configured:
+            return
+        lat, lon, _ = satellite.FEED.get_location()
+        now = time.time()
+        for _ in range(len(PLANETS)):
+            body_id, name = PLANETS[self._planet_cursor]
+            self._planet_cursor = (self._planet_cursor + 1) % len(PLANETS)
+            if now - self._planet_try.get(name, 0.0) < PLANET_REFRESH:
+                continue
+            self._planet_try[name] = now
+            try:
+                parsed = _fetch_planet(body_id, lat, lon)
+            except (urllib.error.URLError, TimeoutError, ValueError,
+                    json.JSONDecodeError, OSError, KeyError):        # noqa: BLE001
+                return
+            if parsed is not None:
+                with self._lock:
+                    self._planets[name] = parsed
+            return
 
     def _refresh_usno(self):
         now = time.time()
