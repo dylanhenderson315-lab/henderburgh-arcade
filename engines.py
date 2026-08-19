@@ -8792,6 +8792,16 @@ class FlightEngine(Browsable, BigMomentSource):
             if new_match:
                 self.atc_match_ident = new_match
                 content_changed = True   # force a page recompute: the match tag now reserves a line
+                # ATC x HANGAR TIE-IN, direct owner ask -- reuses THIS
+                # SAME confidence-gated match, never a new fuzzy time-
+                # window heuristic (a real risk an earlier brainstorm
+                # explicitly flagged: ATC callsigns and Hangar
+                # registrations don't always correlate cleanly, so only
+                # a real, already-proven exact match is trusted here).
+                matched_ac = next((a for a in ac_list_now if a.get("ident") == new_match), None)
+                reg = (matched_ac or {}).get("reg")
+                if reg:
+                    hangar.LOG.tag_atc_mention(reg, content_entries[0].get("ts"))
 
         if content_changed:
             # A match costs one line of page budget (ATC_PAGE_LINES - 1)

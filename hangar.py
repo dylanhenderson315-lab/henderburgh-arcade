@@ -151,6 +151,27 @@ class HangarLog:
             e["weather"] = condition_text
             self._save()
 
+    def tag_atc_mention(self, reg, ts):
+        """A real, confidence-gated ATC transcript match (atc.py's own
+        match_callsign() -- exact airline+flight-number match against
+        the real currently-tracked aircraft list, the SAME match the
+        ATC log view already highlights) just named this tail. Stores
+        only the real timestamp, never the transcript text itself (that
+        already lives in atc_log.jsonl and PERSONAL-RIG-ONLY scope
+        applies there, not to this general collection) -- this is
+        purely "ATC mentioned this tail, and when", the honest fact a
+        confidence-gated match actually proves. Overwrites on every
+        real new match (unlike tag_weather()'s one-time snapshot) since
+        "most recently mentioned" is the useful real fact here, not
+        "first mentioned". No-op if the tail isn't in the collection."""
+        with self._lock:
+            self._ensure_loaded()
+            e = self._entries.get(reg)
+            if e is None:
+                return
+            e["atc_last_mention"] = ts
+            self._save()
+
     def _evict_if_over_cap(self):
         if len(self._entries) <= HANGAR_MAX_ENTRIES:
             return
@@ -557,6 +578,10 @@ def dossier(entry, entries, sheet=None, now=None):
     rhythm = revisit_rhythm(e.get("first_seen"), e.get("last_seen"), times)
     if rhythm:
         log.append(rhythm)
+    atc_ts = e.get("atc_last_mention")
+    atc_age = _age_txt(atc_ts, now) if atc_ts else None
+    if atc_age:
+        log.append("ATC %s" % atc_age)
     if leftover_year:
         log.append("SINCE %s" % facts["year"])
     if icao:
