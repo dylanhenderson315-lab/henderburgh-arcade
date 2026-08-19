@@ -33,6 +33,8 @@ import paneltext
 import market
 import satellite
 import skypass
+import racing
+import skyevents
 import flights
 import atc
 import hangar
@@ -10593,7 +10595,7 @@ class MoonEngine:
         planets = self.data.get("planets") or {}
         if not names:
             draw_text_centered(buf, 28, "LOOKING", self.INK_DIM)
-            draw_text_centered(buf, 36, "FROM JPL HORIZONS", self.INK_DIM)
+            draw_text_centered(buf, 36, "FROM HORIZONS", self.INK_DIM)
             return bytes(buf)
         self.planet_idx %= len(names)
         name = names[self.planet_idx]
@@ -10670,6 +10672,145 @@ class MoonEngine:
         return bytes(buf)
 
 
+class RacingEngine:
+    """RACING -- real F1 (jolpi.ca) and real NASCAR Cup (cf.nascar.com)
+    results/schedule, direct owner ask ("do f1 and try to find same for
+    nascar"), same day as the SPACE hub. Two pages (`drop` toggles),
+    same composition-free shape as the moon PLANETS page since there is
+    no existing engine to compose here -- both racing.py feeds are new.
+
+    Deliberately NOT tied to sports.py's own racing coverage (ESPN's
+    universal feed already renders whatever racing event it tags via
+    the generic leaderboard path) -- a dedicated research pass confirmed
+    there is no cheap, reliable way to correlate an ESPN racing event to
+    a jolpi.ca race by anything sturdier than date, so this stays a
+    fully separate, standalone real source rather than a fragile join.
+
+    HONEST SCOPE: real schedule + real last-race results/podium/
+    standings, never live in-race telemetry -- see racing.py's own
+    docstring for why NASCAR's live-feed endpoint isn't used here (it
+    looked real in research but couldn't be confirmed to actually
+    update during a green-flag race, since none was running to check
+    against).
+    """
+
+    name = "racing"
+    tick_rate = 0.2
+
+    BG = (0, 0, 0)
+    ACCENT = (200, 40, 40)     # racing red, distinct from every other mode's accent
+    INK = (170, 175, 195)
+    INK_DIM = (85, 88, 105)
+    GOLD = (255, 200, 60)
+    SILVER = (200, 205, 215)
+    BRONZE = (200, 140, 80)
+    PODIUM_COL = [GOLD, SILVER, BRONZE]
+
+    def __init__(self):
+        self.score = 0
+        self.reset()
+
+    def reset(self):
+        self.f1 = {}
+        self.nascar = {}
+        self.page = "f1"
+        self.ticks = 0
+
+    def has_content(self):
+        return bool(self.f1.get("last_result") or self.f1.get("next_race")
+                     or self.nascar.get("last_result") or self.nascar.get("next_race"))
+
+    def ambient_weight(self):
+        return 1.0 if self.has_content() else 0.4
+
+    def input(self, cmd):
+        if cmd == "drop":
+            self.page = "nascar" if self.page == "f1" else "f1"
+
+    def auto(self):
+        pass
+
+    def tick(self):
+        self.ticks += 1
+        self.f1 = racing.F1_FEED.get()
+        self.nascar = racing.NASCAR_FEED.get()
+
+    def _frame_f1(self):
+        buf = blank()
+        fill(buf, self.BG)
+        stale = bool(self.f1.get("age") and self.f1["age"] > 3600 * 12)
+        draw_header(buf, "F1", self.ACCENT, right_tag="NASCAR", stale=stale)
+
+        last = self.f1.get("last_result")
+        if not last:
+            draw_text_centered(buf, 28, "NO SIGNAL" if self.f1.get("err") else "LOOKING", self.INK_DIM)
+            draw_text_centered(buf, 36, "FROM JOLPI.CA", self.INK_DIM)
+            return bytes(buf)
+
+        y = 11
+        draw_text3x5(buf, 2, y, fit_text(last["name"] or "", WIDTH - 4), self.INK)
+        y += 8
+        for i, p in enumerate(last.get("podium") or []):
+            col = self.PODIUM_COL[i] if i < 3 else self.INK
+            label = f"{p['pos']} {p['code'] or p['family_name'] or '?'}"
+            draw_text3x5(buf, 2, y, fit_text(label, 30), col)
+            if p.get("constructor"):
+                draw_text3x5(buf, 33, y, fit_text(p["constructor"], WIDTH - 35), self.INK_DIM)
+            y += 7
+
+        y += 2
+        nxt = self.f1.get("next_race")
+        if nxt and y <= HEIGHT - 12:
+            draw_divider(buf, y)
+            y += 4
+            draw_text3x5(buf, 2, y, "NEXT:", self.INK_DIM)
+            y += 7
+            head = f"{nxt['name']} {nxt['date']}" if nxt.get("date") else (nxt.get("name") or "")
+            draw_text3x5(buf, 2, y, fit_text(head, WIDTH - 4), self.INK)
+        return bytes(buf)
+
+    def _frame_nascar(self):
+        buf = blank()
+        fill(buf, self.BG)
+        stale = bool(self.nascar.get("age") and self.nascar["age"] > 3600 * 12)
+        draw_header(buf, "NASCAR CUP", self.ACCENT, right_tag="F1 >", stale=stale)
+
+        last = self.nascar.get("last_result")
+        if not last:
+            draw_text_centered(buf, 28, "NO SIGNAL" if self.nascar.get("err") else "LOOKING", self.INK_DIM)
+            draw_text_centered(buf, 36, "FROM NASCAR.COM", self.INK_DIM)
+            return bytes(buf)
+
+        y = 11
+        draw_text3x5(buf, 2, y, fit_text(last["name"] or "", WIDTH - 4), self.INK)
+        y += 8
+        if last.get("winner"):
+            draw_text3x5(buf, 2, y, fit_text(last["winner"], WIDTH - 4), self.GOLD, scale=1)
+            y += 7
+        if last.get("track"):
+            draw_text3x5(buf, 2, y, fit_text(last["track"], WIDTH - 4), self.INK_DIM)
+            y += 7
+        if isinstance(last.get("laps"), int):
+            cau = last.get("cautions")
+            tail = f"{last['laps']} LAPS" + (f"  {cau} CAUTIONS" if isinstance(cau, int) else "")
+            draw_text3x5(buf, 2, y, fit_text(tail, WIDTH - 4), self.INK)
+            y += 7
+
+        y += 2
+        nxt = self.nascar.get("next_race")
+        if nxt and y <= HEIGHT - 12:
+            draw_divider(buf, y)
+            y += 4
+            draw_text3x5(buf, 2, y, "NEXT:", self.INK_DIM)
+            y += 7
+            head = f"{nxt['name']} {nxt['date'][:10]}" if nxt.get("date") else (nxt.get("name") or "")
+            draw_text3x5(buf, 2, y, fit_text(head, WIDTH - 4), self.INK)
+        return bytes(buf)
+
+    def frame(self):
+        return self._frame_nascar() if self.page == "nascar" else self._frame_f1()
+
+
 class SpaceHubEngine:
     """SPACE -- one unified app for "what's up there right now", direct
     owner ask (2026-08-19): "combine the satellites into this space hub
@@ -10693,32 +10834,50 @@ class SpaceHubEngine:
     both `menu=False` now, so neither shows as its own tile; `space` is
     the one tile a person actually picks.
 
-    Two pages: SKY (the real SatelliteEngine, unmodified -- UPCOMING/
-    OVERHEAD-NOW/dome, its own full pass-browsing input) and MOON (the
-    real MoonEngine, unmodified -- phase/rise-set/launch, its own
-    internal MOON/PLANETS toggle). `drop` switches between the two pages;
-    every other button is handed straight to whichever page is showing,
-    so nothing about either sub-engine's own controls changed -- the one
-    real tradeoff, stated plainly: SatelliteEngine's own `drop` (its
-    auto-cycle pause toggle) is not reachable from inside the combined
-    hub, since `drop` is now the page switch instead. Its `up`/`down`
-    (scope <-> pass-list) and `left`/`right` (pass browsing) still work
-    exactly as before.
+    THREE pages: SKY (the real SatelliteEngine, unmodified -- UPCOMING/
+    OVERHEAD-NOW/dome, its own full pass-browsing input), MOON (the real
+    MoonEngine, unmodified -- phase/rise-set/launch, its own internal
+    MOON/PLANETS toggle), and EVENTS (new, skyevents.py -- real aurora
+    visibility from the current NOAA Kp index, the next real meteor
+    shower, and the next real launch's distance from home when it
+    confidently matches a known real launch site). `drop` cycles
+    SKY -> MOON -> EVENTS -> SKY; every other button is handed straight
+    to whichever page is showing, so nothing about SKY/MOON's own
+    controls changed -- the one real tradeoff, stated plainly:
+    SatelliteEngine's own `drop` (its auto-cycle pause toggle) is not
+    reachable from inside the combined hub, since `drop` is now the page
+    switch. Its `up`/`down` (scope <-> pass-list) and `left`/`right`
+    (pass browsing) still work exactly as before.
+
+    A small 3-dot page indicator is composited into the bottom-right
+    corner of every frame (2026-08-19, direct owner feedback that the
+    hub "only shows satellites and radar" -- the MOON/EVENTS pages
+    existed but were not discoverable with no on-screen sign there was
+    more than one page). Placement (x=58/60/62, y=61) was checked
+    against real rendered frames from both SKY's pass-list state AND its
+    OVERHEAD-NOW dome state before picking it -- both leave that corner
+    genuinely empty.
     """
 
     name = "space"
     tick_rate = 0.05
+
+    PAGES = ("sky", "moon", "events")
+    DOT_ON = (200, 200, 220)
+    DOT_OFF = (40, 42, 54)
 
     def __init__(self):
         self.score = 0
         self._sat = SatelliteEngine()
         self._moon = MoonEngine()
         self.page = "sky"
+        self.events = {}
 
     def reset(self):
         self._sat.reset()
         self._moon.reset()
         self.page = "sky"
+        self.events = {}
 
     def has_content(self):
         return self._sat.has_content() or self._moon.has_content()
@@ -10728,25 +10887,91 @@ class SpaceHubEngine:
 
     def input(self, cmd):
         if cmd == "drop":
-            self.page = "moon" if self.page == "sky" else "sky"
+            i = self.PAGES.index(self.page)
+            self.page = self.PAGES[(i + 1) % len(self.PAGES)]
             return
-        (self._sat if self.page == "sky" else self._moon).input(cmd)
+        if self.page == "sky":
+            self._sat.input(cmd)
+        elif self.page == "moon":
+            self._moon.input(cmd)
 
     def auto(self):
         self._sat.auto()
         self._moon.auto()
 
     def tick(self):
-        # Tick both, same reasoning AmbientEngine ticks every sub-mode
-        # every tick: tick() is what calls each FEED.get(), and an
-        # unread feed idles out -- ticking only the visible page would
-        # make the OTHER page come up cold the moment someone switches.
+        # Tick both real sub-engines every tick, same reasoning
+        # AmbientEngine ticks every sub-mode every tick: tick() is what
+        # calls each FEED.get(), and an unread feed idles out -- ticking
+        # only the visible page would make the OTHER page come up cold
+        # the moment someone switches. skyevents' aurora feed is read
+        # here too so it stays warm the same way.
         self._sat.tick()
         self._moon.tick()
+        aurora = skyevents.FEED.get()
+        now = time.localtime()
+        shower = skyevents.next_meteor_shower(now.tm_mon, now.tm_mday)
+        lat, lon, _ = satellite.FEED.get_location()
+        visible = skyevents.aurora_visible_at(aurora.get("kp"), lat) if satellite.FEED.configured else None
+        launch = self._moon.data.get("launch") or {}
+        launch_mi = None
+        if launch.get("provider") and satellite.FEED.configured:
+            launch_mi = skyevents.launch_distance_mi(launch["provider"], lat, lon)
+        self.events = {"aurora_kp": aurora.get("kp"), "aurora_visible": visible,
+                        "shower": shower, "launch": launch or None, "launch_mi": launch_mi}
         self.score = self._sat.score + self._moon.score
 
+    def _frame_events(self):
+        buf = blank()
+        fill(buf, (0, 0, 0))
+        draw_header(buf, "SKY EVENTS", (150, 190, 255))
+        y = 11
+
+        kp = self.events.get("aurora_kp")
+        vis = self.events.get("aurora_visible")
+        if isinstance(kp, (int, float)):
+            col = (140, 230, 160) if vis else (150, 160, 185)
+            draw_text3x5(buf, 2, y, f"AURORA KP {kp:.1f}", col)
+            y += 7
+            draw_text3x5(buf, 2, y, "MAY BE VISIBLE" if vis else "NOT LIKELY HERE", col)
+            y += 9
+        else:
+            draw_text3x5(buf, 2, y, "NO AURORA DATA", (85, 88, 105))
+            y += 9
+
+        shower = self.events.get("shower")
+        if shower:
+            draw_divider(buf, y - 1)
+            label = f"{shower['name']}"
+            draw_text3x5(buf, 2, y, fit_text(label, WIDTH - 4), (255, 200, 60))
+            y += 7
+            due = "PEAKS TODAY" if shower["days_until"] == 0 else f"PEAKS IN {shower['days_until']}D"
+            draw_text3x5(buf, 2, y, fit_text(f"{due}  ZHR {shower['zhr']}", WIDTH - 4), (170, 175, 195))
+            y += 9
+
+        launch = self.events.get("launch")
+        if launch and y <= HEIGHT - 12:
+            draw_divider(buf, y - 1)
+            draw_text3x5(buf, 2, y, fit_text(launch.get("name") or "LAUNCH", WIDTH - 4), (255, 170, 60))
+            y += 7
+            mi = self.events.get("launch_mi")
+            if isinstance(mi, (int, float)) and y <= HEIGHT - 5:
+                draw_text3x5(buf, 2, y, f"{mi:.0f} MI FROM HOME", (170, 175, 195))
+        return bytes(buf)
+
     def frame(self):
-        return self._sat.frame() if self.page == "sky" else self._moon.frame()
+        if self.page == "sky":
+            f = self._sat.frame()
+        elif self.page == "moon":
+            f = self._moon.frame()
+        else:
+            f = self._frame_events()
+        buf = bytearray(f)
+        i = self.PAGES.index(self.page)
+        for k, px in enumerate((58, 60, 62)):
+            col = self.DOT_ON if k == i else self.DOT_OFF
+            put_px(buf, px, 61, col)
+        return bytes(buf)
 
 
 class DepartureBoardEngine(Browsable):
@@ -20189,6 +20414,11 @@ class MenuEngine:
                 for dx in range(-hw, hw + 1):
                     if (dx - 2) ** 2 + dy * dy > 9:   # outside the carved-out dark disc
                         put_px(buf, x0 + 5 + dx, y0 + 5 + dy, c)
+        elif gid == "racing":
+            # Reuses the same checkered-flag glyph SPORT_ICONS["racing"]
+            # already draws for ESPN motorsport events -- one racing
+            # symbol in the project, not a second one for this hub.
+            draw_icon_racing(buf, x0 + 2, y0 + 1, c)
         elif gid == "flights":
             # A simple swept-wing silhouette pointed up-right, the classic
             # "flight tracker" glyph shape -- reads instantly as aviation,
@@ -23228,6 +23458,10 @@ ENGINES = {
     # two above into one selectable mode; see SpaceHubEngine's own
     # docstring for why "satellite"/"moon" stay registered too.
     "space": SpaceHubEngine,
+    # RACING (2026-08-19) -- real F1 (jolpi.ca) + NASCAR Cup
+    # (cf.nascar.com), separate from sports.py's own ESPN racing
+    # coverage. See RacingEngine's own docstring.
+    "racing": RacingEngine,
     # NOW PLAYING (2026-08-09) -- real track via Last.fm + a real live
     # visualizer off the panel's own mic (see NowPlayingEngine's own
     # docstring for why the mic alone can't do this).

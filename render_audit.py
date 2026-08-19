@@ -87,7 +87,7 @@ MARQUEE_OK = {"news", "ticker", "sports", "gameday", "ambient", "flights", "noti
 # no API strings to damage. `planewatch`/`notify` (2026-08-09) are
 # force-triggered-only takeovers -- see drive_planewatch()/drive_notify()
 # below for why they need dedicated drivers instead of the generic one.
-TEXT_MODES = list(catalog.sequence()) + ["ambient", "gameday", "planewatch", "notify"]
+TEXT_MODES = list(catalog.sequence()) + ["ambient", "gameday", "planewatch", "notify", "space"]
 
 # Modes with a dedicated driver instead of the generic zero-arg
 # construct-and-tick loop in drive() below.

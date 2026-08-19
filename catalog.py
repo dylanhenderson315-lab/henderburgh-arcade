@@ -37,6 +37,8 @@ MODES = (
        note="Left/right steps symbols. HOLD parks the tape."),
     _m("space", "SPACE", "data", (255, 226, 60), menu=True, sequence=False,
        note="DROP swaps sky <-> moon. Sky: left/right pass list, up/down dome. Moon: rotate for planets."),
+    _m("racing", "RACING", "data", (200, 40, 40), menu=True, sequence=True,
+       note="Real F1 (jolpi.ca) + NASCAR Cup (nascar.com). DROP swaps F1 <-> NASCAR."),
     _m("satellite", "ISS", "data", (255, 226, 60), menu=False, sequence=True,
        note="Left/right swaps pass list and live sky. HOLD parks."),
     _m("moon", "MOON", "data", (200, 200, 220), menu=False, sequence=True,
@@ -93,7 +95,7 @@ def menu_tiles():
 
 # WORLD walk — sky first, not menu-shelf order.
 SEQUENCE = (
-    "flights", "satellite", "moon", "weather", "home", "sports", "nowplaying",
+    "flights", "satellite", "moon", "weather", "home", "sports", "racing", "nowplaying",
     "followflight", "departures", "ticker", "news", "events",
     "blog", "ownernote", "clock",
 )
