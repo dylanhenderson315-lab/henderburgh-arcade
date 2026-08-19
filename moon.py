@@ -94,6 +94,13 @@ PLANETS = [
     ("599", "JUPITER"), ("699", "SATURN"), ("799", "URANUS"),
     ("899", "NEPTUNE"),
 ]
+SUN_ID = "10"   # real Horizons body id -- fetched the same way as a planet
+                # (see _refresh_one_planet's round-robin), but kept OUT of
+                # PLANETS: it's not a planet to browse, it's real day/night
+                # context (real el_deg > 0 means real daylight at the
+                # configured home right now, honestly dimming the dome
+                # rather than pretending every hour is equally good for
+                # looking up).
 
 _HORIZONS_ROW_RE = re.compile(
     r"(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+|n\.a\.)\s+(-?\d+\.\d+|n\.a\.)\s+"
@@ -249,6 +256,7 @@ class MoonFeed:
         self._launch_try = 0.0
         self._launch_err = None
         self._planets = {}          # name -> {az_deg, el_deg, mag, dist_au}
+        self._sun = {}               # real {az_deg, el_deg} -- day/night context, see SUN_ID
         self._planet_cursor = 0
         self._planet_try = {}       # name -> last-fetch wall time
         self._last_read = 0.0
@@ -265,12 +273,13 @@ class MoonFeed:
             usno = dict(self._usno)
             launch = dict(self._launch) if self._launch else None
             planets = {k: dict(v) for k, v in self._planets.items()}
+            sun = dict(self._sun) if self._sun else None
             err = self._usno_err or self._launch_err
             age = (now - self._usno_try) if self._usno_try else None
         self._ensure_thread()
         out = {
             "configured": satellite.FEED.configured,
-            "age": age, "err": err, "launch": launch, "planets": planets,
+            "age": age, "err": err, "launch": launch, "planets": planets, "sun": sun,
         }
         out.update(usno)
         return out
@@ -294,16 +303,19 @@ class MoonFeed:
             time.sleep(5.0)
 
     def _refresh_one_planet(self):
-        """Round-robin: at most ONE planet fetched per loop pass, and
-        only if that planet is actually due (PLANET_REFRESH). Keeps
-        Horizons load to at most 7 calls/hour total, never a burst."""
+        """Round-robin: at most ONE body fetched per loop pass, and only
+        if that body is actually due (PLANET_REFRESH). The SUN rides
+        the same round-robin (as an 8th body, using the same real
+        Horizons call this function already makes) -- keeps Horizons
+        load to at most 8 calls/hour total, never a burst."""
         if not satellite.FEED.configured:
             return
+        bodies = PLANETS + [(SUN_ID, "SUN")]
         lat, lon, _ = satellite.FEED.get_location()
         now = time.time()
-        for _ in range(len(PLANETS)):
-            body_id, name = PLANETS[self._planet_cursor]
-            self._planet_cursor = (self._planet_cursor + 1) % len(PLANETS)
+        for _ in range(len(bodies)):
+            body_id, name = bodies[self._planet_cursor]
+            self._planet_cursor = (self._planet_cursor + 1) % len(bodies)
             if now - self._planet_try.get(name, 0.0) < PLANET_REFRESH:
                 continue
             self._planet_try[name] = now
@@ -314,7 +326,10 @@ class MoonFeed:
                 return
             if parsed is not None:
                 with self._lock:
-                    self._planets[name] = parsed
+                    if name == "SUN":
+                        self._sun = parsed
+                    else:
+                        self._planets[name] = parsed
             return
 
     def _refresh_usno(self):

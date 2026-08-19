@@ -10605,6 +10605,19 @@ class MoonEngine:
 
     DOME_CX, DOME_CY, DOME_R = 32, 25, 15
 
+    # A fixed, seeded starfield -- decorative, but honestly labeled as
+    # such (unlike every real-data element on this dome). Fixed offsets
+    # + a fixed brightness so it never flickers or implies real star
+    # positions; it's atmosphere, not astronomy. Kept OUTSIDE the dome
+    # ring radius so it never gets mistaken for a plotted body.
+    _STARS = [(3, 12), (9, 8), (58, 10), (61, 18), (5, 40), (2, 46),
+              (60, 44), (57, 51), (14, 6), (48, 7), (20, 60), (44, 61)]
+
+    @staticmethod
+    def _sun_altitude(sun):
+        el = (sun or {}).get("el_deg")
+        return el if isinstance(el, (int, float)) else None
+
     def _frame_planets(self):
         """A real sky-dome diagram -- reuses the EXACT scope_xy()/
         draw_scope_rings()/draw_scope_home() convention SatelliteEngine's
@@ -10619,16 +10632,33 @@ class MoonEngine:
         horizon isn't really "in the sky" to plot, and is listed in the
         text strip below instead. Selecting (left/right) a below-horizon
         planet still shows its real stats, just with no dot on the dome.
+
+        REAL day/night dimming (2026-08-19): the Sun rides the same
+        Horizons round-robin as the planets (moon.SUN_ID) purely for
+        its real el_deg -- when the real Sun is above the horizon right
+        now, the whole dome dims and a real "DAYLIGHT" hint shows,
+        honestly telling a hobbyist why nothing looks worth going
+        outside for. Genuinely dark skies (Sun well below horizon) get
+        full brightness. This is the one place brightness is driven by
+        a THIRD real body's position, not decoration.
         """
         buf = blank()
         fill(buf, self.BG)
-        draw_header(buf, "PLANETS", self.ACCENT)
         names = self._visible_planet_names()
         planets = self.data.get("planets") or {}
+        sun_el = self._sun_altitude(self.data.get("sun"))
+        daylight = isinstance(sun_el, (int, float)) and sun_el > 0
+        dim = 0.35 if daylight else 1.0
+        draw_header(buf, "PLANETS", self.ACCENT, right_tag="DAY SKY" if daylight else None)
+
+        for sx, sy in self._STARS:
+            put_px(buf, sx, sy, rim((90, 95, 120), dim))
+
         cx, cy, r = self.DOME_CX, self.DOME_CY, self.DOME_R
-        draw_scope_rings(buf, (0.5, 1.0), (24, 28, 40), cx, cy, r)
-        draw_scope_crosshair(buf, (24, 28, 40), cx, cy, r)
-        draw_scope_home(buf, self.INK_DIM, cx, cy)
+        ring_col = rim((30, 60, 90), dim)
+        draw_scope_rings(buf, (0.33, 0.66, 1.0), ring_col, cx, cy, r)
+        draw_scope_crosshair(buf, ring_col, cx, cy, r)
+        draw_scope_home(buf, rim(self.INK_DIM, dim), cx, cy)
 
         if not names:
             draw_text_centered(buf, 46, "LOOKING", self.INK_DIM)
@@ -10645,17 +10675,32 @@ class MoonEngine:
             r_frac = 1.0 - min(90.0, el) / 90.0     # overhead -> center, horizon -> rim
             x, y = scope_xy(az, r_frac, cx, cy, r)
             x, y = int(round(x)), int(round(y))
-            col = self.PLANET_COLOR.get(name, self.INK)
+            col = rim(self.PLANET_COLOR.get(name, self.INK), dim)
             selected = name == sel_name
             if selected:
-                for dx, dy in ((0, -3), (0, 3), (-3, 0), (3, 0)):
-                    put_px(buf, x + dx, y + dy, (255, 255, 255))
+                # Breathing selection ring, same slow-pulse technique
+                # this project's own hero silhouettes already use --
+                # reads as "alive," not flicker.
+                pulse = 0.75 + 0.25 * math.sin(self.ticks * 0.08)
+                ring_white = rim((255, 255, 255), dim * pulse)
+                for dx, dy in ((0, -3), (0, 3), (-3, 0), (3, 0),
+                               (-2, -2), (2, -2), (-2, 2), (2, 2)):
+                    put_px(buf, x + dx, y + dy, ring_white)
             big = name in self.PLANET_GIANT
             put_px(buf, x, y, col)
             if big or selected:
                 put_px(buf, x + 1, y, col)
                 put_px(buf, x, y + 1, col)
                 put_px(buf, x + 1, y + 1, col)
+            if name == "SATURN":
+                # A real Saturn -- everyone's mental image of it has
+                # rings. A short perpendicular tick through the dot is
+                # the honest amount of "rings" a couple pixels can show
+                # without inventing a ring SYSTEM geometry this project
+                # has no real orientation data for.
+                ring_c = rim(col, 0.7)
+                put_px(buf, x - 2, y, ring_c)
+                put_px(buf, x + 3, y, ring_c)
 
         p = planets.get(sel_name) or {}
         el = p.get("el_deg")
