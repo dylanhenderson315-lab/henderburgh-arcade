@@ -38,6 +38,7 @@ import hangar
 import sports
 import news
 import weather
+import airquality
 import blog
 import mma
 import gameday
@@ -8211,6 +8212,7 @@ class FlightEngine(Browsable, BigMomentSource):
         self.data = {"aircraft": [], "age": None, "home_label": "HOME",
                     "configured": False, "err": None}
         self._sky_wx = {}
+        self._aq = {}
         # SELECTION IS IDENTITY-KEYED, not positional. `self.sel_key` is
         # the stable key (hex, falling back to ident) of whichever real
         # aircraft is selected, or None meaning "no explicit selection --
@@ -8660,6 +8662,14 @@ class FlightEngine(Browsable, BigMomentSource):
         # night stars, same real sunrise/sunset gate WeatherEngine's own
         # ambient touch uses. Only ever used for that one honest signal.
         self._sky_wx = weather.FEED.get()
+        # Real AQI (Open-Meteo, free/keyless, confirmed live 2026-08-19)
+        # -- flights mode is the legitimate direct consumer of this (the
+        # radar scope's own real sky-haze tint below), so this is a
+        # normal get(), not the passive peek() pattern -- see CLAUDE.md's
+        # "Cross-engine opportunistic reads" section for when each is
+        # the right call. Cheap: AQI_REFRESH is 30min, air quality
+        # doesn't swing minute to minute.
+        self._aq = airquality.FEED.get()
         # DEAD RECKONING poll-boundary detection -- see
         # _update_dead_reckoning()'s own docstring. `age` (seconds since
         # flights.FEED's cached snapshot was actually fetched) increases
@@ -9043,6 +9053,12 @@ class FlightEngine(Browsable, BigMomentSource):
     # not a new visual system.
     CALM_DENSITY_FLOOR = 0.55
     CALM_DENSITY_AT = 4    # count at/above which decoration reaches full brightness
+    AQI_TINT_MAX = 0.45
+    AQI_HAZE = (120, 90, 40)   # dim haze-amber, distinct from every real aircraft/UI color here
+
+    @staticmethod
+    def _lerp_color(a, b, k):
+        return tuple(int(a[i] + (b[i] - a[i]) * k) for i in range(3))
 
     def _frame_scope(self, aircraft):
         buf = blank()
@@ -9054,6 +9070,18 @@ class FlightEngine(Browsable, BigMomentSource):
         cx, cy, r = self.FLT_CX, self.FLT_CY, self.FLT_R
         calm = max(self.CALM_DENSITY_FLOOR,
                   min(1.0, len(aircraft) / float(self.CALM_DENSITY_AT)))
+        # AQI SKY TINT -- real EPA AQI (airquality.py), tunes the SAME
+        # decoration colors calm/busy density already scales, never a
+        # new visual system. Only shifts hue toward haze amber once air
+        # quality crosses a real "Unhealthy" threshold (101+) -- Good/
+        # Moderate air gets no tint at all, so a clean-air night never
+        # reads as hazy for no reason. AQI_TINT_MAX caps how far the mix
+        # can go so the coastline/sweep never lose their own identity
+        # color entirely, even on a real Hazardous day.
+        aqi = (self._aq or {}).get("aqi")
+        aqi_k = 0.0
+        if isinstance(aqi, (int, float)) and aqi > 100:
+            aqi_k = min(self.AQI_TINT_MAX, (aqi - 100) / 200.0)
         draw_scope_rings(buf, [math.sqrt(nm / float(flights.RADIUS_NM))
                                for nm in self.SCOPE_RING_NM], cx=cx, cy=cy, radius=r)
 
@@ -9071,7 +9099,9 @@ class FlightEngine(Browsable, BigMomentSource):
         # (calm) so it stays clearly subordinate to real traffic.
         lat, lon, _lbl = satellite.FEED.get_location()
         pts = []
-        coast_col = rim(self.COASTLINE_COLOR, calm)
+        coast_base = (self._lerp_color(self.COASTLINE_COLOR, self.AQI_HAZE, aqi_k)
+                     if aqi_k else self.COASTLINE_COLOR)
+        coast_col = rim(coast_base, calm)
         for clat, clon in flights.COASTLINE:
             brg, nm = flights.bearing_distance(lat, lon, clat, clon)
             frac = self._scope_r_frac(nm)
@@ -9094,7 +9124,9 @@ class FlightEngine(Browsable, BigMomentSource):
                 draw_window_cone(buf, win["center_deg"], win["fov_deg"], wfrac,
                                  rim(self.WINDOW_RING, 0.28),
                                  cx=cx, cy=cy, radius=r)
-        draw_scope_sweep(buf, self.sweep, color=rim(self.SWEEP_COLOR, calm), cx=cx, cy=cy, radius=r)
+        sweep_base = (self._lerp_color(self.SWEEP_COLOR, self.AQI_HAZE, aqi_k)
+                     if aqi_k else self.SWEEP_COLOR)
+        draw_scope_sweep(buf, self.sweep, color=rim(sweep_base, calm), cx=cx, cy=cy, radius=r)
 
         # SELECTED-AIRCRAFT TRAIL ONLY (2026-08-10: route-bearing ray
         # REMOVED, not just hidden). Real owner feedback against a
@@ -9278,7 +9310,17 @@ class FlightEngine(Browsable, BigMomentSource):
         # brightness class to a routine icon's off-sweep floor) so it
         # reads as background reference, not a competing subject.
         if self.sel_key is None:
-            if aircraft:
+            if aqi_k and isinstance(aqi, (int, float)):
+                # Real hazard info outranks the ring-distance reference
+                # in this one shared legend row when air quality is
+                # genuinely notable (the same real threshold that
+                # triggered the haze tint above) -- both are reference
+                # context, and a real AQI reading is the more useful one
+                # to show at that moment.
+                cat = (self._aq or {}).get("category") or ""
+                aqi_txt = fit_text(f"AQI {int(aqi)} {cat}", WIDTH - 4)
+                draw_text_centered(buf, 59, aqi_txt, self._lerp_color((46, 50, 62), self.AQI_HAZE, 0.6))
+            elif aircraft:
                 mi_txt = "/".join(str(round(nm_to_mi(nm))) for nm in self.SCOPE_RING_NM) + "MI"
                 draw_text_centered(buf, 59, fit_text(mi_txt, WIDTH - 4), (46, 50, 62))
             else:
