@@ -81,12 +81,30 @@ from datetime import datetime, timedelta
 
 import paneltext
 import satellite
+import skyevents
 
 USNO_URL = ("https://aa.usno.navy.mil/api/rstt/oneday"
             "?date={date}&coords={lat},{lon}&tz={tz}")
 LL2_URL = "https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit=5&mode=list"
 HORIZONS_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
 CAD_URL = "https://ssd-api.jpl.nasa.gov/cad.api"   # real, free, keyless close-approach data
+SBDB_URL = "https://ssd-api.jpl.nasa.gov/sbdb.api"  # real, free, keyless orbital elements
+
+# Real designations of the real parent comet (or, for the Geminids,
+# parent asteroid -- 3200 Phaethon is a real rock-comet, not a
+# classical icy comet, an honest real exception) of each real named
+# shower in skyevents.METEOR_SHOWERS -- "take the [asteroid-orbit]
+# thinking to" meteor showers, direct owner ask: a shower happens on
+# its real calendar date because Earth's real orbit crosses THIS real
+# body's real debris trail there every year, not an arbitrary date.
+# Same real designations moon.py's own small-body Horizons/SBDB calls
+# already use for asteroids -- these are public, static reference
+# facts (comet identities don't change), same category as ORBIT_AU.
+METEOR_PARENT_COMET = {
+    "QUADRANTIDS": "2003 EH1", "LYRIDS": "C/1861 G1", "ETA AQUARIIDS": "1P",
+    "PERSEIDS": "109P", "ORIONIDS": "1P", "LEONIDS": "55P",
+    "GEMINIDS": "3200", "URSIDS": "8P",
+}
 
 USNO_REFRESH = 3600.0 * 6   # real rise/set/illumination is a once-a-day fact; 6h keeps it current across a long-running day
 LAUNCH_REFRESH = 3600.0     # respect LL2's real ~15/hr soft limit by a wide margin
@@ -337,18 +355,23 @@ def _fetch_planet_vector(body_id):
     return _parse_horizons_vector(data.get("result") if isinstance(data, dict) else None)
 
 
-def _fetch_closest_neo():
-    """Real closest upcoming near-Earth-object close approach in the
-    next 30 days, via JPL's Center for NEO Studies CAD (Close-Approach
-    Data) API -- confirmed live 2026-08-19, free, keyless, no signup
-    (a genuinely different, separate JPL service from api.nasa.gov's
-    NeoWs, which DOES need a key -- this one does not). Real fields:
-    `des` (designation, e.g. "2026 PX"), `cd` (close-approach date/
-    time), `dist` (real AU distance at closest approach), `v_rel`
-    (real relative velocity, km/s), `h` (real absolute magnitude).
-    Returns None on any real failure or an empty result -- there is
-    always SOME close approach within 30 days in practice, but an
-    honest empty read is possible and must not be masked."""
+NEO_TRACK_COUNT = 3   # real judgment call, same category as flights.WINDOW_MAX_NM_DEFAULT --
+                       # enough to feel like a real population, not so many the diagram clutters
+
+
+def _fetch_neo_candidates(n=NEO_TRACK_COUNT):
+    """Real closest N upcoming near-Earth-object close approaches in
+    the next 30 days, via JPL's Center for NEO Studies CAD (Close-
+    Approach Data) API -- confirmed live 2026-08-19, free, keyless, no
+    signup (a genuinely different, separate JPL service from
+    api.nasa.gov's NeoWs, which DOES need a key -- this one does not).
+    Real fields per object: `des` (designation, e.g. "2026 PX"), `cd`
+    (close-approach date/time), `dist` (real AU distance at closest
+    approach), `v_rel` (real relative velocity, km/s), `h` (real
+    absolute magnitude). Returns [] on any real failure or an empty
+    result -- there is always SOME close approach within 30 days in
+    practice, but an honest empty read is possible and must not be
+    masked."""
     params = {
         "date-min": time.strftime("%Y-%m-%d"),
         "date-max": time.strftime("%Y-%m-%d", time.gmtime(time.time() + 30 * 86400)),
@@ -357,32 +380,61 @@ def _fetch_closest_neo():
     url = CAD_URL + "?" + urllib.parse.urlencode(params)
     data = _get_json(url)
     if not isinstance(data, dict):
-        return None
+        return []
     fields = data.get("fields")
     rows = data.get("data")
     if not (isinstance(fields, list) and isinstance(rows, list) and rows):
-        return None
-    row = dict(zip(fields, rows[0]))
-    des = paneltext.panel_text(row.get("des") or "") or None
-    if not des:
-        return None
-    try:
-        dist_au = float(row.get("dist"))
-    except (TypeError, ValueError):
-        dist_au = None
-    try:
-        v_rel = float(row.get("v_rel"))
-    except (TypeError, ValueError):
-        v_rel = None
-    try:
-        h_mag = float(row.get("h"))
-    except (TypeError, ValueError):
-        h_mag = None
-    return {"des": des, "cd": paneltext.panel_text(row.get("cd") or "") or None,
-            "dist_au": dist_au, "v_rel": v_rel, "h": h_mag}
+        return []
+    out = []
+    for raw in rows[:n]:
+        row = dict(zip(fields, raw))
+        des = paneltext.panel_text(row.get("des") or "") or None
+        if not des:
+            continue
+        try:
+            dist_au = float(row.get("dist"))
+        except (TypeError, ValueError):
+            dist_au = None
+        try:
+            v_rel = float(row.get("v_rel"))
+        except (TypeError, ValueError):
+            v_rel = None
+        try:
+            h_mag = float(row.get("h"))
+        except (TypeError, ValueError):
+            h_mag = None
+        out.append({"des": des, "cd": paneltext.panel_text(row.get("cd") or "") or None,
+                    "dist_au": dist_au, "v_rel": v_rel, "h": h_mag})
+    return out
 
 
-def _fetch_smallbody_vector(designation):
+def _fetch_orbital_elements(designation):
+    """Real orbital elements (a_au, e, w_deg, i_deg) for a real small
+    body -- asteroid or comet -- via JPL's Small-Body Database (SBDB)
+    API, confirmed live 2026-08-19 against two real close-approaching
+    NEOs ("2026 PX": e=0.333, a=1.42 AU; "2026 PB9": e=0.556, a=2.06
+    AU). Used only to draw a body's real elliptical orbit SHAPE
+    (top-down, ignoring the real inclination i_deg -- most NEOs and
+    short-period comets have a small enough real inclination that a
+    top-down projection is an honest simplification; a real long-
+    period comet can have a large i_deg, which is why it's returned
+    here rather than silently dropped, so a caller can flag it rather
+    than draw a misleadingly flat ellipse for a steeply inclined real
+    orbit)."""
+    params = {"sstr": designation, "full-prec": "true"}
+    url = SBDB_URL + "?" + urllib.parse.urlencode(params)
+    data = _get_json(url)
+    if not isinstance(data, dict):
+        return None
+    els = {e.get("name"): e.get("value") for e in (data.get("orbit") or {}).get("elements") or []}
+    try:
+        return {"a_au": float(els["a"]), "e": float(els["e"]),
+                "w_deg": float(els["w"]), "i_deg": float(els.get("i", 0.0))}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _fetch_smallbody_vector(designation, kind="neo"):
     """Real heliocentric (x_au, y_au) for a real small body (asteroid/
     comet), via the SAME Horizons VECTORS call `_fetch_planet_vector()`
     uses, just with the small-body COMMAND syntax (`DES=<designation>;`
@@ -390,12 +442,25 @@ def _fetch_smallbody_vector(designation):
     "2026 PX"). Small bodies are perturbed orbits Horizons integrates
     numerically (`Small perturbers: Yes` in the real response), same
     real ephemeris service as every planet here, not a second-class
-    approximation."""
+    approximation.
+
+    REAL BUG FOUND AND FIXED, not shipped blind: a real periodic
+    comet's short designation (e.g. "1P") is genuinely AMBIGUOUS in
+    Horizons -- it matches every real historical apparition record of
+    that comet (confirmed live: "DES=1P;" returned a disambiguation
+    list of 27+ real Halley apparitions spanning millennia, not an
+    ephemeris). `kind="comet"` appends Horizons' own real `;CAP`
+    (current apparition) suffix, confirmed live to resolve cleanly to
+    the one real current-epoch orbit (Halley's real current distance:
+    ~35.1 AU, matching its real near-aphelion position). Asteroids
+    (`kind="neo"`, the default) have only one real apparition and never
+    needed this."""
     now = datetime.utcnow()
     start = now.strftime("%Y-%m-%d")
     stop = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    cap = "CAP" if kind == "comet" else ""
     params = {
-        "format": "json", "COMMAND": f"'DES={designation};'", "OBJ_DATA": "NO",
+        "format": "json", "COMMAND": f"'DES={designation};{cap}'", "OBJ_DATA": "NO",
         "MAKE_EPHEM": "YES", "EPHEM_TYPE": "VECTORS",
         "CENTER": "'500@10'", "REF_PLANE": "ECLIPTIC", "OUT_UNITS": "'AU-D'",
         "VEC_TABLE": "'1'",
@@ -467,10 +532,19 @@ class MoonFeed:
         self._orbit_try = {}
         self._planet_cursor = 0
         self._planet_try = {}       # name -> last-fetch wall time
-        self._neo = None            # real closest upcoming close-approach, see _fetch_closest_neo
-        self._neo_try = 0.0
-        self._neo_vec_try = 0.0
-        self._neo_ts = 0.0          # real wall time of the NEO's own last vector fetch
+        # Real tracked small bodies -- near-Earth asteroids (from CAD)
+        # plus the real parent comet of whichever meteor shower is
+        # currently next (METEOR_PARENT_COMET) -- keyed by real
+        # designation. Each entry gains real orbital elements (once,
+        # rarely refetched) and a real live position (refreshed
+        # regularly) as the round-robin reaches it.
+        self._bodies = {}           # des -> {label, kind, cd, dist_au, v_rel, h,
+                                     #         a_au, e, w_deg, i_deg, x_au, y_au}
+        self._bodies_ts = {}        # des -> real wall time of the last position fetch
+        self._body_list_try = 0.0
+        self._body_elem_try = {}    # des -> last elements-fetch attempt (real, once-ever on success)
+        self._body_vec_try = {}     # des -> last position-fetch attempt
+        self._body_cursor = 0
         self._moons = {}            # planet -> {moon_name: {x_km, y_km}}, real, relative to that planet
         self._moons_ts = {}         # planet -> {moon_name: real fetch wall time}
         self._moon_cursor = 0
@@ -492,8 +566,8 @@ class MoonFeed:
             sun = dict(self._sun) if self._sun else None
             orbits = {k: dict(v) for k, v in self._orbits.items()}
             orbits_ts = dict(self._orbits_ts)
-            neo = dict(self._neo) if self._neo else None
-            neo_ts = self._neo_ts
+            bodies = {k: dict(v) for k, v in self._bodies.items()}
+            bodies_ts = dict(self._bodies_ts)
             moons = {p: {k: dict(v) for k, v in m.items()} for p, m in self._moons.items()}
             moons_ts = {p: dict(m) for p, m in self._moons_ts.items()}
             err = self._usno_err or self._launch_err
@@ -502,7 +576,7 @@ class MoonFeed:
         out = {
             "configured": satellite.FEED.configured,
             "age": age, "err": err, "launch": launch, "planets": planets, "sun": sun,
-            "orbits": orbits, "orbits_ts": orbits_ts, "neo": neo, "neo_ts": neo_ts or None,
+            "orbits": orbits, "orbits_ts": orbits_ts, "bodies": bodies, "bodies_ts": bodies_ts,
             "moons": moons, "moons_ts": moons_ts,
         }
         out.update(usno)
@@ -525,8 +599,9 @@ class MoonFeed:
             self._refresh_launch()
             self._refresh_one_planet()
             self._refresh_one_orbit()
-            self._refresh_neo_list()
-            self._refresh_neo_vector()
+            self._refresh_body_list()
+            self._refresh_one_body_elements()
+            self._refresh_one_body_vector()
             self._refresh_one_moon()
             time.sleep(5.0)
 
@@ -583,47 +658,96 @@ class MoonFeed:
                     self._orbits_ts[name] = now
             return
 
-    def _refresh_neo_list(self):
+    def _refresh_body_list(self):
+        """Real target list -- the closest NEO_TRACK_COUNT real near-
+        Earth close approaches, PLUS the real parent comet of whichever
+        meteor shower skyevents.next_meteor_shower() says is next right
+        now (direct owner ask: "a way for us to predict our own meteor
+        showers... take that [asteroid-orbit] thinking to this" -- the
+        real reason a shower falls on its real date is Earth's real
+        orbit crossing this real body's real debris trail there every
+        year, which showing its real orbit makes literal). A body
+        already tracked keeps its real elements/position across a
+        refresh; only genuinely new designations start cold."""
         now = time.time()
         with self._lock:
-            if now - self._neo_try < NEO_LIST_REFRESH:
+            if now - self._body_list_try < NEO_LIST_REFRESH:
                 return
-            self._neo_try = now
+            self._body_list_try = now
         try:
-            neo = _fetch_closest_neo()
+            neos = _fetch_neo_candidates()
         except (urllib.error.URLError, TimeoutError, ValueError,
                 json.JSONDecodeError, OSError, KeyError):        # noqa: BLE001
-            return
-        if neo is not None:
-            with self._lock:
-                # A genuinely NEW closest object resets the vector cadence
-                # so its real position is fetched again right away, not
-                # left showing the PREVIOUS object's stale position under
-                # the new one's label.
-                if not self._neo or self._neo.get("des") != neo.get("des"):
-                    self._neo_vec_try = 0.0
-                self._neo = neo
+            neos = []
+        today = time.localtime()
+        shower = skyevents.next_meteor_shower(today.tm_mon, today.tm_mday)
+        comet_des = METEOR_PARENT_COMET.get((shower or {}).get("name"))
+        targets = [(n["des"], n["des"], "neo", n) for n in neos]
+        if comet_des:
+            targets.append((comet_des, shower["name"], "comet", {}))
+        with self._lock:
+            keep = {des for des, _label, _kind, _extra in targets}
+            for stale in list(self._bodies):
+                if stale not in keep:
+                    del self._bodies[stale]
+                    self._bodies_ts.pop(stale, None)
+            for des, label, kind, extra in targets:
+                entry = self._bodies.setdefault(des, {})
+                entry["label"] = label
+                entry["kind"] = kind
+                entry.update(extra)
 
-    def _refresh_neo_vector(self):
+    def _refresh_one_body_elements(self):
+        """Round-robin: real orbital elements, fetched at most ONCE per
+        real designation (they change negligibly over a human
+        timescale, unlike position) -- one SBDB call per loop pass for
+        whichever tracked body still lacks them."""
+        with self._lock:
+            need = [des for des, b in self._bodies.items() if "a_au" not in b]
+        for des in need:
+            with self._lock:
+                if time.time() - self._body_elem_try.get(des, 0.0) < 30.0:
+                    continue   # tried very recently and it's still missing -- back off briefly
+                self._body_elem_try[des] = time.time()
+            try:
+                els = _fetch_orbital_elements(des)
+            except (urllib.error.URLError, TimeoutError, ValueError,
+                    json.JSONDecodeError, OSError, KeyError):        # noqa: BLE001
+                return
+            if els is not None:
+                with self._lock:
+                    if des in self._bodies:
+                        self._bodies[des].update(els)
+            return
+
+    def _refresh_one_body_vector(self):
+        """Round-robin: real live position, refreshed regularly (see
+        NEO_VECTOR_REFRESH) for whichever tracked body is next due."""
         now = time.time()
         with self._lock:
-            if now - self._neo_vec_try < NEO_VECTOR_REFRESH:
-                return
-            des = (self._neo or {}).get("des")
-        if not des:
+            candidates = list(self._bodies.keys())
+        if not candidates:
             return
-        with self._lock:
-            self._neo_vec_try = now
-        try:
-            parsed = _fetch_smallbody_vector(des)
-        except (urllib.error.URLError, TimeoutError, ValueError,
-                json.JSONDecodeError, OSError, KeyError):        # noqa: BLE001
-            return
-        if parsed is not None:
+        self._body_cursor %= len(candidates)
+        for _ in range(len(candidates)):
+            des = candidates[self._body_cursor]
+            self._body_cursor = (self._body_cursor + 1) % len(candidates)
+            if now - self._body_vec_try.get(des, 0.0) < NEO_VECTOR_REFRESH:
+                continue
+            self._body_vec_try[des] = now
             with self._lock:
-                if (self._neo or {}).get("des") == des:   # still the same real object
-                    self._neo.update(parsed)
-                    self._neo_ts = now
+                kind = (self._bodies.get(des) or {}).get("kind", "neo")
+            try:
+                parsed = _fetch_smallbody_vector(des, kind=kind)
+            except (urllib.error.URLError, TimeoutError, ValueError,
+                    json.JSONDecodeError, OSError, KeyError):        # noqa: BLE001
+                return
+            if parsed is not None:
+                with self._lock:
+                    if des in self._bodies:
+                        self._bodies[des].update(parsed)
+                        self._bodies_ts[des] = now
+            return
 
     def _refresh_one_planet(self):
         """Round-robin: at most ONE body fetched per loop pass, and only

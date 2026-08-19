@@ -10606,7 +10606,10 @@ class MoonEngine:
     def _orbit_selectable(self):
         """Real selectable bodies for the ORBIT/MOONS views -- EARTH
         first (direct owner report: "no earth is there"), then every
-        planet we have a real heliocentric position for. Deliberately
+        planet we have a real heliocentric position for, then every
+        real tracked small body (near-Earth asteroids + the current
+        meteor shower's real parent comet -- see moon.py's real
+        MOON_WORKLIST-adjacent `bodies` tracking). Deliberately
         independent of _visible_planet_names()/az-el data -- the orbit
         view has nothing to do with what's above the horizon right now,
         so gating its selection on that data was the real bug."""
@@ -10615,6 +10618,7 @@ class MoonEngine:
         if "EARTH" in orbits:
             out.append("EARTH")
         out.extend(name for _, name in moon.PLANETS if name in orbits)
+        out.extend(self.data.get("bodies") or {})
         return out
 
     def auto(self):
@@ -10638,10 +10642,13 @@ class MoonEngine:
         and resets the reference, exactly like flights' own rule."""
         now = time.time()
         sources = [(self.data.get("orbits") or {}, self.data.get("orbits_ts") or {})]
-        neo = self.data.get("neo")
-        neo_ts = self.data.get("neo_ts")
-        if neo and neo.get("x_au") is not None and neo_ts:
-            sources.append(({"NEO": {"x_au": neo["x_au"], "y_au": neo["y_au"]}}, {"NEO": neo_ts}))
+        bodies = self.data.get("bodies") or {}
+        bodies_ts = self.data.get("bodies_ts") or {}
+        body_pos = {des: {"x_au": b["x_au"], "y_au": b["y_au"]}
+                    for des, b in bodies.items() if b.get("x_au") is not None}
+        body_ts = {des: bodies_ts[des] for des in body_pos if des in bodies_ts}
+        if body_pos:
+            sources.append((body_pos, body_ts))
         # Every planet's moons, namespaced "PLANET:MOON" so e.g. two
         # planets never collide on a dead-reckoning key (not a real
         # current collision, but real future-proofing worth doing once
@@ -10799,6 +10806,53 @@ class MoonEngine:
         "URANUS": 2, "NEPTUNE": 2, "JUPITER": 3, "SATURN": 3,
     }
 
+    # Real small bodies (asteroids/comets, see moon.py's `bodies`
+    # tracking) are the ONE thing on this diagram that gets a drawn
+    # orbit path -- direct owner ask: "we can have the orbit lines of
+    # those because we already know the planets are in circles". A
+    # real AU-per-pixel scale, anchored to Earth's own fixed ring
+    # radius (1 AU = ORBIT_RADIUS["EARTH"] px) so a near-Earth
+    # asteroid's real ~1-2 AU orbit lands near Earth/Mars's real rings
+    # -- an honest, physically-anchored placement, not an arbitrary
+    # second scale. Clamped to the same real panel limit the planets
+    # use, so a real long-period comet's real distant aphelion (e.g.
+    # Halley's real ~35 AU) draws AT the rim rather than off-panel.
+    NEO_COLOR = (255, 90, 220)
+    COMET_COLOR = (120, 220, 255)
+
+    def _smallbody_scaled_r(self, au):
+        au_to_px = self.ORBIT_RADIUS["EARTH"]
+        return min(27.0, au * au_to_px)
+
+    def _draw_smallbody_ellipse(self, buf, cx, cy, a_au, e, w_deg, col):
+        """A real Keplerian ellipse (focus at the Sun), from real
+        orbital elements -- r(nu) = a(1-e^2) / (1 + e*cos(nu - w)),
+        the standard real polar conic-section equation, not a guessed
+        oval. HONEST SIMPLIFICATION, stated plainly: this ignores the
+        real orbital inclination (i_deg), i.e. it draws the orbit as if
+        seen exactly top-down along its own real orbital plane rather
+        than projected into Earth's ecliptic plane. For a near-Earth
+        asteroid (real i typically a few degrees) this is a close
+        match; for a steeply inclined real object (Halley's real
+        i=162 deg, genuinely retrograde) the drawn ellipse's ORIENTATION
+        is a simplification even though its real SHAPE (a, e) is exact
+        -- the body's own real LIVE DOT position (from Horizons'
+        already-3D-correct vector) is always right regardless, so a
+        viewer never sees a wrong current position, only a schematic
+        rather than fully-3D-accurate path."""
+        n = 90
+        dim_col = rim(col, 0.35)
+        for i in range(n):
+            nu = 2 * math.pi * i / n
+            w = math.radians(w_deg)
+            denom = 1 + e * math.cos(nu - w)
+            if denom <= 0.0001:
+                continue
+            r_au = a_au * (1 - e * e) / denom
+            rr = self._smallbody_scaled_r(r_au)
+            put_px(buf, int(round(cx + rr * math.cos(nu))),
+                   int(round(cy + rr * math.sin(nu))), dim_col)
+
     def _orbit_angle(self, name, o):
         """Real angle (radians) for `name` around the Sun -- from the
         real live dead-reckoned position when we have one (see
@@ -10916,21 +10970,52 @@ class MoonEngine:
                     put_px(buf, x - half - 2, y, ring_c)
                     put_px(buf, x + half + 2, y, ring_c)
 
+        # Real small bodies -- near-Earth asteroids + the real parent
+        # comet of the next meteor shower (moon.py's real `bodies`
+        # tracking). Direct owner ask: "a way for us to select each
+        # comet or asteroid, and see their orbit relative to ours...
+        # we can have the orbit lines of those because we already know
+        # the planets are in circles" -- so ONLY these get a drawn
+        # orbit path, a real ellipse from real orbital elements
+        # (a_au, e, w_deg), never the planets' fixed circular rings.
+        bodies = self.data.get("bodies") or {}
+        for des, b in bodies.items():
+            selected = des == sel_name
+            col = self.COMET_COLOR if b.get("kind") == "comet" else self.NEO_COLOR
+            if "a_au" in b and "e" in b:
+                self._draw_smallbody_ellipse(buf, cx, cy, b["a_au"], b["e"], b.get("w_deg", 0.0), col)
+            if b.get("x_au") is None:
+                continue   # real elements may exist before a real position does -- path only, no dot yet
+            x, y = self._orbit_xy(des, b, cx, cy, self._smallbody_scaled_r)
+            base_col = col
+            if selected:
+                pulse2 = 0.75 + 0.25 * math.sin(self.ticks * 0.08)
+                ring_white = rim((255, 255, 255), pulse2)
+                for ddx, ddy in ((0, -3), (0, 3), (-3, 0), (3, 0)):
+                    put_px(buf, x + ddx, y + ddy, ring_white)
+            put_px(buf, x, y, base_col)
+            put_px(buf, x + 1, y, base_col)
+
         if sel_name:
             y = 58
             p = orbits.get(sel_name)
-            if p:
+            b = bodies.get(sel_name)
+            if b is not None:
+                if b.get("kind") == "comet":
+                    label = f"{b['label']} COMET -- REAL PARENT"
+                    sel_col = self.COMET_COLOR
+                else:
+                    dist = b.get("dist_au")
+                    label = (f"{sel_name} {dist:.4f} AU {b.get('cd', '')}"
+                             if dist is not None else f"{sel_name} -- LOCATING")
+                    sel_col = self.NEO_COLOR
+                draw_text3x5(buf, 2, y, fit_text(label, WIDTH - 4), sel_col)
+            elif p:
                 dist = math.hypot(p["x_au"], p["y_au"])
                 label = "EARTH -- HOME" if sel_name == "EARTH" else f"{sel_name} {dist:.2f} AU FROM SUN"
                 draw_text3x5(buf, 2, y, fit_text(label, WIDTH - 4), self.PLANET_COLOR.get(sel_name, self.INK))
             else:
                 draw_text3x5(buf, 2, y, fit_text(f"{sel_name} -- LOCATING", WIDTH - 4), self.INK_DIM)
-        else:
-            neo = self.data.get("neo")
-            if neo:
-                draw_text3x5(buf, 2, 58,
-                             fit_text(f"{neo['des']} {neo.get('dist_au', 0):.4f} AU {neo.get('cd', '')}", WIDTH - 4),
-                             rim((255, 90, 220), 1.0))
         return bytes(buf)
 
     def _orbit_xy(self, name, o, cx, cy, scaled_r, max_extrap_s=None):
