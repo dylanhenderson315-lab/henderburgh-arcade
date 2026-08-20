@@ -10556,6 +10556,8 @@ class MoonEngine:
             have = (self.data.get("moons") or {}).get(self.zoomed_planet) or {}
             real_moons = moon.PLANET_MOONS.get(self.zoomed_planet) or []
             return [name for _id, name, _km in real_moons if name in have]
+        if self.planet_view == "objects":
+            return self._objects_selectable()
         if self.planet_view == "orbit":
             return self._orbit_selectable()
         return self._visible_planet_names()
@@ -10574,25 +10576,35 @@ class MoonEngine:
         """orbit -> moons (ONLY when the real selected body is a planet
         moon.PLANET_MOONS has real moons for -- EARTH/MARS/JUPITER/
         SATURN/URANUS/NEPTUNE; Mercury/Venus are honestly excluded, they
-        have zero real moons) -> dome -> orbit. Real owner ask: "do
-        every planet's moons... select planet, zoomed in look where we
-        can see the moons". `self.zoomed_planet` remembers WHICH planet
-        was selected at the moment moons was entered, since planet_idx
-        gets reused to index the moon list once inside that view --
-        without this, there would be no way to know whose moons are
-        being browsed after the first left/right press."""
+        have zero real moons) -> objects (ONLY when at least one real
+        asteroid/comet is currently tracked) -> dome -> orbit. Real
+        owner ask: "do every planet's moons... select planet, zoomed in
+        look where we can see the moons", and later "separate [the
+        comets/asteroids] for a different view I can select". Both
+        `self.zoomed_planet` (moons) and `self.planet_idx` need
+        resetting on entry/exit here because each of these three real
+        views indexes a COMPLETELY DIFFERENT list (planets, one
+        planet's moons, tracked small bodies) through the same
+        `planet_idx` -- without resetting it, entering a shorter list
+        at a stale high index would silently wrap to the wrong item."""
         order = ["orbit", "dome"]
         sel = self._orbit_selectable()
         sel_name = sel[self.planet_idx % len(sel)] if sel else None
         if sel_name in moon.PLANET_MOONS:
             order = ["orbit", "moons", "dome"]
+        if self._objects_selectable():
+            order = order[:-1] + ["objects", "dome"]
         i = order.index(self.planet_view) if self.planet_view in order else 0
         new_view = order[(i + 1) % len(order)]
         if new_view == "moons":
             self.zoomed_planet = sel_name
             self.planet_idx = 0   # fresh index into THIS planet's own moon list
+        elif new_view == "objects":
+            self.planet_idx = 0   # fresh index into the tracked-objects list
         elif self.planet_view == "moons":
             self.planet_idx = sel.index(self.zoomed_planet) if self.zoomed_planet in sel else 0
+        elif self.planet_view == "objects":
+            self.planet_idx = 0   # back to orbit view's own first entry (EARTH)
         self.planet_view = new_view
 
     def _visible_planet_names(self):
@@ -10606,20 +10618,30 @@ class MoonEngine:
     def _orbit_selectable(self):
         """Real selectable bodies for the ORBIT/MOONS views -- EARTH
         first (direct owner report: "no earth is there"), then every
-        planet we have a real heliocentric position for, then every
-        real tracked small body (near-Earth asteroids + the current
-        meteor shower's real parent comet -- see moon.py's real
-        MOON_WORKLIST-adjacent `bodies` tracking). Deliberately
+        planet we have a real heliocentric position for. Deliberately
         independent of _visible_planet_names()/az-el data -- the orbit
         view has nothing to do with what's above the horizon right now,
-        so gating its selection on that data was the real bug."""
+        so gating its selection on that data was the real bug.
+
+        Real asteroids/comets used to be tacked onto the END of this
+        same list and drawn on top of the planet diagram -- direct
+        owner feedback ("cool with the comets and asteroids, but it's
+        way too cluttered") moved them to their OWN dedicated
+        `planet_view == "objects"` screen (see `_objects_selectable()`/
+        `_frame_planets_objects()`), so they no longer share this list
+        or this diagram."""
         orbits = self.data.get("orbits") or {}
         out = []
         if "EARTH" in orbits:
             out.append("EARTH")
         out.extend(name for _, name in moon.PLANETS if name in orbits)
-        out.extend(self.data.get("bodies") or {})
         return out
+
+    def _objects_selectable(self):
+        """Real tracked small bodies (near-Earth asteroids + the
+        current meteor shower's real parent comet) for the dedicated
+        OBJECTS screen -- see moon.py's real `bodies` tracking."""
+        return list(self.data.get("bodies") or {})
 
     def auto(self):
         pass
@@ -10768,6 +10790,8 @@ class MoonEngine:
     def _frame_planets(self):
         if self.planet_view == "moons":
             return self._frame_planets_moons()
+        if self.planet_view == "objects":
+            return self._frame_planets_objects()
         return self._frame_planets_orbit() if self.planet_view == "orbit" else self._frame_planets_dome()
 
     # Real orbital order, Sun outward.
@@ -10969,54 +10993,116 @@ class MoonEngine:
                     ring_c = rim(col, 0.7)
                     put_px(buf, x - half - 2, y, ring_c)
                     put_px(buf, x + half + 2, y, ring_c)
-
-        # Real small bodies -- near-Earth asteroids + the real parent
-        # comet of the next meteor shower (moon.py's real `bodies`
-        # tracking). Direct owner ask: "a way for us to select each
-        # comet or asteroid, and see their orbit relative to ours...
-        # we can have the orbit lines of those because we already know
-        # the planets are in circles" -- so ONLY these get a drawn
-        # orbit path, a real ellipse from real orbital elements
-        # (a_au, e, w_deg), never the planets' fixed circular rings.
-        bodies = self.data.get("bodies") or {}
-        for des, b in bodies.items():
-            selected = des == sel_name
-            col = self.COMET_COLOR if b.get("kind") == "comet" else self.NEO_COLOR
-            if "a_au" in b and "e" in b:
-                self._draw_smallbody_ellipse(buf, cx, cy, b["a_au"], b["e"], b.get("w_deg", 0.0), col)
-            if b.get("x_au") is None:
-                continue   # real elements may exist before a real position does -- path only, no dot yet
-            x, y = self._orbit_xy(des, b, cx, cy, self._smallbody_scaled_r)
-            base_col = col
-            if selected:
-                pulse2 = 0.75 + 0.25 * math.sin(self.ticks * 0.08)
-                ring_white = rim((255, 255, 255), pulse2)
-                for ddx, ddy in ((0, -3), (0, 3), (-3, 0), (3, 0)):
-                    put_px(buf, x + ddx, y + ddy, ring_white)
-            put_px(buf, x, y, base_col)
-            put_px(buf, x + 1, y, base_col)
+                self._draw_orbiting_moons(buf, x, y, name)
 
         if sel_name:
             y = 58
             p = orbits.get(sel_name)
-            b = bodies.get(sel_name)
-            if b is not None:
-                if b.get("kind") == "comet":
-                    label = f"{b['label']} COMET -- REAL PARENT"
-                    sel_col = self.COMET_COLOR
-                else:
-                    dist = b.get("dist_au")
-                    label = (f"{sel_name} {dist:.4f} AU {b.get('cd', '')}"
-                             if dist is not None else f"{sel_name} -- LOCATING")
-                    sel_col = self.NEO_COLOR
-                draw_text3x5(buf, 2, y, fit_text(label, WIDTH - 4), sel_col)
-            elif p:
+            if p:
                 dist = math.hypot(p["x_au"], p["y_au"])
                 label = "EARTH -- HOME" if sel_name == "EARTH" else f"{sel_name} {dist:.2f} AU FROM SUN"
                 draw_text3x5(buf, 2, y, fit_text(label, WIDTH - 4), self.PLANET_COLOR.get(sel_name, self.INK))
             else:
                 draw_text3x5(buf, 2, y, fit_text(f"{sel_name} -- LOCATING", WIDTH - 4), self.INK_DIM)
         return bytes(buf)
+
+    def _frame_planets_objects(self):
+        """A DEDICATED screen for real tracked asteroids/comets --
+        split out of the main orbit diagram on direct owner feedback
+        ("cool with the comets and asteroids, but it's just way too
+        cluttered... separate it for a different view"). Shows ONE
+        selected object at a time (never the whole tracked set at
+        once, unlike the old shared diagram) so its real elliptical
+        orbit path, its real live position, and real NICHE STATISTICS
+        (a close-approach date for a real NEO, or a real orbital
+        period/perihelion distance for the tracked comet -- direct ask:
+        "give me some niche information... something cool and
+        statistical") all have genuine room instead of fighting eight
+        planets for the same handful of pixels."""
+        buf = blank()
+        fill(buf, self.BG)
+        bodies = self.data.get("bodies") or {}
+        names = self._objects_selectable()
+        if not names:
+            draw_text3x5(buf, 2, 28, "NO OBJECTS", self.INK_DIM)
+            draw_text3x5(buf, 2, 35, "TRACKED YET", self.INK_DIM)
+            return bytes(buf)
+        sel_name = names[self.planet_idx % len(names)]
+        b = bodies.get(sel_name) or {}
+        col = self.COMET_COLOR if b.get("kind") == "comet" else self.NEO_COLOR
+        cx, cy = 32, 34
+
+        draw_text3x5(buf, 2, 1, fit_text(f"TRACKED {self.planet_idx % len(names) + 1}/{len(names)}", WIDTH - 4), self.INK_DIM)
+
+        if "a_au" in b and "e" in b:
+            self._draw_smallbody_ellipse(buf, cx, cy, b["a_au"], b["e"], b.get("w_deg", 0.0), col)
+
+        if b.get("x_au") is not None:
+            x, y = self._orbit_xy(sel_name, b, cx, cy, self._smallbody_scaled_r)
+            pulse2 = 0.75 + 0.25 * math.sin(self.ticks * 0.08)
+            ring_white = rim((255, 255, 255), pulse2)
+            for ddx, ddy in ((0, -3), (0, 3), (-3, 0), (3, 0)):
+                put_px(buf, x + ddx, y + ddy, ring_white)
+            put_px(buf, x, y, col)
+            put_px(buf, x + 1, y, col)
+
+        y = 42
+        if b.get("kind") == "comet":
+            label = b.get("label", sel_name)
+            draw_text3x5(buf, 2, y, fit_text(f"{label} -- COMET", WIDTH - 4), col)
+            a_au, e = b.get("a_au"), b.get("e")
+            if a_au is not None and e is not None:
+                period_yr = a_au ** 1.5              # real Kepler's third law, P^2 = a^3
+                perihelion_au = a_au * (1.0 - e)      # real q = a(1-e)
+                draw_text3x5(buf, 2, y + 7, fit_text(f"PERIOD {period_yr:.1f}YR", WIDTH - 4), self.INK)
+                draw_text3x5(buf, 2, y + 14, fit_text(f"PERIHELION {perihelion_au:.2f}AU", WIDTH - 4), self.INK)
+            draw_text3x5(buf, 2, y + 21, "REAL PARENT OF NEXT SHOWER", self.INK_DIM)
+        else:
+            draw_text3x5(buf, 2, y, fit_text(f"{sel_name} -- NEO", WIDTH - 4), col)
+            dist = b.get("dist_au")
+            if dist is not None:
+                draw_text3x5(buf, 2, y + 7, fit_text(f"NOW {dist:.4f} AU", WIDTH - 4), self.INK)
+            cd = b.get("cd")
+            if cd:
+                draw_text3x5(buf, 2, y + 14, fit_text(f"CLOSEST {cd}", WIDTH - 4), self.INK)
+            v_rel = b.get("v_rel")
+            if v_rel is not None:
+                draw_text3x5(buf, 2, y + 21, fit_text(f"REL SPEED {v_rel:.1f} KM/S", WIDTH - 4), self.INK_DIM)
+            if dist is None and not cd:
+                draw_text3x5(buf, 2, y + 7, "LOCATING", self.INK_DIM)
+        return bytes(buf)
+
+    MOON_ORBIT_PX = 3   # fixed small offset -- see _draw_orbiting_moons for why real distance isn't used
+
+    def _draw_orbiting_moons(self, buf, px, py, planet):
+        """Real moons of the SELECTED planet, drawn as tiny pixels at
+        their real current ANGLE around the planet's own dot on the
+        main solar-system view -- direct owner ask ("add the moons as
+        tiny pixels... around the planet relative to their real
+        position... visually stunning"). Real angle only, not real
+        distance: a moon's real orbital radius is thousands of km,
+        with no honest way to scale down to a couple of panel pixels
+        alongside the planet's own AU-scale ring -- so this shows
+        WHERE (real direction) each real moon currently sits, at a
+        small fixed offset, not a claimed to-scale distance. Reuses
+        the EXACT SAME dead-reckoning cache (namespaced "PLANET:MOON")
+        _update_orbit_dr() already maintains for the zoomed moon-
+        system view -- one real data source, two presentations, not a
+        second position fetch."""
+        real_moons = moon.PLANET_MOONS.get(planet) or []
+        if not real_moons:
+            return
+        have = (self.data.get("moons") or {}).get(planet) or {}
+        for _id, name, _km in real_moons:
+            o = have.get(name)
+            if not o:
+                continue
+            mx, my = self._extrapolated_xy(f"{planet}:{name}", o["x_km"], o["y_km"],
+                                            self.MOON_MAX_EXTRAP_S)
+            ang = math.atan2(my, mx)
+            col = self.MOON_COLOR.get(name, self.INK)
+            put_px(buf, px + int(round(self.MOON_ORBIT_PX * math.cos(ang))),
+                   py + int(round(self.MOON_ORBIT_PX * math.sin(ang))), col)
 
     def _orbit_xy(self, name, o, cx, cy, scaled_r, max_extrap_s=None):
         """Real (x_au, y_au) -> real panel pixel, with dead-reckoning
