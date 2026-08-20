@@ -7261,6 +7261,7 @@ class SatelliteEngine(Browsable, BigMomentSource):
         # per call site.
         self._iss_trail = deque(maxlen=12)
         self._iss_trail_sample = None
+        self._lat, self._lon = None, None
         self._init_scroll()
         self._init_big_moments()
         # Seen-pass cursor for _detect_go_outside_pass() -- same one-shot
@@ -7339,6 +7340,7 @@ class SatelliteEngine(Browsable, BigMomentSource):
         self._scroll_tick()
         self.data = satellite.FEED.get()
         lat, lon, _lbl = satellite.FEED.get_location()
+        self._lat, self._lon = lat, lon
         self.sky = skypass.FEED.get(lat, lon)
         # ISS comet trail -- sample the real current dome position every
         # tick the ISS is genuinely above the horizon (not just
@@ -7726,6 +7728,75 @@ class SatelliteEngine(Browsable, BigMomentSource):
             return None
         return max(0.0, min(1.0, (90.0 - el_deg) / 90.0))
 
+    # Real J2000 catalog coordinates (RA hours, Dec degrees, apparent
+    # visual magnitude) for the 20 brightest real stars in Earth's sky --
+    # the same real reference-table category as SATURN_RING_BANDS/
+    # MOON_COLOR/BIZJET_TYPES elsewhere in this project, not invented.
+    # Honest simplification, stated plainly: no precession/proper-motion
+    # correction is applied (both are well under one real panel pixel of
+    # drift at this dome's resolution over any human timescale), and
+    # variable stars (Betelgeuse) use their real long-term mean
+    # magnitude, not an instantaneous one this project has no live
+    # source for.
+    BRIGHT_STARS = [
+        ("SIRIUS", 6.7525, -16.7161, -1.46), ("CANOPUS", 6.3992, -52.6956, -0.74),
+        ("RIGIL KENTAURUS", 14.6612, -60.8355, -0.27), ("ARCTURUS", 14.2610, 19.1825, -0.05),
+        ("VEGA", 18.6156, 38.7837, 0.03), ("CAPELLA", 5.2782, 45.9980, 0.08),
+        ("RIGEL", 5.2423, -8.2016, 0.13), ("PROCYON", 7.6550, 5.2250, 0.34),
+        ("BETELGEUSE", 5.9195, 7.4071, 0.42), ("ACHERNAR", 1.6286, -57.2367, 0.46),
+        ("HADAR", 14.0637, -60.3730, 0.61), ("ALTAIR", 19.8464, 8.8683, 0.76),
+        ("ALDEBARAN", 4.5987, 16.5093, 0.85), ("ANTARES", 16.4901, -26.4320, 0.96),
+        ("SPICA", 13.4199, -11.1613, 1.04), ("POLLUX", 7.7553, 28.0262, 1.14),
+        ("FOMALHAUT", 22.9608, -29.6222, 1.16), ("DENEB", 20.6905, 45.2803, 1.25),
+        ("REGULUS", 10.1395, 11.9672, 1.36), ("CASTOR", 7.5766, 31.8883, 1.58),
+    ]
+
+    @staticmethod
+    def _star_altaz(ra_h, dec_deg, lat_deg, lon_deg, unix_ts):
+        """Real RA/Dec -> real alt/az for the observer's location and the
+        current instant, via standard local-sidereal-time + spherical
+        astronomy formulas (Meeus) -- no catalogue precomputation, no
+        network call, pure math over real static catalog data. GMST uses
+        only the linear term (drops the T^2/T^3 correction, which is
+        sub-arcsecond and invisible at this panel's resolution) --
+        stated as the one deliberate simplification, same discipline as
+        the BRIGHT_STARS docstring above."""
+        jd = unix_ts / 86400.0 + 2440587.5
+        d = jd - 2451545.0
+        gmst_deg = (280.46061837 + 360.98564736629 * d) % 360.0
+        lst_deg = (gmst_deg + lon_deg) % 360.0
+        ra_deg = ra_h * 15.0
+        h = math.radians((lst_deg - ra_deg) % 360.0)
+        dec = math.radians(dec_deg)
+        lat = math.radians(lat_deg)
+        sin_alt = math.sin(lat) * math.sin(dec) + math.cos(lat) * math.cos(dec) * math.cos(h)
+        alt = math.degrees(math.asin(max(-1.0, min(1.0, sin_alt))))
+        az = (math.degrees(math.atan2(math.sin(h),
+              math.cos(h) * math.sin(lat) - math.tan(dec) * math.cos(lat))) + 180.0) % 360.0
+        return alt, az
+
+    def _draw_bright_stars(self, buf):
+        """Real bright-star backdrop for the sky dome -- direct owner
+        ask ("go crazy... most genius space app"), turning the dome
+        from "tracked satellites only" into an actual mini-planetarium.
+        Deliberately DIM relative to every real tracked object (the
+        exact "decoration must not compete with the subject" lesson
+        this project already learned the hard way on the flight radar
+        scope) -- these are unmoving background context, never the
+        actual content of this screen."""
+        if self._lat is None or self._lon is None:
+            return
+        for _name, ra_h, dec_deg, mag in self.BRIGHT_STARS:
+            alt, az = self._star_altaz(ra_h, dec_deg, self._lat, self._lon, time.time())
+            if alt <= 0:
+                continue
+            frac = self._dome_r_frac(alt)
+            x, y = scope_xy(az, frac)
+            # Real magnitude -> brightness: -1.46 (Sirius) down to 1.58
+            # (Castor), mapped to a real but always-subdued pixel value.
+            level = max(0.0, min(1.0, (1.6 - mag) / 3.06))
+            put_px(buf, int(round(x)), int(round(y)), rim((150, 155, 175), 0.25 + 0.35 * level))
+
     def _frame_scope(self):
         objs = self.sky.get("sky_now") or []
         buf = blank()
@@ -7738,6 +7809,7 @@ class SatelliteEngine(Browsable, BigMomentSource):
                          + [1.0], color=(20, 34, 58))
         draw_scope_crosshair(buf, color=(20, 34, 58))
         draw_scope_sweep(buf, self.sweep, color=(24, 66, 120))
+        self._draw_bright_stars(buf)
 
         # ISS comet trail, drawn UNDER the object loop so the live icon
         # always paints over its own tail -- same layering rule flights'
