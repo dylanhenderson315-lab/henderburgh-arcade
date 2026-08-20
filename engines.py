@@ -7157,6 +7157,12 @@ class TickerEngine(Browsable):
         return bytes(buf)
 
 
+# Shared by SatelliteEngine's own conjunction-flash big moment and
+# SpaceHubEngine's EVENTS text -- one real color for one real concept
+# across both surfaces, not two independently-picked ones.
+CONJUNCTION_COLOR = (255, 120, 220)
+
+
 class SatelliteEngine(Browsable, BigMomentSource):
     """Visible satellite passes -- the ISS and every other bright object,
     in ONE unified system.
@@ -7265,6 +7271,8 @@ class SatelliteEngine(Browsable, BigMomentSource):
         self._iss_trail_sample = None
         self._lat, self._lon = None, None
         self.conjunction = None
+        self._conjunction_seen_key = None      # one-shot adopt-then-diff, see _detect_conjunction_flash
+        self._conjunction_baseline_set = False
         self._ground_trail = deque(maxlen=self.GROUND_TRAIL_MAX)
         self._ground_trail_sample = None
         self._init_scroll()
@@ -7359,11 +7367,13 @@ class SatelliteEngine(Browsable, BigMomentSource):
     def tick(self):
         self.ticks += 1
         self._scroll_tick()
+        self._tick_flash()
         self.data = satellite.FEED.get()
         lat, lon, _lbl = satellite.FEED.get_location()
         self._lat, self._lon = lat, lon
         self.sky = skypass.FEED.get(lat, lon)
         self.conjunction = self._detect_conjunction()
+        self._detect_conjunction_flash()
         # ISS comet trail -- sample the real current dome position every
         # tick the ISS is genuinely above the horizon (not just
         # `visible`, since the trail shows real sky position, not just
@@ -7790,8 +7800,34 @@ class SatelliteEngine(Browsable, BigMomentSource):
                 continue
             gap = (b["rise"] - a["set"]).total_seconds()
             if gap <= self.CONJUNCTION_GAP_S:
-                return {"a": a.get("name"), "b": b.get("name"), "rise": a["rise"]}
+                return {"a": a.get("name"), "b": b.get("name"), "rise": a["rise"],
+                        "a_id": a.get("norad_id"), "b_id": b.get("norad_id")}
         return None
+
+    def _detect_conjunction_flash(self):
+        """Fires a TIER_FLASH (quiet in-mode banner, never a full-panel
+        interrupt -- the conjunction itself is still minutes-to-hours
+        away, not happening right now the way an actual overhead pass
+        is) the moment a genuinely NEW double-pass pairing appears.
+        Same one-shot adopt-then-diff idiom every other detector in this
+        project uses (_seen_home_runs, _overhead_ids, ...): the first
+        real read ADOPTS whatever pairing is already queued without
+        firing (a device that's been running for a while must not flash
+        the instant this code ships), and only a real CHANGE -- a
+        different pair, or the same pair predicted for a different rise
+        time (tomorrow's repeat, say) -- counts as new."""
+        key = None
+        if self.conjunction:
+            key = (self.conjunction.get("a_id"), self.conjunction.get("b_id"), self.conjunction.get("rise"))
+        if not self._conjunction_baseline_set:
+            self._conjunction_baseline_set = True
+            self._conjunction_seen_key = key
+            return
+        if key is not None and key != self._conjunction_seen_key:
+            self._set_big_moment("DOUBLE PASS", self.conjunction["a"],
+                                 f"WITH {self.conjunction['b']}", CONJUNCTION_COLOR,
+                                 tier=TIER_FLASH, system=SYSTEM_SATELLITE)
+        self._conjunction_seen_key = key
 
     # Real J2000 catalog coordinates (RA hours, Dec degrees, apparent
     # visual magnitude) for the 20 brightest real stars in Earth's sky --
@@ -8032,6 +8068,13 @@ class SatelliteEngine(Browsable, BigMomentSource):
                 draw_text_centered(buf, 40, "NOTHING UP", self.INK_DIM)
         lbl = "EL " + "/".join(str(e) for e in self.SCOPE_RING_EL) + "/0"
         draw_text_centered(buf, 58, fit_text(lbl, WIDTH - 4), (86, 94, 116))
+        # TIER_FLASH -- safe here for the exact reason FlightEngine's own
+        # SCOPE is safe (see draw_flash_banner()'s docstring): rows
+        # 11..21 on this dome are pure graphics (rings/sweep/stars/
+        # planets/targets), no text draw of this view's own ever lands
+        # there -- header text sits at y=3, the empty-sky fallback at
+        # y=40, the legend at y=58, all outside the flash band.
+        self._draw_flash(buf)
         return bytes(buf)
 
     def _frame_groundtrack(self):
@@ -8091,6 +8134,11 @@ class SatelliteEngine(Browsable, BigMomentSource):
             draw_text_centered(buf, 58, fit_text(tail, WIDTH - 4), (86, 94, 116))
         else:
             draw_text_centered(buf, 40, "NO SIGNAL" if self.data.get("err") else "LOOKING", self.INK_DIM)
+        # TIER_FLASH -- safe here too: rows 11..21 sit inside the map
+        # body (y0=10, h=44), which only ever carries the coastline/
+        # trail/markers, never text -- the only text this view draws
+        # (header, caption, empty-state) all lands outside that band.
+        self._draw_flash(buf)
         return bytes(buf)
 
     def _sky_empty_reason(self):
@@ -12048,7 +12096,7 @@ class SpaceHubEngine(Browsable):
                         "launches": launches, "conjunction": self._sat.conjunction}
         self.score = self._sat.score + self._moon.score
 
-    CONJUNCTION_COLOR = (255, 120, 220)   # distinct from every other events-view color, a rare event
+    CONJUNCTION_COLOR = CONJUNCTION_COLOR   # module-level constant, shared with SatelliteEngine's own flash
     KP_GAUGE_COLOR = [(90, 200, 130), (90, 200, 130), (90, 200, 130), (150, 200, 90),
                        (210, 200, 70), (230, 160, 60), (240, 110, 50), (250, 70, 60),
                        (255, 40, 90), (255, 20, 140)]   # real Kp 0-9, calm green -> storm red/violet
