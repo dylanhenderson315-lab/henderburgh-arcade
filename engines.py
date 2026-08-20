@@ -12022,8 +12022,36 @@ class SpaceHubEngine(Browsable):
     def has_content(self):
         return self._sat.has_content() or self._moon.has_content()
 
+    SPACE_EVENT_BOOST = 0.3   # a real conjunction or an imminent launch nudges dwell -- see the reasoning below
+
     def ambient_weight(self):
-        return max(self._sat.ambient_weight(), self._moon.ambient_weight())
+        """max() of the two real sub-signals, plus a small ADDITIVE
+        nudge (same shape as FAVORITE_AMBIENT_BOOST/WINDOW_BOOST
+        elsewhere in this project -- deliberately smaller than the
+        smallest real tier gap in SatelliteEngine.ambient_weight()'s
+        own ladder, 0.5, so this can only ever break a tie WITHIN a
+        tier, never leapfrog a genuinely bigger, unrelated signal) when
+        a real double-pass conjunction is currently queued, or the
+        soonest real tracked launch is inside its own urgency window --
+        both genuinely more worth a few extra seconds of dwell time
+        than the same category of content on an ordinary day."""
+        weight = max(self._sat.ambient_weight(), self._moon.ambient_weight())
+        urgent_launch = False
+        launches = self._moon.data.get("launches") or []
+        if launches:
+            secs = self._launch_seconds(launches[0].get("net"))
+            urgent_launch = isinstance(secs, (int, float)) and 0 < secs <= self.LAUNCH_URGENT_S
+        # Applied AT MOST ONCE regardless of how many of these are true
+        # at once -- a real bug caught before shipping: adding the boost
+        # separately per condition let a conjunction AND an urgent
+        # launch together (1.0 + 0.3 + 0.3 = 1.6) cross the very tier
+        # boundary (1.5) this nudge is supposed to stay safely under,
+        # letting a doubly-boosted WEAK base outrank a genuinely
+        # stronger single-tier pass that only had one real fact behind
+        # it. One real "something extra is going on" boolean, one boost.
+        if self._sat.conjunction or urgent_launch:
+            weight += self.SPACE_EVENT_BOOST
+        return weight
 
     def _step(self, direction):
         """LEFT/RIGHT -- browse WITHIN the current category."""
