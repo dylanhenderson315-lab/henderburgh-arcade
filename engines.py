@@ -11065,7 +11065,13 @@ class MoonEngine:
 
     @staticmethod
     def _fmt_countdown(secs):
-        secs = max(0, int(secs))
+        # A real liftoff makes `secs` genuinely negative -- "T-0M" would
+        # keep claiming a countdown that already ended. "NOW" is honest
+        # and stays short enough not to crowd the launch name sharing
+        # this same line.
+        if secs <= 0:
+            return "NOW"
+        secs = int(secs)
         d, rem = divmod(secs, 86400)
         h, rem = divmod(rem, 3600)
         m, _s = divmod(rem, 60)
@@ -11792,7 +11798,12 @@ class MoonEngine:
             secs = self._launch_countdown(launch.get("net"))
             cd = self._fmt_countdown(secs) if secs is not None else ""
             head = f"{cd} {launch['name']}" if cd else launch["name"]
-            draw_text3x5(buf, 2, y, fit_text(head, WIDTH - 4), self.LAUNCH)
+            # Same real urgency-pulse language SpaceHubEngine's own
+            # multi-launch ticker uses -- one visual meaning ("this is
+            # imminent") shared across both surfaces, not two.
+            urgent = isinstance(secs, (int, float)) and 0 < secs <= SpaceHubEngine.LAUNCH_URGENT_S
+            col = rim((255, 70, 60), 0.6 + 0.4 * math.sin(self.ticks * 0.15)) if urgent else self.LAUNCH
+            draw_text3x5(buf, 2, y, fit_text(head, WIDTH - 4), col)
             y += 7
             if launch.get("provider") and y <= HEIGHT - 5:
                 draw_text3x5(buf, 2, y, fit_text(launch["provider"], WIDTH - 4), self.INK_DIM)
