@@ -11874,14 +11874,26 @@ class SpaceHubEngine(Browsable):
                        (210, 200, 70), (230, 160, 60), (240, 110, 50), (250, 70, 60),
                        (255, 40, 90), (255, 20, 140)]   # real Kp 0-9, calm green -> storm red/violet
 
-    def _countdown_str(self, net_iso):
-        """Real T-minus to a real ISO8601 UTC timestamp (LL2's `net`
-        field), or None if it can't be parsed -- never a guessed time."""
+    LAUNCH_URGENT_S = 600.0   # real T-10min or under -- pulses red, matches the celebration system's urgency language
+
+    @staticmethod
+    def _launch_seconds(net_iso):
+        """Real seconds until a real ISO8601 UTC timestamp (LL2's `net`
+        field), or None if it can't be parsed. Shared by the countdown
+        text and the urgency color so both always agree on the same
+        real number, never two independently-parsed ones."""
         try:
             target = calendar.timegm(time.strptime(net_iso, "%Y-%m-%dT%H:%M:%SZ"))
         except (ValueError, TypeError):
             return None
-        secs = target - time.time()
+        return target - time.time()
+
+    def _countdown_str(self, net_iso):
+        """Real T-minus to a real ISO8601 UTC timestamp, or None if it
+        can't be parsed -- never a guessed time."""
+        secs = self._launch_seconds(net_iso)
+        if secs is None:
+            return None
         if secs <= 0:
             return "LAUNCHING NOW"
         days, rem = divmod(int(secs), 86400)
@@ -11942,11 +11954,17 @@ class SpaceHubEngine(Browsable):
         if launches and y <= HEIGHT - 12:
             idx = self._launch_idx % len(launches)
             launch = launches[idx]
+            secs = self._launch_seconds(launch.get("net"))
+            urgent = isinstance(secs, (int, float)) and 0 < secs <= self.LAUNCH_URGENT_S
+            base_col = (255, 170, 60)
+            if urgent:
+                pulse = 0.6 + 0.4 * math.sin(self._moon.ticks * 0.15)
+                base_col = rim((255, 70, 60), pulse)
             draw_divider(buf, y - 1)
             label = launch.get("name") or "LAUNCH"
             if len(launches) > 1:
                 label = f"{label} {idx + 1}/{len(launches)}"
-            draw_text3x5(buf, 2, y, fit_text(label, WIDTH - 4), (255, 170, 60))
+            draw_text3x5(buf, 2, y, fit_text(label, WIDTH - 4), base_col)
             y += 7
             if y <= HEIGHT - 5:
                 countdown = self._countdown_str(launch.get("net"))
@@ -11956,7 +11974,8 @@ class SpaceHubEngine(Browsable):
                     tail = f"{tail}  {mi:.0f}MI" if tail else f"{mi:.0f} MI FROM HOME"
                 if not tail and launch.get("provider"):
                     tail = launch["provider"]
-                draw_text3x5(buf, 2, y, fit_text(tail, WIDTH - 4), (170, 175, 195))
+                tail_col = base_col if urgent else (170, 175, 195)
+                draw_text3x5(buf, 2, y, fit_text(tail, WIDTH - 4), tail_col)
         return bytes(buf)
 
     def frame(self):
