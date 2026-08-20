@@ -7913,6 +7913,38 @@ class SatelliteEngine(Browsable, BigMomentSource):
             level = max(0.0, min(1.0, (3.4 - mag) / 4.86))
             put_px(buf, p[0], p[1], rim((150, 155, 175), 0.2 + 0.4 * level))
 
+    def _draw_dome_planets(self, buf):
+        """Real planet + Sun positions, opportunistically shown on the
+        sky dome when moon.FEED is already warm (see moon.FEED.peek()'s
+        own docstring). NEVER starts moon.py's own poll thread -- the
+        standalone `satellite` mode never pays a cost it has no other
+        reason to incur; the SPACE hub (which already ticks its own
+        MoonEngine every real tick) gets this for free the moment
+        someone has looked at MOON/PLANETS at all recently. Brighter
+        and shaped differently (a tiny cross, not a bare dot) than the
+        constellation backdrop -- a real named solar-system body is a
+        more interesting real fact than a fixed background star -- but
+        still dimmer than a live tracked satellite, the same brightness
+        hierarchy this project's flight radar scope already
+        established for "decoration vs. the actual subject"."""
+        data = moon.FEED.peek()
+        if not data:
+            return
+        bodies = dict(data.get("planets") or {})
+        sun = data.get("sun")
+        if sun:
+            bodies["SUN"] = sun
+        for name, o in bodies.items():
+            el, az = o.get("el_deg"), o.get("az_deg")
+            if not isinstance(el, (int, float)) or el <= 0 or az is None:
+                continue
+            x, y = scope_xy(az, self._dome_r_frac(el))
+            xi, yi = int(round(x)), int(round(y))
+            col = (255, 215, 120) if name == "SUN" else MoonEngine.PLANET_COLOR.get(name, (200, 190, 170))
+            put_px(buf, xi, yi, col)
+            put_px(buf, xi - 1, yi, rim(col, 0.55))
+            put_px(buf, xi + 1, yi, rim(col, 0.55))
+
     def _frame_scope(self):
         objs = self.sky.get("sky_now") or []
         buf = blank()
@@ -7934,6 +7966,7 @@ class SatelliteEngine(Browsable, BigMomentSource):
         draw_scope_crosshair(buf, color=(20, 34, 58))
         draw_scope_sweep(buf, self.sweep, color=(24, 66, 120))
         self._draw_bright_stars(buf)
+        self._draw_dome_planets(buf)
 
         # ISS comet trail, drawn UNDER the object loop so the live icon
         # always paints over its own tail -- same layering rule flights'

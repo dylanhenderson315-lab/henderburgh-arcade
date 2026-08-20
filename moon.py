@@ -598,6 +598,29 @@ class MoonFeed:
         out.update(usno)
         return out
 
+    def peek(self):
+        """PASSIVE real planet/sun az-el read -- same shape as
+        weather.FEED.peek() (see that method's own docstring for the
+        full reasoning this mirrors exactly). NEVER calls
+        _ensure_thread(), NEVER touches _last_read -- a caller that
+        only ever calls peek() can never start this feed's background
+        poll thread on its own. Real cached data if the thread is
+        already alive for some OTHER real reason (MOON/PLANETS mode is
+        on, or the SPACE hub's own MoonEngine sub-instance is ticking),
+        an honest None otherwise -- never a forced poll. First real use:
+        SatelliteEngine's sky dome opportunistically showing real
+        planet positions when they're already warm, without ever making
+        the standalone `satellite` mode pay for a poll cadence it has
+        no other reason to start."""
+        with self._lock:
+            if not (self._thread and self._thread.is_alive()):
+                return None
+            planets = {k: dict(v) for k, v in self._planets.items()}
+            sun = dict(self._sun) if self._sun else None
+            if not planets and not sun:
+                return None
+            return {"planets": planets, "sun": sun}
+
     def _ensure_thread(self):
         with self._lock:
             if self._thread and self._thread.is_alive():
