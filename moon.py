@@ -239,34 +239,48 @@ def _parse_usno(data, now_local):
     }
 
 
-def _parse_launch(data):
-    """Real next FUTURE launch, or None. CONFIRMED live 2026-08-19: LL2's
-    own `upcoming` endpoint's default ordering can list a launch that
-    has ALREADY happened (net in the past, status "Launch Successful")
-    ahead of genuinely future ones -- filtered here rather than trusted
-    blindly, since a countdown to an already-flown launch would be a
-    real, confusing wrong fact on a screen built for a hobbyist who'd
-    notice immediately. `lsp_name` is the real provider-name field in
-    this endpoint's list mode (NOT a nested `launch_service_provider`
-    object, which only the detail endpoint carries)."""
+LAUNCH_TRACK_COUNT = 3   # real next-N launches for the SPACE hub's launch ticker
+
+
+def _parse_launches(data, limit=LAUNCH_TRACK_COUNT):
+    """Real next FUTURE launches (soonest first), up to `limit`. Same
+    real filtering `_parse_launch` always did -- LL2's own `upcoming`
+    endpoint's default ordering CONFIRMED live 2026-08-19 to list a
+    launch that has ALREADY happened (net in the past, status "Launch
+    Successful") ahead of genuinely future ones -- so every entry is
+    checked, not just trusted in list order. `lsp_name` is the real
+    provider-name field in this endpoint's list mode (NOT a nested
+    `launch_service_provider` object, which only the detail endpoint
+    carries)."""
     if not isinstance(data, dict):
-        return None
+        return []
     results = data.get("results")
     if not isinstance(results, list):
-        return None
+        return []
     now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    out = []
     for L in results:
         net = L.get("net")
         if not (isinstance(net, str) and net > now_iso):
             continue
         name = paneltext.panel_text(L.get("name") or "") or None
+        if not name:
+            continue
         provider = paneltext.panel_text(L.get("lsp_name") or "") or None
         status = ((L.get("status") or {}).get("name"))
         status = paneltext.panel_text(status) if status else None
-        if not name:
-            continue
-        return {"name": name, "net": net, "provider": provider, "status": status}
-    return None
+        out.append({"name": name, "net": net, "provider": provider, "status": status})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _parse_launch(data):
+    """Real single next launch -- kept for the MOON view's existing
+    one-launch card. Thin wrapper over `_parse_launches`, one real
+    parse, not a second one."""
+    launches = _parse_launches(data, limit=1)
+    return launches[0] if launches else None
 
 
 def _parse_horizons_row(text):
@@ -522,6 +536,7 @@ class MoonFeed:
         self._usno_try = 0.0
         self._usno_err = None
         self._launch = None
+        self._launches = []         # real next LAUNCH_TRACK_COUNT future launches, soonest first
         self._launch_try = 0.0
         self._launch_err = None
         self._planets = {}          # name -> {az_deg, el_deg, mag, dist_au}
@@ -562,6 +577,7 @@ class MoonFeed:
             self._last_read = now
             usno = dict(self._usno)
             launch = dict(self._launch) if self._launch else None
+            launches = [dict(L) for L in self._launches]
             planets = {k: dict(v) for k, v in self._planets.items()}
             sun = dict(self._sun) if self._sun else None
             orbits = {k: dict(v) for k, v in self._orbits.items()}
@@ -575,7 +591,7 @@ class MoonFeed:
         self._ensure_thread()
         out = {
             "configured": satellite.FEED.configured,
-            "age": age, "err": err, "launch": launch, "planets": planets, "sun": sun,
+            "age": age, "err": err, "launch": launch, "launches": launches, "planets": planets, "sun": sun,
             "orbits": orbits, "orbits_ts": orbits_ts, "bodies": bodies, "bodies_ts": bodies_ts,
             "moons": moons, "moons_ts": moons_ts,
         }
@@ -810,9 +826,10 @@ class MoonFeed:
             self._launch_try = now
         try:
             data = _get_json(LL2_URL)
-            parsed = _parse_launch(data)
+            parsed = _parse_launches(data)
             with self._lock:
-                self._launch = parsed
+                self._launches = parsed
+                self._launch = parsed[0] if parsed else None
                 self._launch_err = None
         except (urllib.error.URLError, TimeoutError, ValueError,
                 json.JSONDecodeError, OSError, KeyError) as e:        # noqa: BLE001

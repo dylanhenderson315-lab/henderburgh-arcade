@@ -11642,6 +11642,7 @@ class SpaceHubEngine(Browsable):
         self.cat_i = 0
         self._init_scroll()
         self.events = {}
+        self._launch_idx = 0   # real EVENTS-category browse cursor into events["launches"]
 
     @property
     def category(self):
@@ -11662,7 +11663,11 @@ class SpaceHubEngine(Browsable):
             names = self._moon._browsable_names()
             if names:
                 self._moon.planet_idx = (self._moon.planet_idx + direction) % len(names)
-        # moon/events: nothing to browse, real no-op.
+        elif cat == "events":
+            launches = self.events.get("launches") or []
+            if launches:
+                self._launch_idx = (self._launch_idx + direction) % len(launches)
+        # moon: nothing to browse, real no-op.
 
     def _step_v(self, direction):
         """UP/DOWN -- switch CATEGORY, same role _step_v plays in
@@ -11707,13 +11712,71 @@ class SpaceHubEngine(Browsable):
         shower = skyevents.next_meteor_shower(now.tm_mon, now.tm_mday)
         lat, lon, _ = satellite.FEED.get_location()
         visible = skyevents.aurora_visible_at(aurora.get("kp"), lat) if satellite.FEED.configured else None
-        launch = self._moon.data.get("launch") or {}
+        launches = self._moon.data.get("launches") or []
+        launch = launches[0] if launches else {}
         launch_mi = None
         if launch.get("provider") and satellite.FEED.configured:
             launch_mi = skyevents.launch_distance_mi(launch["provider"], lat, lon)
+        if launches:
+            self._launch_idx %= len(launches)
+        else:
+            self._launch_idx = 0
+        conjunction = self._detect_conjunction()
         self.events = {"aurora_kp": aurora.get("kp"), "aurora_visible": visible,
-                        "shower": shower, "launch": launch or None, "launch_mi": launch_mi}
+                        "shower": shower, "launch": launch or None, "launch_mi": launch_mi,
+                        "launches": launches, "conjunction": conjunction}
         self.score = self._sat.score + self._moon.score
+
+    CONJUNCTION_GAP_S = 300.0   # real passes overlapping (or within 5min) count as a "double pass"
+
+    def _detect_conjunction(self):
+        """Two real DIFFERENT bright satellites visibly crossing the
+        sky at close to the same time -- a genuine "double pass" worth
+        flagging, derived entirely from real sgp4-propagated pass data
+        this project already fetches (skypass.predict(), read here off
+        SatelliteEngine's own already-ticked `.sky["passes"]`). Two
+        passes "overlap" when their real [rise, set] windows are within
+        CONJUNCTION_GAP_S of each other -- covers both a genuine
+        simultaneous overlap and two passes close enough back-to-back
+        that stepping outside once catches both. Only the SOONEST real
+        qualifying pair is reported; never invents a pairing that isn't
+        there."""
+        passes = (self._sat.sky or {}).get("passes") or []
+        if len(passes) < 2:
+            return None
+        ordered = sorted(passes, key=lambda p: p["rise"])
+        for i in range(len(ordered) - 1):
+            a, b = ordered[i], ordered[i + 1]
+            if a.get("norad_id") == b.get("norad_id"):
+                continue
+            gap = (b["rise"] - a["set"]).total_seconds()
+            if gap <= self.CONJUNCTION_GAP_S:
+                return {"a": a.get("name"), "b": b.get("name"), "rise": a["rise"]}
+        return None
+
+    CONJUNCTION_COLOR = (255, 120, 220)   # distinct from every other events-view color, a rare event
+    KP_GAUGE_COLOR = [(90, 200, 130), (90, 200, 130), (90, 200, 130), (150, 200, 90),
+                       (210, 200, 70), (230, 160, 60), (240, 110, 50), (250, 70, 60),
+                       (255, 40, 90), (255, 20, 140)]   # real Kp 0-9, calm green -> storm red/violet
+
+    def _countdown_str(self, net_iso):
+        """Real T-minus to a real ISO8601 UTC timestamp (LL2's `net`
+        field), or None if it can't be parsed -- never a guessed time."""
+        try:
+            target = calendar.timegm(time.strptime(net_iso, "%Y-%m-%dT%H:%M:%SZ"))
+        except (ValueError, TypeError):
+            return None
+        secs = target - time.time()
+        if secs <= 0:
+            return "LAUNCHING NOW"
+        days, rem = divmod(int(secs), 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes = rem // 60
+        if days:
+            return f"T-{days}D {hours:02d}H"
+        if hours:
+            return f"T-{hours}H {minutes:02d}M"
+        return f"T-{minutes}M"
 
     def _frame_events(self):
         buf = blank()
@@ -11721,20 +11784,37 @@ class SpaceHubEngine(Browsable):
         draw_header(buf, "SKY EVENTS", (150, 190, 255))
         y = 11
 
+        conj = self.events.get("conjunction")
+        if conj:
+            draw_text3x5(buf, 2, y, "DOUBLE PASS!", self.CONJUNCTION_COLOR)
+            y += 7
+            pair = fit_text(f"{conj['a']} + {conj['b']}", WIDTH - 4)
+            draw_text3x5(buf, 2, y, pair, self.CONJUNCTION_COLOR)
+            y += 9
+
         kp = self.events.get("aurora_kp")
         vis = self.events.get("aurora_visible")
-        if isinstance(kp, (int, float)):
+        if isinstance(kp, (int, float)) and y <= HEIGHT - 16:
             col = (140, 230, 160) if vis else (150, 160, 185)
             draw_text3x5(buf, 2, y, f"AURORA KP {kp:.1f}", col)
             y += 7
+            # Real 0-9 Kp gauge -- a plain text number says "how big" far
+            # less immediately than a filled bar does at a glance.
+            bar_col = self.KP_GAUGE_COLOR[max(0, min(9, int(round(kp))))]
+            filled = max(1, min(WIDTH - 4, int(round((WIDTH - 4) * min(kp, 9.0) / 9.0))))
+            for bx in range(WIDTH - 4):
+                draw_col = bar_col if bx < filled else (40, 42, 54)
+                put_px(buf, 2 + bx, y, draw_col)
+                put_px(buf, 2 + bx, y + 1, draw_col)
+            y += 4
             draw_text3x5(buf, 2, y, "MAY BE VISIBLE" if vis else "NOT LIKELY HERE", col)
             y += 9
-        else:
+        elif y <= HEIGHT - 12:
             draw_text3x5(buf, 2, y, "NO AURORA DATA", (85, 88, 105))
             y += 9
 
         shower = self.events.get("shower")
-        if shower:
+        if shower and y <= HEIGHT - 16:
             draw_divider(buf, y - 1)
             label = f"{shower['name']}"
             draw_text3x5(buf, 2, y, fit_text(label, WIDTH - 4), (255, 200, 60))
@@ -11743,14 +11823,25 @@ class SpaceHubEngine(Browsable):
             draw_text3x5(buf, 2, y, fit_text(f"{due}  ZHR {shower['zhr']}", WIDTH - 4), (170, 175, 195))
             y += 9
 
-        launch = self.events.get("launch")
-        if launch and y <= HEIGHT - 12:
+        launches = self.events.get("launches") or []
+        if launches and y <= HEIGHT - 12:
+            idx = self._launch_idx % len(launches)
+            launch = launches[idx]
             draw_divider(buf, y - 1)
-            draw_text3x5(buf, 2, y, fit_text(launch.get("name") or "LAUNCH", WIDTH - 4), (255, 170, 60))
+            label = launch.get("name") or "LAUNCH"
+            if len(launches) > 1:
+                label = f"{label} {idx + 1}/{len(launches)}"
+            draw_text3x5(buf, 2, y, fit_text(label, WIDTH - 4), (255, 170, 60))
             y += 7
-            mi = self.events.get("launch_mi")
-            if isinstance(mi, (int, float)) and y <= HEIGHT - 5:
-                draw_text3x5(buf, 2, y, fit_text(f"{mi:.0f} MI FROM HOME", WIDTH - 4), (170, 175, 195))
+            if y <= HEIGHT - 5:
+                countdown = self._countdown_str(launch.get("net"))
+                mi = self.events.get("launch_mi") if idx == 0 else None
+                tail = countdown or ""
+                if isinstance(mi, (int, float)):
+                    tail = f"{tail}  {mi:.0f}MI" if tail else f"{mi:.0f} MI FROM HOME"
+                if not tail and launch.get("provider"):
+                    tail = launch["provider"]
+                draw_text3x5(buf, 2, y, fit_text(tail, WIDTH - 4), (170, 175, 195))
         return bytes(buf)
 
     def frame(self):
