@@ -1561,16 +1561,26 @@ def _leaders_from_payload(data):
     payloads), so this returns [] then rather than a fabricated stat.
 
     Returns up to 2 entries PER TEAM (4 total) [{team, cat, name,
-    value}] -- the first two real, non-empty categories ESPN lists for
-    that team, in ESPN's own headline-relevance order, team order as
-    ESPN gave it. The renderer decides how many it has room for; this
-    just stops inventing a "one stat per team" ceiling that was never a
-    real constraint, only how many rows the original caller drew.
+    value}], INTERLEAVED team-by-team (teamA cat1, teamB cat1, teamA
+    cat2, teamB cat2) rather than grouped -- a real, confirmed bug
+    fixed 2026-08-20: the original grouped order (all of team A's
+    categories, then all of team B's) meant that whenever a detail
+    card only had room for ONE real leader row -- confirmed live: the
+    basketball detail renderer's own real vertical budget, after the
+    period/score/win%/shooting-line rows already drawn, has room for
+    exactly 1 -- team B was invisible on that card every single time,
+    never just sometimes. A two-team matchup silently telling a viewer
+    about only one side's best player is a real fairness bug, not a
+    style choice. Interleaving means a tight budget still shows BOTH
+    teams' #1 category before ever reaching either team's #2. The
+    renderer still decides how many total rows it has room for; this
+    just stops one team's stats from structurally winning that
+    allocation every time.
     """
     ldrs = data.get("leaders") if isinstance(data, dict) else None
     if not isinstance(ldrs, list):
         return []
-    out = []
+    per_team = []   # list of per-team row-lists, in ESPN's own team order
     for team in ldrs[:2]:
         if not isinstance(team, dict):
             continue
@@ -1581,6 +1591,7 @@ def _leaders_from_payload(data):
         real_cats = [c for c in cats
                      if isinstance(c, dict) and isinstance(c.get("leaders"), list)
                      and c.get("leaders")]
+        rows = []
         for cat in real_cats[:2]:
             lead = cat["leaders"][0]
             if not isinstance(lead, dict):
@@ -1597,12 +1608,19 @@ def _leaders_from_payload(data):
             else:
                 dv = lead.get("displayValue")
                 val_s = str(dv).strip() if dv else ""
-            out.append({
+            rows.append({
                 "team": paneltext.panel_text(tm) if tm else "",
                 "cat": _leader_label(cat.get("name")),
                 "name": paneltext.panel_text(name),
                 "value": paneltext.panel_text(val_s) if val_s else "",
             })
+        if rows:
+            per_team.append(rows)
+    out = []
+    for i in range(max((len(t) for t in per_team), default=0)):
+        for rows in per_team:
+            if i < len(rows):
+                out.append(rows[i])
     return out
 
 
