@@ -11078,6 +11078,24 @@ class MoonEngine:
                 draw_text3x5(buf, 2, y, fit_text(f"{sel_name} -- LOCATING", WIDTH - 4), self.INK_DIM)
         return bytes(buf)
 
+    NEO_ASSUMED_ALBEDO = 0.14   # real JPL/CNEOS default assumption for an unknown NEO albedo
+
+    @classmethod
+    def _neo_diameter_km(cls, h_mag):
+        """Real, published NASA/JPL CNEOS estimated-diameter formula:
+        D(km) = 1329 / sqrt(albedo) * 10^(-H/5), from the real absolute
+        magnitude H (already fetched from CAD). HONEST CAVEAT, stated
+        plainly rather than presented as exact: a real NEO's actual
+        albedo is almost never individually measured, so this uses
+        CNEOS's own real default assumption (0.14, a typical stony
+        asteroid) -- the true diameter can genuinely be several times
+        smaller or larger for an unusually dark or bright real object.
+        This is the same "estimated diameter" figure NASA's own CNEOS
+        pages publish for exactly this reason, not an invented number."""
+        if not isinstance(h_mag, (int, float)):
+            return None
+        return 1329.0 / math.sqrt(cls.NEO_ASSUMED_ALBEDO) * (10.0 ** (-h_mag / 5.0))
+
     def _frame_planets_objects(self):
         """A DEDICATED screen for real tracked asteroids/comets --
         split out of the main orbit diagram on direct owner feedback
@@ -11122,26 +11140,41 @@ class MoonEngine:
         if b.get("kind") == "comet":
             label = b.get("label", sel_name)
             draw_text3x5(buf, 2, y, fit_text(f"{label} -- COMET", WIDTH - 4), col)
+            y += 7
             a_au, e = b.get("a_au"), b.get("e")
-            if a_au is not None and e is not None:
+            if a_au is not None and e is not None and y <= HEIGHT - 5:
                 period_yr = a_au ** 1.5              # real Kepler's third law, P^2 = a^3
                 perihelion_au = a_au * (1.0 - e)      # real q = a(1-e)
-                draw_text3x5(buf, 2, y + 7, fit_text(f"PERIOD {period_yr:.1f}YR", WIDTH - 4), self.INK)
-                draw_text3x5(buf, 2, y + 14, fit_text(f"PERIHELION {perihelion_au:.2f}AU", WIDTH - 4), self.INK)
-            draw_text3x5(buf, 2, y + 21, "REAL PARENT OF NEXT SHOWER", self.INK_DIM)
+                draw_text3x5(buf, 2, y, fit_text(f"PERIOD {period_yr:.1f}YR", WIDTH - 4), self.INK)
+                y += 7
+                if y <= HEIGHT - 5:
+                    draw_text3x5(buf, 2, y, fit_text(f"PERIHELION {perihelion_au:.2f}AU", WIDTH - 4), self.INK)
+                    y += 7
+            if y <= HEIGHT - 5:
+                draw_text3x5(buf, 2, y, fit_text("REAL PARENT OF NEXT SHOWER", WIDTH - 4), self.INK_DIM)
         else:
             draw_text3x5(buf, 2, y, fit_text(f"{sel_name} -- NEO", WIDTH - 4), col)
+            y += 7
             dist = b.get("dist_au")
-            if dist is not None:
-                draw_text3x5(buf, 2, y + 7, fit_text(f"NOW {dist:.4f} AU", WIDTH - 4), self.INK)
+            if dist is not None and y <= HEIGHT - 5:
+                draw_text3x5(buf, 2, y, fit_text(f"NOW {dist:.4f} AU", WIDTH - 4), self.INK)
+                y += 7
+            diam_km = self._neo_diameter_km(b.get("h"))
+            if diam_km is not None and y <= HEIGHT - 5:
+                unit = "M" if diam_km < 1.0 else "KM"
+                val = diam_km * 1000.0 if diam_km < 1.0 else diam_km
+                draw_text3x5(buf, 2, y, fit_text(f"EST DIA {val:.0f}{unit}", WIDTH - 4), self.INK)
+                y += 7
             cd = b.get("cd")
-            if cd:
-                draw_text3x5(buf, 2, y + 14, fit_text(f"CLOSEST {cd}", WIDTH - 4), self.INK)
+            if cd and y <= HEIGHT - 5:
+                draw_text3x5(buf, 2, y, fit_text(f"CLOSEST {cd}", WIDTH - 4), self.INK)
+                y += 7
             v_rel = b.get("v_rel")
-            if v_rel is not None:
-                draw_text3x5(buf, 2, y + 21, fit_text(f"REL SPEED {v_rel:.1f} KM/S", WIDTH - 4), self.INK_DIM)
-            if dist is None and not cd:
-                draw_text3x5(buf, 2, y + 7, "LOCATING", self.INK_DIM)
+            if v_rel is not None and y <= HEIGHT - 5:
+                draw_text3x5(buf, 2, y, fit_text(f"REL SPEED {v_rel:.1f} KM/S", WIDTH - 4), self.INK_DIM)
+                y += 7
+            if dist is None and diam_km is None and not cd and v_rel is None and y <= HEIGHT - 5:
+                draw_text3x5(buf, 2, y, "LOCATING", self.INK_DIM)
         return bytes(buf)
 
     MOON_ORBIT_PX = 3   # fixed small offset -- see _draw_orbiting_moons for why real distance isn't used
