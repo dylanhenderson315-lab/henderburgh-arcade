@@ -15372,6 +15372,19 @@ class SportsEngine(Browsable, BigMomentSource):
                     return r.get("stats") or {}
         return {}
 
+    @staticmethod
+    def _pct_value(v):
+        """Real numeric value from a real ESPN percent-ish string
+        ("62" or "62.0", confirmed live on possessionPct -- no literal
+        '%' character on the real payload), or None on anything that
+        doesn't parse -- never a guessed number."""
+        if v is None:
+            return None
+        try:
+            return float(str(v).strip().rstrip("%"))
+        except ValueError:
+            return None
+
     def _frame_golf_pinned(self):
         """The pinned player, given the panel.
 
@@ -17368,21 +17381,41 @@ class SportsEngine(Browsable, BigMomentSource):
             if scorer:
                 y = draw_text_on_empty(buf, y, fit_person(scorer, WIDTH - 8), self.INK)
             y = self._draw_period_line(buf, ev, y)
-            # Possession + shots on target -- real fields, confirmed live
-            # on boxscore.teams[].statistics[] (possessionPct/
-            # shotsOnTarget). Home side only, one compact line.
-            if y <= HEIGHT - 5:
-                box = self._team_box_side(ev, "home")
-                poss = box.get("possessionPct")
-                sot = box.get("shotsOnTarget")
-                bits = []
-                if poss:
-                    bits.append(f"POSS {poss}")
+            # Real live possession TUG-OF-WAR BAR (2026-08-20, direct
+            # owner ask: "visually stunning... intuitive and genius like
+            # MLB"). Same real fields as before (boxscore.teams[].
+            # statistics[].possessionPct, confirmed live) -- now drawn as
+            # a real two-color split bar instead of bare text, the same
+            # "a number alone says less than a picture" instinct behind
+            # the aurora Kp gauge and the launch countdown pulse. Only
+            # drawn when BOTH sides report a real possessionPct (ESPN
+            # sends it for both teams together or neither) -- never a
+            # guessed half for a missing side.
+            home_box = self._team_box_side(ev, "home")
+            away_box = self._team_box_side(ev, "away")
+            home_poss = self._pct_value(home_box.get("possessionPct"))
+            away_poss = self._pct_value(away_box.get("possessionPct"))
+            if home_poss is not None and away_poss is not None and y <= HEIGHT - 5:
+                home_c = next((c.get("color") for c in comps if c.get("home_away") == "home"), None) or self.HERO_INK
+                away_c = next((c.get("color") for c in comps if c.get("home_away") == "away"), None) or self.INK_DIM
+                total = home_poss + away_poss
+                frac = home_poss / total if total > 0 else 0.5
+                bar_w = WIDTH - 8
+                split = max(0, min(bar_w, int(round(bar_w * frac))))
+                for bx in range(bar_w):
+                    put_px(buf, 4 + bx, y, away_c if bx >= split else home_c)
+                    put_px(buf, 4 + bx, y + 1, away_c if bx >= split else home_c)
+                y += 3
+                sot_h, sot_a = home_box.get("shotsOnTarget"), away_box.get("shotsOnTarget")
+                tail = f"{home_poss:.0f}-{away_poss:.0f}"
+                if sot_h and sot_a:
+                    tail += f"  SOT {sot_h}-{sot_a}"
+                if y <= HEIGHT - 5:
+                    y = draw_text_on_empty(buf, y, fit_text(tail, WIDTH - 8), self.INK_DIM)
+            elif y <= HEIGHT - 5:
+                sot = home_box.get("shotsOnTarget")
                 if sot:
-                    bits.append(f"SOT {sot}")
-                if bits:
-                    y = draw_text_on_empty(buf, y, fit_text(" ".join(bits), WIDTH - 8),
-                                           self.INK_DIM)
+                    y = draw_text_on_empty(buf, y, fit_text(f"SOT {sot}", WIDTH - 8), self.INK_DIM)
         else:
             draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
                                color_on_dark(accent), x_min=3)
