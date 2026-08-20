@@ -1235,6 +1235,55 @@ def draw_soccer_pitch_hero(buf, x0, y0, x1, y1):
         put_px(buf, cx + dx, cy_mid + dy, PITCH_LINE)
 
 
+COURT_HARD = (16, 52, 76)        # real dark hard-court blue -- luminance ~45, same dark band every other hero backdrop sits in
+COURT_HARD_LINE = (225, 232, 235)  # real court-marking white
+
+def draw_tennis_court_hero(buf, x0, y0, x1, y1):
+    """Real hard-court backdrop for tennis' set-pips row (2026-08-20,
+    direct owner ask -- "give tennis its own hero backdrop... like MLB
+    makes it pop"). Same honest-set-dressing contract as the other four
+    hero backdrops (soccer pitch, basketball court, hockey rink,
+    football turf): real court colors, real court geometry, nothing
+    invented plotted on it -- the real dynamic content (each player's
+    own real set-by-set pip row, from `draw_tennis_set_pips()`) is
+    drawn ON TOP by the caller, unchanged.
+
+    Deliberately dark (luminance ~45, the same dark band every other
+    hero backdrop in this project already sits in on purpose -- see the
+    real hockey-ice contrast bug this project already found and fixed
+    once) so the pip row's own bright gold "on" color and the light
+    "off" color both keep popping the same way light ink already pops
+    against every other dark hero surface here.
+
+    The net line is not decoration -- it sits exactly between the two
+    real pip rows `draw_tennis_set_pips()` draws (one row per player),
+    so the court's own real net physically separates the two players'
+    own real results, the same way a real net separates two sides of
+    a real court."""
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            put_px(buf, x, y, COURT_HARD)
+    # The net -- a real solid line, not dotted, unlike every other
+    # hero's own halfway/center marking -- a tennis net is a real solid
+    # barrier, and this is the one hero backdrop where that literal
+    # distinction is worth keeping. Placed at y0+3, not the rect's
+    # geometric center: this hero is purpose-built for the exact 10px
+    # set-pips region draw_tennis_set_pips() fills (row 0 at y0..y0+2,
+    # row 1 at y0+4..y0+6), so the net has to sit in the real 1px gap
+    # BETWEEN those two rows, not wherever the rectangle's midpoint
+    # happens to fall -- centering generically would have drawn the net
+    # line directly through row 1's own pips.
+    net_y = min(y1 - 1, y0 + 3)
+    for x in range(x0, x1):
+        put_px(buf, x, net_y, COURT_HARD_LINE)
+    # Real court sidelines -- a thin light line just inside each edge,
+    # the honest minimum that reads as "a bounded court" rather than an
+    # arbitrary colored rectangle.
+    for y in range(y0, y1):
+        put_px(buf, x0, y, rim(COURT_HARD_LINE, 0.35))
+        put_px(buf, x1 - 1, y, rim(COURT_HARD_LINE, 0.35))
+
+
 def draw_outs(buf, x, y, outs, on_col=OUT_ON, off_col=OUT_OFF):
     """Outs as filled/hollow pips, the way a real scoreboard shows them."""
     for i in range(3):
@@ -15613,6 +15662,7 @@ class SportsEngine(Browsable, BigMomentSource):
             draw_text_centered(buf, y, "NOT STARTED", self.INK_DIM, x_min=3)
             y += 7
         if any(c.get("sets") for c in comps[:2]) or ev.get("best_of") in (3, 5):
+            draw_tennis_court_hero(buf, 2, y, WIDTH - 2, y + 9)
             draw_tennis_set_pips(buf, y, comps[:2], best_of=ev.get("best_of"))
             y += 10
 
@@ -15921,7 +15971,7 @@ class SportsEngine(Browsable, BigMomentSource):
         elif ev["state"] == "pre":
             y = draw_text_on_empty(buf, y, "NOT STARTED", self.INK_DIM)
         if any(c.get("sets") for c in comps) or ev.get("best_of") in (3, 5):
-            fill_plate(buf, 2, y, WIDTH - 2, y + 9)
+            draw_tennis_court_hero(buf, 2, y, WIDTH - 2, y + 9)
             draw_tennis_set_pips(buf, y, comps, best_of=ev.get("best_of"))
             y += 10
 
@@ -17786,7 +17836,7 @@ class SportsEngine(Browsable, BigMomentSource):
         elif ev["state"] == "pre":
             y = draw_text_on_empty(buf, y, "NOT STARTED", self.INK_DIM)
         if any(c.get("sets") for c in comps) or ev.get("best_of") in (3, 5):
-            fill_plate(buf, 2, y, WIDTH - 2, y + 9)
+            draw_tennis_court_hero(buf, 2, y, WIDTH - 2, y + 9)
             draw_tennis_set_pips(buf, y, comps, best_of=ev.get("best_of"))
             y += 10
 
