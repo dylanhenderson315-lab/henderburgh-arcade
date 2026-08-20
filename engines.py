@@ -17347,6 +17347,15 @@ class SportsEngine(Browsable, BigMomentSource):
                 if scorer:
                     y = draw_text_on_empty(buf, y, fit_person(scorer, WIDTH - 8), self.INK)
 
+        # Real per-player leaders (2026-08-20) -- confirmed live 2026-08-17
+        # that ESPN's soccer summary populates real headline categories
+        # here (totalShots/accuratePasses/defensiveInterventions/saves,
+        # see _LEADER_CAT_LABEL), the same shared block football/
+        # basketball/hockey's own detail views already draw -- soccer had
+        # simply never called it, a real completeness gap found while
+        # comparing every live sport's detail view against baseball's.
+        y = self._draw_leaders(buf, ev, y)
+
         # Odds restored 2026-08-11 (completeness review) -- see
         # basketball's own detail renderer for the full note on why.
         odds_line = self._footer_odds_text(ev)
