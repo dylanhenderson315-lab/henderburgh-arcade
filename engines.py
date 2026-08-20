@@ -17543,23 +17543,47 @@ class SportsEngine(Browsable, BigMomentSource):
                                        self.INK)
             y = self._draw_last_play(buf, ev, y)
             y = self._draw_period_line(buf, ev, y)
-            # Power-play + faceoff% -- real fields, confirmed live on
+            # Power-play + faceoff% TUG-OF-WAR BAR (2026-08-20, direct
+            # owner ask: "visually stunning... intuitive and genius like
+            # MLB" for every sport). Real fields, confirmed live on
             # boxscore.teams[].statistics[] (powerPlayGoals/
             # powerPlayOpportunities/faceoffPercent), NOT on `situation`
             # where this renderer previously (correctly) declined to
-            # guess. Home team's real numbers only -- one line, not a
-            # full stat table, matching this card's already-tight budget.
+            # guess. faceoffPercent is real per-side data (each team's
+            # own win rate, summing to ~100 across both sides) -- the
+            # same shape possession/FG% already proved out for soccer
+            # and basketball, so it gets the same two-color split bar
+            # rather than a bare home-only number.
+            # HONEST GAP: no live NHL game existed when this bar was
+            # built (see the FOOTBALL/BASKETBALL section's own honest-
+            # gap precedent) -- built correctly against the confirmed
+            # real field/shape, unverified against a genuinely live
+            # NHL faceoffPercent pair. Verify the first session a real
+            # NHL game is live.
             if y <= HEIGHT - 5:
-                box = self._team_box_side(ev, "home")
-                pp = box.get("powerPlayGoals"), box.get("powerPlayOpportunities")
-                fo = box.get("faceoffPercent")
-                bits = []
-                if pp[0] is not None and pp[1] is not None:
-                    bits.append(f"PP {pp[0]}/{pp[1]}")
-                if fo:
-                    bits.append(f"FO {fo}")
-                if bits:
-                    y = draw_text_on_empty(buf, y, fit_text(" ".join(bits), WIDTH - 8),
+                home_box = self._team_box_side(ev, "home")
+                away_box = self._team_box_side(ev, "away")
+                home_fo = self._pct_value(home_box.get("faceoffPercent"))
+                away_fo = self._pct_value(away_box.get("faceoffPercent"))
+                pp = home_box.get("powerPlayGoals"), home_box.get("powerPlayOpportunities")
+                if home_fo is not None and away_fo is not None:
+                    home_c = next((c.get("color") for c in comps if c.get("home_away") == "home"), None) or self.HERO_INK
+                    away_c = next((c.get("color") for c in comps if c.get("home_away") == "away"), None) or self.INK_DIM
+                    total = home_fo + away_fo
+                    frac = home_fo / total if total > 0 else 0.5
+                    bar_w = WIDTH - 8
+                    split = max(0, min(bar_w, int(round(bar_w * frac))))
+                    for bx in range(bar_w):
+                        put_px(buf, 4 + bx, y, away_c if bx >= split else home_c)
+                        put_px(buf, 4 + bx, y + 1, away_c if bx >= split else home_c)
+                    y += 3
+                    tail = f"FO {home_fo:.0f}-{away_fo:.0f}"
+                    if pp[0] is not None and pp[1] is not None:
+                        tail += f"  PP {pp[0]}/{pp[1]}"
+                    if y <= HEIGHT - 5:
+                        y = draw_text_on_empty(buf, y, fit_text(tail, WIDTH - 8), self.INK_DIM)
+                elif pp[0] is not None and pp[1] is not None:
+                    y = draw_text_on_empty(buf, y, fit_text(f"PP {pp[0]}/{pp[1]}", WIDTH - 8),
                                            self.INK_DIM)
         else:
             draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
@@ -17987,27 +18011,50 @@ class SportsEngine(Browsable, BigMomentSource):
             y = self._draw_last_play(buf, ev, y)
             y = self._draw_period_line(buf, ev, y)
             self._draw_win_pct(buf, ev)
-            # Team shooting line -- real fields, confirmed live on
-            # boxscore.teams[].statistics[] (fieldGoalPct/
-            # totalRebounds/assists). No bonus/foul/timeout guess (see
-            # docstring above) -- this is a DIFFERENT, confirmed real
-            # field set (team totals, not situation), not a reversal of
-            # that standing gap.
+            # Real live FG% TUG-OF-WAR BAR (2026-08-20, direct owner
+            # ask: "visually stunning... intuitive and genius like MLB"
+            # for every sport). Same real fields as before (boxscore.
+            # teams[].statistics[].fieldGoalPct, confirmed live on a
+            # real WNBA game earlier this project), now drawn as a real
+            # two-color split bar reusing the exact visual language
+            # soccer's possession bar just established -- one "a number
+            # alone says less than a picture" convention, not two. No
+            # bonus/foul/timeout guess (see docstring above) -- this is
+            # a DIFFERENT, confirmed real field set (team shooting
+            # totals, not situation), not a reversal of that gap.
             if y <= HEIGHT - 5:
-                box = self._team_box_side(ev, "home")
-                fg = box.get("fieldGoalPct")
-                reb = box.get("totalRebounds")
-                ast = box.get("assists")
-                bits = []
-                if fg:
-                    bits.append(f"FG {fg}")
-                if reb:
-                    bits.append(f"REB {reb}")
-                if ast:
-                    bits.append(f"AST {ast}")
-                if bits:
-                    y = draw_text_on_empty(buf, y, fit_text(" ".join(bits), WIDTH - 8),
-                                           self.INK_DIM)
+                home_box = self._team_box_side(ev, "home")
+                away_box = self._team_box_side(ev, "away")
+                home_fg = self._pct_value(home_box.get("fieldGoalPct"))
+                away_fg = self._pct_value(away_box.get("fieldGoalPct"))
+                if home_fg is not None and away_fg is not None:
+                    home_c = next((c.get("color") for c in comps if c.get("home_away") == "home"), None) or self.HERO_INK
+                    away_c = next((c.get("color") for c in comps if c.get("home_away") == "away"), None) or self.INK_DIM
+                    total = home_fg + away_fg
+                    frac = home_fg / total if total > 0 else 0.5
+                    bar_w = WIDTH - 8
+                    split = max(0, min(bar_w, int(round(bar_w * frac))))
+                    for bx in range(bar_w):
+                        put_px(buf, 4 + bx, y, away_c if bx >= split else home_c)
+                        put_px(buf, 4 + bx, y + 1, away_c if bx >= split else home_c)
+                    y += 3
+                    reb_h, reb_a = home_box.get("totalRebounds"), away_box.get("totalRebounds")
+                    tail = f"FG {home_fg:.0f}-{away_fg:.0f}"
+                    if reb_h and reb_a:
+                        tail += f"  REB {reb_h}-{reb_a}"
+                    if y <= HEIGHT - 5:
+                        y = draw_text_on_empty(buf, y, fit_text(tail, WIDTH - 8), self.INK_DIM)
+                else:
+                    reb = home_box.get("totalRebounds")
+                    ast = home_box.get("assists")
+                    bits = []
+                    if reb:
+                        bits.append(f"REB {reb}")
+                    if ast:
+                        bits.append(f"AST {ast}")
+                    if bits:
+                        y = draw_text_on_empty(buf, y, fit_text(" ".join(bits), WIDTH - 8),
+                                               self.INK_DIM)
         else:
             draw_text_centered(buf, 6, fit_text(head, WIDTH - 8),
                                color_on_dark(accent), x_min=3)
