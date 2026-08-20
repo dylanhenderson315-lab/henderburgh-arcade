@@ -15218,7 +15218,7 @@ class SportsEngine(Browsable, BigMomentSource):
                 y = 14 + i * 10
                 pos = str(c["place"] or i + 1)
                 draw_text3x5(buf, 3, y, fit_text(pos, 8), self.INK_DIM)
-                draw_text3x5(buf, 13, y, fit_text(c["abbr"], 34), self.HERO_INK)
+                draw_text3x5(buf, 13, y, fit_person(c["abbr"], 34), self.HERO_INK)
                 sc = c["score"] or "-"
                 draw_text3x5(buf, WIDTH - 3 - text_w(sc), y, sc,
                              self.WIN if str(sc).startswith("-") else self.INK)
@@ -15246,10 +15246,17 @@ class SportsEngine(Browsable, BigMomentSource):
             # on their own line rather than overflowing.
             wide = bool(sc_txt) and text_w(sc_txt, 2) > 22
             if wide:
-                draw_text3x5(buf, 6, y, fit_text(c["abbr"], WIDTH - 12), col)
+                draw_text3x5(buf, 6, y, fit_person(c["abbr"], WIDTH - 12), col)
                 draw_text3x5(buf, 6, y + 6, fit_text(sc_txt, WIDTH - 10), self.INK)
             else:
-                name = fit_text(c["abbr"], WIDTH - 12 - (text_w(sc_txt, 2) if sc_txt else 0) - 8, 2)
+                # Real bug fixed 2026-08-20 (same class as the tennis
+                # scorebug fix above): fit_text() drops whole trailing
+                # words, so a real person name in this GENERIC fallback
+                # (reached by any sport without its own dedicated
+                # renderer -- racing, or a future ESPN sport this
+                # project hasn't special-cased yet) could collapse to a
+                # bare initial. fit_person() tries the surname first.
+                name = fit_person(c["abbr"], WIDTH - 12 - (text_w(sc_txt, 2) if sc_txt else 0) - 8, 2)
                 draw_text3x5(buf, 6, y, name, col, scale=2)
                 if sc_txt:
                     draw_text3x5(buf, WIDTH - 3 - text_w(sc_txt, 2), y, sc_txt, col, scale=2)
@@ -15876,7 +15883,18 @@ class SportsEngine(Browsable, BigMomentSource):
         # Live uses the same black-cutout scorebug as DETAIL. PRE/POST
         # use the empty name/record card (seed already on the rail).
         if ev["live"]:
-            y = self._draw_scoreline(buf, ev, 10, accent)
+            # Real bug fixed 2026-08-20: tennis's `abbr` is a real
+            # person name, not a team code, and _draw_scoreline()'s
+            # shared default (name_w=30, sized for "NYY") truncated it
+            # hard -- see draw_scorebug_bars()'s own docstring for the
+            # confirmed-live "two players both show as 'F.'" bug this
+            # closes. Tennis competitors carry no bare score/record
+            # (both confirmed None on the real payload) to compete for
+            # the freed width, same reasoning DETAIL's own call already
+            # uses -- called directly rather than through
+            # _draw_scoreline() so only tennis's MAIN row opts in.
+            poss = (ev.get("situation") or {}).get("possession")
+            y = draw_scorebug_bars(buf, 10, comps, row_h=8, possession=poss, name_w=52)
         else:
             y = self._draw_empty_matchup(buf, ev, 10, comps)
 
@@ -16247,8 +16265,18 @@ class SportsEngine(Browsable, BigMomentSource):
                 draw_text3x5(buf, nx, y + 3, stag, self.INK_DIM)
                 nx += text_w(stag) + 2
             avail = WIDTH - 4 - nx - (text_w(sc_txt, 2) if sc_txt else 0)
-            name = c.get("abbr") or fit_person(c.get("full") or "", avail, 2)
-            draw_text3x5(buf, nx, y, fit_text(name, avail, 2), col, scale=2)
+            # Real bug fixed 2026-08-20, same class as the tennis
+            # scorebug fix: `c.get("abbr") or ...` took the RAW,
+            # unfitted abbr whenever present (every sport has one) and
+            # ran it through fit_text() at scale=2 -- fit_text drops
+            # whole trailing words, so a real person name ("F.
+            # AUGER-ALIASSIME") collapsed to a bare initial the same
+            # way the DETAIL scorebug did. A team code ("NYY") always
+            # fits and is unaffected; this only changes behavior for
+            # sports whose `abbr` is a real name (tennis).
+            name_src = c.get("abbr") or c.get("full") or ""
+            name = fit_person(name_src, avail, 2)
+            draw_text3x5(buf, nx, y, name, col, scale=2)
             if sc_txt:
                 draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y,
                              sc_txt, (255, 255, 255), scale=2)
