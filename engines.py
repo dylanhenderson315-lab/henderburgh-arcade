@@ -7226,8 +7226,10 @@ class SatelliteEngine(Browsable, BigMomentSource):
     # ("when do I go outside, and where do I look").
     VIEW_PASSES = 0
     VIEW_SCOPE = 1
+    VIEW_GROUNDTRACK = 2      # real ISS subpoint + real recent ground track on a world map
     SCOPE_TICKS = 240          # ~12s on the dome before returning to passes
     SWEEP_DEG_PER_TICK = 3.0
+    GROUND_TRAIL_MAX = 40      # ~ a real 8min of history at the ~12s wheretheiss.at cadence
 
     def __init__(self):
         self.score = 0
@@ -7263,6 +7265,8 @@ class SatelliteEngine(Browsable, BigMomentSource):
         self._iss_trail_sample = None
         self._lat, self._lon = None, None
         self.conjunction = None
+        self._ground_trail = deque(maxlen=self.GROUND_TRAIL_MAX)
+        self._ground_trail_sample = None
         self._init_scroll()
         self._init_big_moments()
         # Seen-pass cursor for _detect_go_outside_pass() -- same one-shot
@@ -7309,15 +7313,31 @@ class SatelliteEngine(Browsable, BigMomentSource):
         self.cur = (self.cur + direction) % len(ps)
         self.hold = 0
 
+    def _view_order(self):
+        """PASSES -> SCOPE always; GROUNDTRACK joins the cycle only
+        while a real ISS position has actually resolved -- same "absent
+        data means absent from the cycle" rule MoonEngine's own moons
+        view already follows, rather than offering a view with nothing
+        real to show."""
+        order = [self.VIEW_PASSES, self.VIEW_SCOPE]
+        pos = self.data.get("pos")
+        if pos and isinstance(pos.get("lat"), (int, float)):
+            order.append(self.VIEW_GROUNDTRACK)
+        return order
+
+    def _cycle_view(self, direction=1):
+        order = self._view_order()
+        i = order.index(self.view) if self.view in order else 0
+        self.view = order[(i + direction) % len(order)]
+        self.hold = 0
+
     def input(self, cmd):
         if self._browse_input(cmd):
             return
         if cmd in ("up", "down"):
             # SatelliteEngine is not VERTICAL_BROWSE, so Browsable._axis()
-            # leaves up/down free to flip to the full-sky dome and back.
-            self.view = (self.VIEW_SCOPE if self.view == self.VIEW_PASSES
-                         else self.VIEW_PASSES)
-            self.hold = 0
+            # leaves up/down free to cycle PASSES -> SCOPE -> GROUNDTRACK.
+            self._cycle_view(1 if cmd == "up" else -1)
         elif cmd in ("rotate", "drop"):
             self.cycling = not self.cycling
 
@@ -7367,6 +7387,21 @@ class SatelliteEngine(Browsable, BigMomentSource):
         else:
             self._iss_trail.clear()
             self._iss_trail_sample = None
+        # Real ISS ground track -- the real (lat, lon) subpoint history
+        # from wheretheiss.at, distinct from the dome's own pixel-space
+        # `_iss_trail` above (that one only exists while the ISS is
+        # above THIS observer's horizon; this one is real regardless of
+        # local visibility, since the ISS orbits continuously). Sampled
+        # only on a genuinely NEW real fetch (same dedup idiom as the
+        # dome trail) -- satellite.FEED's own refresh cadence, not every
+        # render tick, so the trail is real observed positions, not
+        # interpolated ones.
+        pos = self.data.get("pos")
+        if pos and isinstance(pos.get("lat"), (int, float)) and isinstance(pos.get("lon"), (int, float)):
+            sample = (round(pos["lat"], 3), round(pos["lon"], 3))
+            if sample != self._ground_trail_sample:
+                self._ground_trail_sample = sample
+                self._ground_trail.append(sample)
         ps = self.sky.get("passes") or []
         if ps:
             self.cur %= len(ps)
@@ -7966,6 +8001,65 @@ class SatelliteEngine(Browsable, BigMomentSource):
         draw_text_centered(buf, 58, fit_text(lbl, WIDTH - 4), (86, 94, 116))
         return bytes(buf)
 
+    def _frame_groundtrack(self):
+        """Real ISS ground track on a real world map -- a THIRD dome-
+        adjacent view, direct owner ask ("go crazy... innovate"), reusing
+        flights.py's own real embedded coastline + equirectangular
+        projection (world_xy/_fit_bounds/_draw_geo_polyline/
+        _draw_map_box, built for the flight-path map) rather than
+        inventing a second map system. Answers a genuinely different
+        question from the dome ("where is the ISS above the WHOLE
+        Earth right now, and where has it recently been") -- the dome
+        only ever answers "is it above THIS observer's horizon".
+
+        Bounds are FITTED to the real home location + the real recent
+        ground-track samples (same "a whole-Earth window makes a short
+        real path a 3px blob" lesson _fit_bounds()'s own docstring
+        already states for flight routes) -- an antimeridian-spanning
+        real track (the ISS crosses it routinely) falls back to the
+        whole-Earth window automatically, never a broken partial one."""
+        buf = blank()
+        fill(buf, self.BG)
+        pos = self.data.get("pos")
+        draw_header(buf, "ISS TRACK", self.ACCENT,
+                    stale=bool(self.data.get("pos_age") and self.data["pos_age"] > 60))
+
+        x0, y0, w, h = 0, 10, WIDTH, 44
+        box = (x0, y0, x0 + w - 1, y0 + h - 1)
+        fit_pts = list(self._ground_trail)
+        if self._lat is not None and self._lon is not None:
+            fit_pts.append((self._lat, self._lon))
+        bounds = _fit_bounds(fit_pts, w, h)
+
+        for seg in flights.WORLD_COASTLINE:
+            _draw_geo_polyline(buf, seg, WORLD_COAST, x0, y0, w, h, bounds)
+
+        if len(self._ground_trail) >= 2:
+            _draw_geo_polyline(buf, list(self._ground_trail), WORLD_FLOWN, x0, y0, w, h, bounds)
+
+        if self._lat is not None and self._lon is not None:
+            _draw_map_box(buf, *world_xy(self._lat, self._lon, x0, y0, w, h, bounds),
+                          color=WORLD_ORIGIN, filled=False, box=box)
+
+        if pos and isinstance(pos.get("lat"), (int, float)) and isinstance(pos.get("lon"), (int, float)):
+            ix, iy = world_xy(pos["lat"], pos["lon"], x0, y0, w, h, bounds)
+            xi, yi = int(round(ix)), int(round(iy))
+            for dx, dy in ((0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)):
+                px, py = xi + dx, yi + dy
+                if box[0] <= px <= box[2] and box[1] <= py <= box[3]:
+                    put_px(buf, px, py, self.ISS)
+            alt_km = pos.get("alt_km")
+            spd = pos.get("vel_kmh")
+            # KM/S, not KM/H -- real orbital speed is ~27500km/h, and
+            # that plus a real 3-4 digit altitude overflows the panel
+            # width (caught by render_audit.py's live-data driver, not
+            # by eye). KM/S keeps both real numbers short and legible.
+            tail = f"{alt_km:.0f}KM  {spd / 3600.0:.1f}KM/S" if isinstance(alt_km, (int, float)) and isinstance(spd, (int, float)) else ""
+            draw_text_centered(buf, 58, fit_text(tail, WIDTH - 4), (86, 94, 116))
+        else:
+            draw_text_centered(buf, 40, "NO SIGNAL" if self.data.get("err") else "LOOKING", self.INK_DIM)
+        return bytes(buf)
+
     def _sky_empty_reason(self):
         """Why the pass list / dome is empty -- never conflate a dead
         catalogue with a quiet sky. Same tri-state follow-flight uses:
@@ -7984,6 +8078,8 @@ class SatelliteEngine(Browsable, BigMomentSource):
 
         if self.view == self.VIEW_SCOPE:
             return self._frame_scope()
+        if self.view == self.VIEW_GROUNDTRACK:
+            return self._frame_groundtrack()
 
         ps = self.sky.get("passes") or []
         if not ps:
@@ -11880,8 +11976,7 @@ class SpaceHubEngine(Browsable):
         if self._browse_input(cmd):
             return
         if cmd == "rotate" and self.category == "sky":
-            self._sat.view = (self._sat.VIEW_SCOPE if self._sat.view == self._sat.VIEW_PASSES
-                              else self._sat.VIEW_PASSES)
+            self._sat._cycle_view()
         elif cmd == "rotate" and self.category == "planets":
             self._moon._cycle_planet_view()
         elif cmd == "drop" and self.category == "sky":
