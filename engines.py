@@ -1523,6 +1523,43 @@ def draw_icon_tennis(buf, x, y, color, scale=1):
     _draw_offsets(buf, x, y, ((1, 1), (3, 3)), color, scale)
 
 
+def draw_podium_ladder(buf, x0, y0, cols):
+    """A real podium-HEIGHT ladder -- P2/P1/P3 left-to-right (the actual
+    broadcast podium arrangement, tallest block in the middle), each
+    column a filled bar whose HEIGHT encodes real finishing position,
+    not just a color chip. 2026-08-20, direct owner ask ("visually
+    stunning... genius like MLB") applied to racing -- the one sport
+    family CLAUDE.md's own notes flagged as deliberately left generic,
+    with no dedicated hero treatment.
+
+    `cols` is a list of up to 3 `(color, height_px)` pairs already in
+    REAL P1/P2/P3 order (position 0 = P1) -- this function only handles
+    the P2/P1/P3 REORDERING and the geometry, it invents no data. Fewer
+    than 3 entries (a partial/only-known podium) just draws fewer bars,
+    never a placeholder block for an unknown position.
+
+    Deliberately NOT a real track-shape silhouette: this project has no
+    real per-circuit geometry data (no confirmed source for F1/NASCAR
+    track layouts was found), and inventing one would violate the
+    standing "never invent a shape claiming to be real geometry" rule
+    every other hero backdrop in this project follows. A height-coded
+    ladder is honest set-dressing built entirely from real finishing
+    order, the same category of derived-but-real signal `golfer_move()`
+    /`_route_status()` already use elsewhere.
+    """
+    order = [1, 0, 2][:len(cols)] if len(cols) >= 2 else list(range(len(cols)))
+    bar_w = 8
+    gap = 2
+    total_w = len(order) * bar_w + (len(order) - 1) * gap
+    x = x0 - total_w // 2
+    for idx in order:
+        color, h = cols[idx]
+        for dx in range(bar_w):
+            for dy in range(h):
+                put_px(buf, x + dx, y0 - dy, color)
+        x += bar_w + gap
+
+
 # Dispatch by SportsEngine's own normalized `sport` key (see SPORT_ACCENT).
 # Baseball is deliberately absent -- draw_diamond()/draw_outs() are its
 # existing, already-shipped glyph and are reused as-is (see
@@ -11963,7 +12000,19 @@ class RacingEngine:
         y = 11
         draw_text3x5(buf, 2, y, fit_text(last["name"] or "", WIDTH - 4), self.INK)
         y += 8
-        for i, p in enumerate(last.get("podium") or []):
+        # Real podium-HEIGHT ladder (2026-08-20, "genius like MLB" pass
+        # applied to the one sport family CLAUDE.md flagged as
+        # deliberately left generic). Real finishing order only -- see
+        # draw_podium_ladder()'s own docstring for why this is a height
+        # ladder and not an invented track silhouette. Own y-cursor slot
+        # so it can never collide with the unchanged text loop below.
+        podium = last.get("podium") or []
+        if podium:
+            cols = [(self.PODIUM_COL[i] if i < 3 else self.INK, 9 - 3 * min(i, 2))
+                    for i, p in enumerate(podium[:3])]
+            draw_podium_ladder(buf, WIDTH // 2, y + 9, cols)
+            y += 12
+        for i, p in enumerate(podium):
             col = self.PODIUM_COL[i] if i < 3 else self.INK
             label = f"{p['pos']} {p['code'] or p['family_name'] or '?'}"
             draw_text3x5(buf, 2, y, fit_text(label, 30), col)
