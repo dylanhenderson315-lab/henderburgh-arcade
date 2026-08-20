@@ -7262,6 +7262,7 @@ class SatelliteEngine(Browsable, BigMomentSource):
         self._iss_trail = deque(maxlen=12)
         self._iss_trail_sample = None
         self._lat, self._lon = None, None
+        self.conjunction = None
         self._init_scroll()
         self._init_big_moments()
         # Seen-pass cursor for _detect_go_outside_pass() -- same one-shot
@@ -7342,6 +7343,7 @@ class SatelliteEngine(Browsable, BigMomentSource):
         lat, lon, _lbl = satellite.FEED.get_location()
         self._lat, self._lon = lat, lon
         self.sky = skypass.FEED.get(lat, lon)
+        self.conjunction = self._detect_conjunction()
         # ISS comet trail -- sample the real current dome position every
         # tick the ISS is genuinely above the horizon (not just
         # `visible`, since the trail shows real sky position, not just
@@ -7728,6 +7730,34 @@ class SatelliteEngine(Browsable, BigMomentSource):
             return None
         return max(0.0, min(1.0, (90.0 - el_deg) / 90.0))
 
+    CONJUNCTION_GAP_S = 300.0   # real passes overlapping (or within 5min) count as a "double pass"
+
+    def _detect_conjunction(self):
+        """Two real DIFFERENT bright satellites visibly crossing the sky
+        at close to the same time -- a genuine "double pass" worth
+        flagging, derived entirely from real sgp4-propagated pass data
+        this engine already fetches every tick (skypass.predict(), read
+        off `self.sky["passes"]`). Two passes "overlap" when their real
+        [rise, set] windows are within CONJUNCTION_GAP_S of each other --
+        covers both a genuine simultaneous overlap and two passes close
+        enough back-to-back that stepping outside once catches both.
+        Only the SOONEST real qualifying pair is reported; never invents
+        a pairing that isn't there. Lives HERE (not in SpaceHubEngine)
+        so both the standalone `satellite` mode and the SPACE hub's SKY
+        category get it for free from one real computation, not two."""
+        passes = (self.sky or {}).get("passes") or []
+        if len(passes) < 2:
+            return None
+        ordered = sorted(passes, key=lambda p: p["rise"])
+        for i in range(len(ordered) - 1):
+            a, b = ordered[i], ordered[i + 1]
+            if a.get("norad_id") == b.get("norad_id"):
+                continue
+            gap = (b["rise"] - a["set"]).total_seconds()
+            if gap <= self.CONJUNCTION_GAP_S:
+                return {"a": a.get("name"), "b": b.get("name"), "rise": a["rise"]}
+        return None
+
     # Real J2000 catalog coordinates (RA hours, Dec degrees, apparent
     # visual magnitude) for the 20 brightest real stars in Earth's sky --
     # the same real reference-table category as SATURN_RING_BANDS/
@@ -7801,7 +7831,15 @@ class SatelliteEngine(Browsable, BigMomentSource):
         objs = self.sky.get("sky_now") or []
         buf = blank()
         fill(buf, self.BG)
-        draw_header(buf, "SKY", self.ACCENT, right_tag=f"{len(objs)}",
+        # A real conjunction adds "2X" to the count -- deliberately the
+        # existing object-count slot, not a new corner element, since
+        # draw_header() already measures this slot's real width before
+        # laying out the title, so appending here can never introduce a
+        # new collision risk the way a hand-placed badge could.
+        tag = f"{len(objs)}"
+        if self.conjunction:
+            tag += " 2X"
+        draw_header(buf, "SKY", self.ACCENT, right_tag=tag,
                     stale=bool(self.sky.get("sky_now_age")
                                and self.sky["sky_now_age"] > 30))
 
@@ -11826,38 +11864,10 @@ class SpaceHubEngine(Browsable):
             self._launch_idx %= len(launches)
         else:
             self._launch_idx = 0
-        conjunction = self._detect_conjunction()
         self.events = {"aurora_kp": aurora.get("kp"), "aurora_visible": visible,
                         "shower": shower, "launch": launch or None, "launch_mi": launch_mi,
-                        "launches": launches, "conjunction": conjunction}
+                        "launches": launches, "conjunction": self._sat.conjunction}
         self.score = self._sat.score + self._moon.score
-
-    CONJUNCTION_GAP_S = 300.0   # real passes overlapping (or within 5min) count as a "double pass"
-
-    def _detect_conjunction(self):
-        """Two real DIFFERENT bright satellites visibly crossing the
-        sky at close to the same time -- a genuine "double pass" worth
-        flagging, derived entirely from real sgp4-propagated pass data
-        this project already fetches (skypass.predict(), read here off
-        SatelliteEngine's own already-ticked `.sky["passes"]`). Two
-        passes "overlap" when their real [rise, set] windows are within
-        CONJUNCTION_GAP_S of each other -- covers both a genuine
-        simultaneous overlap and two passes close enough back-to-back
-        that stepping outside once catches both. Only the SOONEST real
-        qualifying pair is reported; never invents a pairing that isn't
-        there."""
-        passes = (self._sat.sky or {}).get("passes") or []
-        if len(passes) < 2:
-            return None
-        ordered = sorted(passes, key=lambda p: p["rise"])
-        for i in range(len(ordered) - 1):
-            a, b = ordered[i], ordered[i + 1]
-            if a.get("norad_id") == b.get("norad_id"):
-                continue
-            gap = (b["rise"] - a["set"]).total_seconds()
-            if gap <= self.CONJUNCTION_GAP_S:
-                return {"a": a.get("name"), "b": b.get("name"), "rise": a["rise"]}
-        return None
 
     CONJUNCTION_COLOR = (255, 120, 220)   # distinct from every other events-view color, a rare event
     KP_GAUGE_COLOR = [(90, 200, 130), (90, 200, 130), (90, 200, 130), (150, 200, 90),
