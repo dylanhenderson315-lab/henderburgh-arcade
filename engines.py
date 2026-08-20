@@ -11994,6 +11994,7 @@ class RacingEngine:
     SILVER = (200, 205, 215)
     BRONZE = (200, 140, 80)
     PODIUM_COL = [GOLD, SILVER, BRONZE]
+    CAUTION_PIP_CAP = 10       # leaves real room for a "+N" overflow tail
 
     def __init__(self):
         self.score = 0
@@ -12096,6 +12097,27 @@ class RacingEngine:
             tail = f"{last['laps']} LAPS" + (f"  {cau} CAUTIONS" if isinstance(cau, int) else "")
             draw_text3x5(buf, 2, y, fit_text(tail, WIDTH - 4), self.INK)
             y += 7
+            # Real caution-flag pip row (2026-08-20, same "genius like
+            # MLB" pass as the F1 podium ladder) -- one real yellow pip
+            # per real reported caution, nothing invented. No fixed real
+            # "max cautions per race" convention exists the way 3 balls/
+            # 2 strikes does for baseball, so this caps the drawn pips at
+            # CAUTION_PIP_CAP and folds any real excess into a "+N" text
+            # tail rather than silently drawing an unbounded or
+            # off-panel row -- same cap-then-overflow-as-text idiom
+            # draw_dots() already uses for a rotation with >10 entries.
+            if isinstance(cau, int) and cau > 0:
+                shown = min(cau, self.CAUTION_PIP_CAP)
+                pip_w = 3
+                total_w = shown * pip_w - 1
+                px0 = (WIDTH - total_w) // 2
+                for i in range(shown):
+                    for dy in range(2):
+                        put_px(buf, px0 + i * pip_w, y + dy, (255, 200, 40))
+                if cau > self.CAUTION_PIP_CAP:
+                    draw_text3x5(buf, px0 + total_w + 2, y,
+                                 f"+{cau - self.CAUTION_PIP_CAP}", self.INK_DIM)
+                y += 4
 
         y += 2
         nxt = self.nascar.get("next_race")
