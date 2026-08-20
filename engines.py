@@ -1007,10 +1007,25 @@ def _comp_matches_tag(c, tag):
     return False
 
 
-def draw_scorebug_bars(buf, y, comps, row_h=8, possession=None):
+def draw_scorebug_bars(buf, y, comps, row_h=8, possession=None, name_w=30):
     """Broadcast scorebug: team-color bar, BLACK cutout name/record,
     boxed white score. White-on-color clashed with the score on the
-    physical panel. Returns the y after both rows."""
+    physical panel. Returns the y after both rows.
+
+    `name_w` (2026-08-20): a real, confirmed-live bug -- tennis reuses
+    this same shared bar for its own competitors, but `abbr` there is a
+    real PERSON name ("F. AUGER-ALIASSIME"), not a short team code, and
+    the default 30px budget (sized for "NYY"/"TOR") silently truncated
+    it down to a bare first initial. Two real competitors sharing the
+    same first letter (F. Auger-Aliassime vs F. Tiafoe, a real live
+    match) then rendered as two identical, indistinguishable "F."
+    labels -- confirmed live, not a hypothetical. Every OTHER sport
+    keeps the original 30px default (team codes fit it, and widening it
+    there risks colliding with the real record text those sports DO
+    show); only tennis's own call site opts into a wider budget, since
+    tennis competitors carry no bare `score` and no `record` (both
+    confirmed None on the real payload), leaving real unused width this
+    row already has."""
     ink = (0, 0, 0)
     for c in (comps or [])[:2]:
         bar = bar_for_cutout(c.get("color") or (70, 76, 92))
@@ -1027,7 +1042,18 @@ def draw_scorebug_bars(buf, y, comps, row_h=8, possession=None):
             stag = str(seed)
             draw_text3x5(buf, nx, y + 2, stag, (28, 28, 32))
             nx += text_w(stag) + 2
-        abbr_txt = fit_text(c.get("abbr") or "", 30, 1)
+        # fit_person, not fit_text: a real second bug in the same real
+        # tennis match that surfaced name_w's own fix -- "F. AUGER-
+        # ALIASSIME" (19 real chars) still didn't fit even the widened
+        # tennis budget, and fit_text's "drop whole trailing words"
+        # rule threw away the entire surname, leaving the bare "F." this
+        # whole fix exists to stop. fit_person tries the SURNAME alone
+        # before cutting anything -- exactly the rule this project's own
+        # font-truncation lesson already established for names. A
+        # single-token team code (no space to split on) behaves
+        # identically to fit_text here, so this is safe for every other
+        # sport too, not just tennis.
+        abbr_txt = fit_person(c.get("abbr") or "", name_w, 1)
         draw_text3x5(buf, nx, y + 2, abbr_txt, ink)
         sc = c.get("score")
         sc_txt = "" if sc is None else str(sc)
@@ -17681,7 +17707,12 @@ class SportsEngine(Browsable, BigMomentSource):
 
         comps = ev["competitors"][:2]
         if ev["live"]:
-            y = draw_scorebug_bars(buf, 13, comps, row_h=8)
+            # name_w=52: tennis competitors carry no bare `score` and no
+            # `record` (both real-confirmed None), so the row has real
+            # unused width past the default 30px team-code budget -- see
+            # draw_scorebug_bars()'s own docstring for the real bug this
+            # closes (two same-initial players both truncating to "F.").
+            y = draw_scorebug_bars(buf, 13, comps, row_h=8, name_w=52)
         else:
             y = self._draw_empty_matchup(buf, ev, 13, comps)
 
@@ -17698,16 +17729,29 @@ class SportsEngine(Browsable, BigMomentSource):
             draw_tennis_set_pips(buf, y, comps, best_of=ev.get("best_of"))
             y += 10
 
+        # Real bug fixed 2026-08-20, found while comparing every live
+        # sport's detail view against baseball's: `note` is the closest
+        # tennis equivalent to baseball's live pitcher/batter card --
+        # ESPN's own real "who's leading right now" sentence
+        # ("(17) FRANCES TIAFOE LEADS (2) FELIX AUGER-ALIASSIME 2-1")
+        # while live, or the real match-result summary once finished.
+        # It used to be LAST in the footer queue, after class_label/
+        # tournament name/venue -- three lower-value static facts that,
+        # confirmed live, routinely fill the entire remaining row
+        # budget on their own (a real tour event has all three), so the
+        # one genuinely live fact never got a turn. Draw it FIRST now,
+        # same "the moment is the content" priority every other sport's
+        # detail view already gives its own live-state facts.
+        note = ev.get("note") or ""
+        if note and y <= HEIGHT - 5:
+            y = draw_text_on_empty(buf, y, fit_text(note, WIDTH - 8), self.INK)
+
         foot_lines = [x for x in (ev.get("class_label"), ev.get("name"), ev.get("venue")) if x]
         for fline in foot_lines:
             if y > HEIGHT - 5:
                 break
             draw_text_centered(buf, y, fit_text(fline, WIDTH - 8), self.INK_DIM, x_min=3)
             y += 7
-
-        note = ev.get("note") or ""
-        if note and y <= HEIGHT - 5:
-            draw_text_centered(buf, y, fit_text(note, WIDTH - 8), self.INK_DIM, x_min=3)
 
     SPORT_DETAIL_RENDERERS["tennis"] = _render_tennis_detail
 
