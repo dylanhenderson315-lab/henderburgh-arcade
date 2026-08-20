@@ -1671,6 +1671,34 @@ def draw_dots(buf, y, n, cur, on=(150, 160, 185), off=(38, 42, 54), cap=10):
         put_px(buf, x0 + i * 3, y, on if i == (cur % n) else off)
 
 
+def draw_sparkline(buf, x0, y0, w, h, values, color):
+    """A real recent-price sparkline -- one column per real observed
+    sample, min-max normalized into a fixed h-pixel band. `values` is
+    real, oldest-first, no interpolation/smoothing/invention: a flat
+    (all-equal) series draws a flat mid-line rather than a divide-by-
+    zero guess, and fewer real samples than `w` just draws fewer
+    columns, right-aligned, rather than stretching fabricated points to
+    fill the width. 2026-08-20, ticker sparkline -- see
+    market.MarketFeed._history for where these real samples come from
+    (this project's own successful poll history, no new API)."""
+    if len(values) < 2:
+        return
+    lo, hi = min(values), max(values)
+    span = hi - lo
+    pts = values[-w:]
+    x_start = x0 + (w - len(pts))
+    prev_xy = None
+    for i, v in enumerate(pts):
+        frac = 0.5 if span <= 0 else (v - lo) / span
+        y = y0 + h - 1 - int(round(frac * (h - 1)))
+        x = x_start + i
+        if prev_xy is not None:
+            draw_line(buf, prev_xy[0], prev_xy[1], x, y, color)
+        else:
+            put_px(buf, x, y, color)
+        prev_xy = (x, y)
+
+
 # NWS severity -> alert styling. Module level because the SAME color table
 # drives both the weather mode's own full-screen rotation (draw_alert_frame)
 # and the global cross-mode banner (draw_severe_alert_banner) -- one
@@ -7241,6 +7269,17 @@ class TickerEngine(Browsable):
         draw_text3x5(buf, ax + arrow_w, 33, chg, col)
 
         self._draw_change_bar(buf, 41, pct, col)
+
+        # Real per-asset sparkline (2026-08-20, deferred polish item --
+        # "room for real per-asset detail using data already fetched, no
+        # new API"). Sits in the existing 3-row gap between the change
+        # bar and the position dots -- no other row moved. Real observed
+        # prices from this feed's own poll history (market.MarketFeed.
+        # _history), never a fabricated curve; degrades to nothing for a
+        # symbol with under 2 real samples (just added to the watchlist).
+        hist = row.get("history") or []
+        if len(hist) >= 2:
+            draw_sparkline(buf, 4, 43, WIDTH - 8, 3, hist, col)
 
         draw_dots(buf, 46, len(self.rows), self.cur, on=accent)
         draw_divider(buf, 49)

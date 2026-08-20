@@ -26,6 +26,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "market_config.json"
@@ -107,6 +108,11 @@ SYMBOL_TO_COINGECKO_ID = {
 REFRESH = 60.0          # seconds between refreshes
 CONFIG_CHECK = 10.0     # seconds between checking whether the config changed
 IDLE_STOP = 120.0       # stop polling if nobody has read for this long
+HISTORY_MAX = 20        # real observed prices kept per symbol, ~20min of
+                        # real REFRESH-cadence samples -- no new API, this
+                        # is purely retaining prices this feed already
+                        # fetches every real poll (2026-08-20, ticker
+                        # sparkline)
 TIMEOUT = 8.0
 _UA = "Mozilla/5.0 (HenderburghArcade)"
 
@@ -276,6 +282,9 @@ class MarketFeed:
     def __init__(self):
         self._lock = threading.Lock()
         self._rows = []
+        self._history = {}         # sym -> deque of real observed prices,
+                                    # oldest first, purely retained from
+                                    # this feed's own successful polls
         self._updated = 0.0        # when we last got real data
         self._last_try = 0.0
         self._last_read = 0.0
@@ -295,6 +304,11 @@ class MarketFeed:
             # rewrite the stored price for everyone -- which is exactly how a
             # panel ends up confidently showing a number nothing produced.
             rows = [dict(r) for r in self._rows]
+            for r in rows:
+                # Real observed-price history for the ticker's own
+                # sparkline -- a list copy, oldest first, never mutated by
+                # the caller reaching back into the cache's own deque.
+                r["history"] = list(self._history.get(r["sym"], ()))
             updated, err = self._updated, self._err
         self._ensure_thread()
         age = (now - updated) if updated else None
@@ -373,6 +387,16 @@ class MarketFeed:
                 self._rows = rows
                 self._updated = time.time()
                 self._err = None
+                for r in rows:
+                    hist = self._history.setdefault(r["sym"], deque(maxlen=HISTORY_MAX))
+                    hist.append(r["price"])
+                # A symbol removed from the watchlist has no reason to keep
+                # accumulating memory forever -- same bounded-cache
+                # discipline THE HANGAR/atc.py's log already established.
+                live_syms = {r["sym"] for r in rows}
+                for stale_sym in list(self._history):
+                    if stale_sym not in live_syms:
+                        del self._history[stale_sym]
             else:
                 self._err = err or "no data"
 
