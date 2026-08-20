@@ -7781,6 +7781,37 @@ class SatelliteEngine(Browsable, BigMomentSource):
         ("REGULUS", 10.1395, 11.9672, 1.36), ("CASTOR", 7.5766, 31.8883, 1.58),
     ]
 
+    # Real J2000 coordinates for the fainter stars that only exist here to
+    # complete a real, recognizable asterism outline -- not bright enough
+    # individually to earn a spot in BRIGHT_STARS, but real catalog stars
+    # all the same, same honest-simplification caveat as that table.
+    CONSTELLATION_EXTRA_STARS = [
+        ("DUBHE", 11.0622, 61.7511, 1.79), ("MERAK", 11.0307, 56.3824, 2.37),
+        ("PHECDA", 11.8971, 53.6948, 2.44), ("MEGREZ", 12.2570, 57.0326, 3.31),
+        ("ALIOTH", 12.9005, 55.9598, 1.77), ("MIZAR", 13.3988, 54.9254, 2.23),
+        ("ALKAID", 13.7923, 49.3133, 1.86),
+        ("BELLATRIX", 5.4189, 6.3497, 1.64), ("SAIPH", 5.7959, -9.6696, 2.09),
+        ("ALNILAM", 5.6036, -1.2019, 1.69), ("MINTAKA", 5.5334, -0.2991, 2.23),
+        ("ALNITAK", 5.6793, -1.9426, 1.88),
+        ("SCHEDAR", 0.6751, 56.5373, 2.24), ("CAPH", 0.1530, 59.1498, 2.28),
+        ("GAMMA CAS", 0.9451, 60.7167, 2.47), ("RUCHBAH", 1.4300, 60.2353, 2.68),
+        ("SEGIN", 1.9066, 63.6701, 3.35),
+    ]
+
+    # Real asterism outlines -- ordered star-name chains, each consecutive
+    # pair drawn as one real line segment. Deliberately just 3 of the most
+    # widely recognized real patterns (not the full 88 official
+    # constellations) -- chosen because a stranger who knows almost
+    # nothing about the night sky can usually still name these three by
+    # shape alone, which is the whole point of drawing lines at all.
+    CONSTELLATIONS = {
+        "URSA MAJOR": ["ALKAID", "MIZAR", "ALIOTH", "MEGREZ", "DUBHE", "MERAK",
+                        "PHECDA", "MEGREZ"],
+        "ORION": ["BETELGEUSE", "ALNITAK", "SAIPH", "RIGEL", "MINTAKA", "BELLATRIX",
+                   "ALNILAM", "ALNITAK"],
+        "CASSIOPEIA": ["SEGIN", "RUCHBAH", "GAMMA CAS", "SCHEDAR", "CAPH"],
+    }
+
     @staticmethod
     def _star_altaz(ra_h, dec_deg, lat_deg, lon_deg, unix_ts):
         """Real RA/Dec -> real alt/az for the observer's location and the
@@ -7806,26 +7837,46 @@ class SatelliteEngine(Browsable, BigMomentSource):
         return alt, az
 
     def _draw_bright_stars(self, buf):
-        """Real bright-star backdrop for the sky dome -- direct owner
-        ask ("go crazy... most genius space app"), turning the dome
-        from "tracked satellites only" into an actual mini-planetarium.
-        Deliberately DIM relative to every real tracked object (the
-        exact "decoration must not compete with the subject" lesson
-        this project already learned the hard way on the flight radar
-        scope) -- these are unmoving background context, never the
-        actual content of this screen."""
+        """Real bright-star + constellation backdrop for the sky dome --
+        direct owner ask ("go crazy... most genius space app"), turning
+        the dome from "tracked satellites only" into an actual mini-
+        planetarium. Deliberately DIM relative to every real tracked
+        object (the exact "decoration must not compete with the
+        subject" lesson this project already learned the hard way on
+        the flight radar scope) -- these are unmoving background
+        context, never the actual content of this screen. Constellation
+        LINES draw first (dimmest layer), then every catalog star dot
+        on top, so a line segment never visually outshines the real
+        stars it connects."""
         if self._lat is None or self._lon is None:
             return
-        for _name, ra_h, dec_deg, mag in self.BRIGHT_STARS:
-            alt, az = self._star_altaz(ra_h, dec_deg, self._lat, self._lon, time.time())
+        now = time.time()
+        positions = {}   # name -> (x, y) or None (below horizon)
+        for name, ra_h, dec_deg, _mag in self.BRIGHT_STARS + self.CONSTELLATION_EXTRA_STARS:
+            alt, az = self._star_altaz(ra_h, dec_deg, self._lat, self._lon, now)
             if alt <= 0:
+                positions[name] = None
                 continue
-            frac = self._dome_r_frac(alt)
-            x, y = scope_xy(az, frac)
-            # Real magnitude -> brightness: -1.46 (Sirius) down to 1.58
-            # (Castor), mapped to a real but always-subdued pixel value.
-            level = max(0.0, min(1.0, (1.6 - mag) / 3.06))
-            put_px(buf, int(round(x)), int(round(y)), rim((150, 155, 175), 0.25 + 0.35 * level))
+            x, y = scope_xy(az, self._dome_r_frac(alt))
+            positions[name] = (int(round(x)), int(round(y)))
+
+        line_col = (60, 62, 78)   # dimmer than even the faintest star dot below
+        for chain in self.CONSTELLATIONS.values():
+            for a, b in zip(chain, chain[1:]):
+                pa, pb = positions.get(a), positions.get(b)
+                if pa is None or pb is None:
+                    continue   # honest: never draw a line to a star below the horizon
+                draw_line(buf, pa[0], pa[1], pb[0], pb[1], line_col)
+
+        for _name, _ra_h, _dec_deg, mag in self.BRIGHT_STARS + self.CONSTELLATION_EXTRA_STARS:
+            p = positions.get(_name)
+            if p is None:
+                continue
+            # Real magnitude -> brightness: -1.46 (Sirius) down to 3.35
+            # (Segin, the faintest constellation-outline star here),
+            # mapped to a real but always-subdued pixel value.
+            level = max(0.0, min(1.0, (3.4 - mag) / 4.86))
+            put_px(buf, p[0], p[1], rim((150, 155, 175), 0.2 + 0.4 * level))
 
     def _frame_scope(self):
         objs = self.sky.get("sky_now") or []
