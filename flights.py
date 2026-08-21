@@ -46,6 +46,7 @@ import paneltext
 
 import events_log
 import hangar
+import vip_registry
 import satellite
 
 # Each entry is (name, url_template, list_key). url_template is formatted
@@ -1140,6 +1141,19 @@ def _fetch_positions(lat, lon):
             if not isinstance(dist_nm, (int, float)):
                 dist_nm = nm
         reg = paneltext.panel_text((ac.get("r") or "").strip()) or None
+        notable = _notable(ac, phase=phase)
+        # VIP REGISTRY FALLBACK (2026-08-20) -- a real callsign match
+        # (inside _notable() itself) always wins; this only fires when
+        # THIS cycle's callsign is NOT a VIP pattern but the real
+        # registration matches a tail THIS DEVICE has itself already
+        # confirmed flying a real VIP callsign before (see
+        # vip_registry.py's own docstring for why this is honest, not a
+        # guess). Recognizes the same real airframe on a day it happens
+        # to broadcast a plain callsign.
+        if notable is None and reg:
+            vip_label = vip_registry.LOG.is_known(reg)
+            if vip_label:
+                notable = (vip_label, 4)
         out.append({
             "ident": _ident(ac),
             # Raw ICAO24 hex -- the one field ADS-B guarantees is stable
@@ -1198,7 +1212,7 @@ def _fetch_positions(lat, lon):
             "dir_deg": dir_deg,
             "phase": phase,
             "vrate_fpm": rate,
-            "notable": _notable(ac, phase=phase),
+            "notable": notable,
             # WINDOW FILTER (2026-08-07, distance-capped 2026-08-08) --
             # true if this aircraft's real bearing FROM home (dir_deg, not
             # track_deg) currently falls inside the configured window cone
@@ -1669,6 +1683,15 @@ class FlightFeed:
                     tname = _type_name(a.get("type"))
                     summary = f"{label} ({tname})" if tname else label
                     events_log.LOG.record("plane", paneltext.panel_text(summary))
+                    # SELF-BUILT REGISTRY (2026-08-20) -- record the real
+                    # registration this real VIP callsign just confirmed,
+                    # so a FUTURE sighting of the same tail is recognized
+                    # even on a day it broadcasts a plain callsign. Only
+                    # when a real registration was broadcast this cycle
+                    # (see vip_registry.py's own docstring on why an
+                    # unregistered aircraft is honestly never recorded).
+                    if a.get("reg"):
+                        vip_registry.LOG.record(a["reg"], label, a.get("type"))
             self._seen_vip = now_vip
 
         with self._lock:

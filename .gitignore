@@ -42,6 +42,10 @@ hangar_log.jsonl
 # source (see events_log.py).
 events_log.jsonl
 
+# VIP registry -- same category, real self-confirmed tail numbers with
+# real timestamps, not source (see vip_registry.py).
+vip_registry.jsonl
+
 # Storm Desk session strip + Home Hub house facts — runtime, not source.
 storm_log.jsonl
 home_log.jsonl
