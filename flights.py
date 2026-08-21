@@ -1015,6 +1015,13 @@ def _vip_label(callsign):
     return "GOVT VIP FLIGHT"
 
 
+# The full real set of labels _vip_label() can return -- one place, so
+# any caller checking "is this notable tag a VIP one" (the events-log
+# diff below, engines.FlightEngine.VIP_TAGS) reads off the SAME set
+# rather than re-typing the four strings a second time.
+VIP_TAG_LABELS = {"AIR FORCE ONE", "AIR FORCE TWO", "MARINE ONE", "GOVT VIP FLIGHT"}
+
+
 def _is_vip_callsign(ac):
     """Real callsign match against the RAW ADS-B `flight` field --
     deliberately NOT `_ident()`'s output, which degrades to registration
@@ -1417,6 +1424,7 @@ class FlightFeed:
         # counts as "just entered".
         self._seen_window = None            # set of ac keys in-window as of last refresh
         self._window_batch = []             # one-shot: newly-entered aircraft, closest-first/notable-secondary
+        self._seen_vip = None                # set of ac keys currently VIP-tagged, for the events-log diff below
         self._pending_detail = None         # one-shot: sel_key for FlightEngine to jump straight to on arrival
 
     def pop_window_takeover_batch(self):
@@ -1637,6 +1645,31 @@ class FlightFeed:
                     summary = f"{label} ({tname})" if tname else label
                     events_log.LOG.record("plane", paneltext.panel_text(summary))
             self._seen_window = now_in_window
+
+        # VIP EVENTS LOG (2026-08-20) -- a permanent record of a real
+        # government VIP aircraft entering range, same adopt-then-diff
+        # one-shot idiom as the window log just above (reused, not
+        # reinvented). Keyed by _ac_key() (hex preferred), same identity
+        # convention as every other detector in this file. Deliberately
+        # does NOT depend on the window cone -- a VIP flight passing
+        # anywhere within RADIUS_NM is worth a lasting record, not just
+        # one crossing the one configured window.
+        now_vip = {_ac_key(a) for a in sky
+                   if a.get("notable") and a["notable"][0] in VIP_TAG_LABELS
+                   and _ac_key(a)}
+        if self._seen_vip is None:
+            self._seen_vip = now_vip   # first read: adopt, don't fire
+        else:
+            new_vip = now_vip - self._seen_vip
+            if new_vip:
+                for a in sky:
+                    if _ac_key(a) not in new_vip:
+                        continue
+                    label = a["notable"][0]
+                    tname = _type_name(a.get("type"))
+                    summary = f"{label} ({tname})" if tname else label
+                    events_log.LOG.record("plane", paneltext.panel_text(summary))
+            self._seen_vip = now_vip
 
         with self._lock:
             self._sky = sky

@@ -9490,7 +9490,7 @@ class FlightEngine(Browsable, BigMomentSource):
                                  flights._type_name(ac.get("type")) or "",
                                  (200, 170, 255), tier=TIER_INTERRUPT, system=SYSTEM_FLIGHTS)
 
-    VIP_TAGS = {"AIR FORCE ONE", "AIR FORCE TWO", "MARINE ONE", "GOVT VIP FLIGHT"}
+    VIP_TAGS = flights.VIP_TAG_LABELS   # one real set, shared with flights.py's own events-log diff
 
     def _detect_vip_aircraft(self, ac_list):
         """TIER_TAKEOVER -- real owner ask (2026-08-20): "the president is
