@@ -20954,24 +20954,38 @@ class HomeHubEngine:
         mark = "%d" % on if on else ""
         if on and total > 1:
             mark = "%d/%d" % (on, total)
-        # Real bug, only exposed once a real HA token made room counts
-        # non-empty: hallway's box is 10px tall (ROOM_BOX above), too
-        # short to stack a label row (y+2..y+6) and a count row
-        # (y+h-7..y+h-3) without overlap -- every other room is 14-16px
-        # tall and has real headroom. Below 16px, the count rides the
-        # SAME row as the label, right-aligned, instead of a second row.
-        if h < 16:
-            label = fit_text(room.get("label") or "", w - 4 - (text_w(mark) + 3 if mark else 0))
+        # Real bug (found by rendering real HA data, not by eye): hallway's
+        # box is 10px tall (ROOM_BOX above), too short to stack a label row
+        # (y+2..y+6) and a count row (y+h-7..y+h-3) without overlap --
+        # every OTHER room is 14-16px tall and has real headroom for two
+        # rows (2+5+2+5=14 is the real minimum). Only hallway needs the
+        # single-row inline layout; game/beds (h=14) and kitchen/living
+        # (h=16) all correctly stack.
+        #
+        # A second real bug, found from the same screenshot: "KITCHEN"/
+        # "HALLWAY" (7 real chars = 27px at scale 1) were truncated to
+        # "KITCHE" under the old w-4 budget (25px in a 29px-wide box) --
+        # not a stacking issue, a genuinely too-tight margin. 1px margins
+        # each side (w-2) give exactly enough room for both real 7-char
+        # labels without cutting a single letter.
+        if h < 14:
+            label = fit_text(room.get("label") or "", w - 2 - (text_w(mark) + 3 if mark else 0))
             if label:
-                draw_text3x5(buf, x + 2, y + 2, label, ink)
+                draw_text3x5(buf, x + 1, y + 2, label, ink)
             if mark:
-                draw_text3x5(buf, x + w - 2 - text_w(mark), y + 2, mark, ink)
+                draw_text3x5(buf, x + w - 1 - text_w(mark), y + 2, mark, ink)
         else:
-            label = fit_text(room.get("label") or "", w - 4)
+            # A third real bug from the same screenshot: game/beds (h=14)
+            # had ZERO blank row between the label and count -- 2+5+5+2=14
+            # leaves no gap, so the two rows visually touch and read as
+            # garbled at panel scale, even though no pixel is truly shared.
+            # 1px top/bottom margins buy a real 2px gap on the tightest
+            # (h=14) rooms; taller rooms (kitchen/living, h=16) get more.
+            label = fit_text(room.get("label") or "", w - 2)
             if label:
-                draw_text3x5(buf, x + 2, y + 2, label, ink)
+                draw_text3x5(buf, x + 1, y + 1, label, ink)
             if mark:
-                draw_text3x5(buf, x + 2, y + h - 7, mark, ink)
+                draw_text3x5(buf, x + 1, y + h - 6, mark, ink)
 
     def _frame_main(self):
         buf = blank()
