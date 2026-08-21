@@ -967,6 +967,57 @@ def _phase(ac, alt=None, rate=None):
                                           # transition?), not guessed at
 
 
+# Real, publicly-documented U.S. government "Special Air Mission" radio
+# callsigns -- confirmed real ATC/aviation convention (FAA/AIM and
+# widely-documented plane-spotting reference, e.g. the real, famous
+# public fact that ATC calls a VC-25 "Air Force One" ON THE RADIO only
+# while the sitting President is actually aboard it; the same aircraft
+# flies as a plain "SAM" callsign otherwise). Matched against the REAL
+# raw ADS-B `flight` field, never a guessed tail number or hex -- this
+# project has NO seeded registration/hex watchlist for this (see
+# CLAUDE.md's own "Deliberately deferred" section: a notable-registration
+# watchlist was explicitly rejected as fabricating real identities
+# without a verified source). Callsign pattern matching needs no such
+# list: it's a real, standard radio convention, not an assertion about
+# who owns a specific tail number.
+VIP_CALLSIGN_EXACT = {"AF1", "AF2", "MARINE1", "MARINE2"}
+VIP_CALLSIGN_PREFIX = ("SAM",)   # e.g. real "SAM137" -- USAF VIP lift,
+                                  # not limited to POTUS/VPOTUS
+
+
+def _vip_label(callsign):
+    """Real, honest label for a matched VIP callsign -- AF1/AF2/MARINE
+    get their own well-known plain-English name; a bare SAM callsign
+    only ever means "a real USAF Special Air Mission flight", NOT
+    "the President is aboard" (that's what AF1 specifically means), so
+    it must not be over-claimed as one."""
+    if callsign == "AF1":
+        return "AIR FORCE ONE"
+    if callsign == "AF2":
+        return "AIR FORCE TWO"
+    if callsign in ("MARINE1", "MARINE2"):
+        return "MARINE ONE"
+    return "GOVT VIP FLIGHT"
+
+
+def _is_vip_callsign(ac):
+    """Real callsign match against the RAW ADS-B `flight` field --
+    deliberately NOT `_ident()`'s output, which degrades to registration
+    or hex when no callsign is broadcast; a registration/hex could
+    coincidentally collide with a short pattern like a bare prefix
+    check, so this only ever matches a REAL broadcast callsign. Returns
+    a real label string or None -- never a boolean, so the caller never
+    has to re-derive which VIP class matched."""
+    cs = str(ac.get("flight") or "").strip().upper()
+    if not cs:
+        return None
+    if cs in VIP_CALLSIGN_EXACT:
+        return _vip_label(cs)
+    if any(cs.startswith(p) and cs[len(p):].isdigit() for p in VIP_CALLSIGN_PREFIX):
+        return _vip_label(cs)
+    return None
+
+
 def _notable(ac, phase=None):
     """What, if anything, makes this aircraft worth looking up for.
 
@@ -1001,6 +1052,17 @@ def _notable(ac, phase=None):
     emerg = str(ac.get("emergency") or "none").lower()
     if emerg not in ("none", "no emergency"):
         return ("MAYDAY", 5)
+
+    vip = _is_vip_callsign(ac)
+    if vip:
+        # Rank 4, deliberately NOT 5 -- rank 5 is exclusively real
+        # in-flight emergencies (see EMERGENCY_SQUAWKS above), and
+        # engines.py's own emergency-squawk celebration detector filters
+        # by RANK ALONE (not tag), so sharing rank 5 here would make a
+        # VIP aircraft accidentally fire through that detector too,
+        # mislabeled as an emergency. Rank 4 keeps VIP genuinely
+        # top-tier (same tier as AIRSHIP) without touching that path.
+        return (vip, 4)
 
     cat = str(ac.get("category") or "")
     if cat == CAT_LIGHTER_THAN_AIR:

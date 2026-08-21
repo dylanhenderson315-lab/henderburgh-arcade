@@ -8802,6 +8802,7 @@ class FlightEngine(Browsable, BigMomentSource):
         # and must not share a baseline.
         self._seen_squawks = None
         self._seen_airships = None
+        self._seen_vip = None
         # First-ever-type detector (THE HANGAR-powered TIER_FLASH) --
         # None until the first read adopts whatever types are already in
         # the collection, so a device that's been running a while
@@ -9408,6 +9409,7 @@ class FlightEngine(Browsable, BigMomentSource):
         makes a top tier stop meaning anything."""
         self._detect_emergency_squawk(ac_list)
         self._detect_airship(ac_list)
+        self._detect_vip_aircraft(ac_list)
         self._detect_new_hangar_type()
 
     def _detect_emergency_squawk(self, ac_list):
@@ -9480,6 +9482,55 @@ class FlightEngine(Browsable, BigMomentSource):
             self._set_big_moment("AIRSHIP", label,
                                  flights._type_name(ac.get("type")) or "",
                                  (200, 170, 255), tier=TIER_INTERRUPT, system=SYSTEM_FLIGHTS)
+
+    VIP_TAGS = {"AIR FORCE ONE", "AIR FORCE TWO", "MARINE ONE", "GOVT VIP FLIGHT"}
+
+    def _detect_vip_aircraft(self, ac_list):
+        """TIER_TAKEOVER -- real owner ask (2026-08-20): "the president is
+        flying to myrtle beach... something special for these types of
+        events with famous aircraft". Keyed off flights._notable()'s own
+        real classification (flights._is_vip_callsign(), rank 4) rather
+        than a second parsing pass -- one source of truth, same pattern
+        as emergency squawk/airship above.
+
+        Real signal, not a guess: the tag comes from matching the REAL
+        raw ADS-B `flight` (callsign) field against a small set of
+        publicly-documented U.S. government "Special Air Mission" radio
+        callsigns (AF1/AF2/MARINE1/MARINE2, and the bare "SAM" + digits
+        prefix used for other real VIP lift) -- see flights.py's own
+        docstring on `_is_vip_callsign()` for why this is a callsign
+        convention, not an asserted tail-number identity, and why it
+        deliberately does NOT claim "the President is aboard" for a bare
+        SAM flight (only AF1 specifically means that).
+
+        TIER_TAKEOVER, the same maximal tier as a real emergency squawk
+        -- a real government VIP aircraft entering range is exactly the
+        rare "go look now" event that tier exists for, arguably more so
+        than the airship case it currently sits above (rank 4 there,
+        same rank flights._notable() gives VIP -- see that function's
+        own comment on why VIP and AIRSHIP share a rank tier without
+        colliding in this detector's own tag-based filter below).
+
+        Keyed by _sel_key() (hex preferred), same identity convention as
+        every other detector here -- a real VIP aircraft could
+        legitimately squawk a real callsign with no broadcast
+        registration, and this must not silently exclude it the way the
+        pre-audit emergency-squawk detector once did (see that
+        function's own docstring)."""
+        current = {self._sel_key(ac) for ac in ac_list
+                  if ac.get("notable") and ac["notable"][0] in self.VIP_TAGS and self._sel_key(ac)}
+        if self._seen_vip is None:
+            self._seen_vip = current
+            return
+        new = current - self._seen_vip
+        self._seen_vip = current
+        if new:
+            ac = next(a for a in ac_list if self._sel_key(a) in new)
+            tag = ac["notable"][0]
+            label = ac.get("ident") or ac.get("hex") or "?"
+            self._set_big_moment(tag, label,
+                                 flights._type_name(ac.get("type")) or "",
+                                 (100, 150, 255), tier=TIER_TAKEOVER, system=SYSTEM_FLIGHTS)
 
     def _detect_new_hangar_type(self):
         """TIER_FLASH -- THE HANGAR-powered. Deliberately keyed on
