@@ -8692,7 +8692,14 @@ class FlightEngine(Browsable, BigMomentSource):
     SCALE_NOTABLE = 1.12
     SCALE_WINDOW = 1.22
     SCALE_FAVORITE = 1.32
+    # VIP (2026-08-20) -- a real government VIP aircraft (see
+    # flights._is_vip_callsign()) sits ABOVE a favorite on size (this is
+    # rarer and more genuinely notable than any owner-picked favorite)
+    # but still strictly BELOW selected, preserving the standing "the
+    # aircraft you're actually looking at right now always wins" rule.
+    SCALE_VIP = 1.4
     SCALE_SELECTED = 1.5
+    VIP_COL = (100, 150, 255)   # same real blue used in the VIP celebration
     ATC_PAGE_TICKS = 90       # ~4.5s per page, long enough to actually read one before it turns
 
     # PART 2: the airport is a genuinely selectable target on the scope,
@@ -9791,7 +9798,10 @@ class FlightEngine(Browsable, BigMomentSource):
             # the aircraft (here). Still never a filter: every aircraft
             # keeps drawing regardless of match status.
             matched = ac.get("ident") and ac["ident"] == self.atc_match_ident
-            mark_col = self.ATC_MATCH if matched else ((255, 255, 255) if sel else col)
+            is_vip = bool(ac.get("notable") and ac["notable"][0] in self.VIP_TAGS)
+            mark_col = (self.ATC_MATCH if matched else
+                       (255, 255, 255) if sel else
+                       (self.VIP_COL if is_vip else col))
             in_window = bool(ac.get("in_window"))
             # WINDOW FILTER (2026-08-07): a small ring under the icon for
             # any aircraft currently visible out the configured window --
@@ -9821,6 +9831,12 @@ class FlightEngine(Browsable, BigMomentSource):
                 glow = max(glow, WINDOW_GLOW_FLOOR)
             if is_favorite:
                 glow = max(glow, FAVORITE_GLOW_FLOOR)
+            if is_vip:
+                glow = max(glow, FAVORITE_GLOW_FLOOR)   # 1.0 is the real
+                                                          # ceiling -- VIP
+                                                          # ties favorite
+                                                          # on brightness,
+                                                          # wins on size below
             # SIZE now steps through the SAME ordering as brightness,
             # instead of one shared "big" tier for every reason an
             # aircraft might stand out (2026-08-10 hierarchy pass).
@@ -9831,6 +9847,8 @@ class FlightEngine(Browsable, BigMomentSource):
             # so it doesn't need extra size to stand out.
             if sel:
                 icon_scale = self.SCALE_SELECTED
+            elif is_vip:
+                icon_scale = self.SCALE_VIP
             elif is_favorite:
                 icon_scale = self.SCALE_FAVORITE
             elif in_window:
