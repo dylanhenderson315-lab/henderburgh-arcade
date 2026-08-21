@@ -144,6 +144,9 @@
   .vlist{display:flex;flex-direction:column;gap:5px;max-height:160px;overflow-y:auto;}
   .vlist button{width:100%;text-align:left;font-size:11px;padding:8px 10px;}
   .vlist .empty{font-size:10.5px;color:var(--dim);padding:4px 0;}
+  .vlist-row{font-size:11px;padding:6px 2px;border-bottom:1px solid var(--line);}
+  .vlist-row:last-child{border-bottom:none;}
+  .vlist-row .hint{display:block;font-size:9.5px;margin-top:2px;}
   .side{position:sticky;top:14px;}
   @media (max-width:900px){
     .page{grid-template-columns:1fr;}
@@ -364,6 +367,15 @@
       radar scope and in THE HANGAR — it outranks even a heavy or a
       helicopter on its own. Registration only (a tail number), the same
       form THE HANGAR lists entries by.</div>
+  </div>
+
+  <div id="vipcard" class="card hide">
+    <h2>VIP registry — confirmed sightings</h2>
+    <div id="vip-list" class="vlist"></div>
+    <div class="hint">Every entry here is a real aircraft this device's
+      own ADS-B feed personally confirmed broadcasting a real VIP
+      callsign (Air Force One/Two, Marine One, or a SAM/SPAR callsign) at
+      least once. Never a seeded or guessed tail-number list — read-only.</div>
   </div>
 
   <div id="npcard" class="card hide">
@@ -1396,6 +1408,33 @@ $('fa-reg').addEventListener('keydown', e => {
   if (e.key === 'Enter'){ e.preventDefault(); $('fa-add').click(); }
 });
 
+/* VIP registry — read-only peek at vip_registry.py's self-built
+   collection (see /api/flights/vip). No add/remove here; every entry
+   exists only because this device's own feed personally confirmed it. */
+function fmtAge(ts){
+  if (!ts) return '';
+  const s = Math.max(0, Date.now()/1000 - ts);
+  if (s < 3600) return Math.round(s/60) + 'm ago';
+  if (s < 86400) return Math.round(s/3600) + 'h ago';
+  return Math.round(s/86400) + 'd ago';
+}
+async function loadVip(){
+  try{
+    const j = await (await fetch('/api/flights/vip')).json();
+    const list = j.vip_aircraft || [];
+    const el = $('vip-list');
+    if (!list.length){
+      el.innerHTML = '<div class="empty">No VIP aircraft confirmed yet.</div>';
+      return;
+    }
+    list.sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0));
+    el.innerHTML = list.map(e => `<div class="vlist-row">
+      <b>${e.reg}</b> — ${e.label}${e.type ? ' (' + e.type + ')' : ''}
+      <span class="hint">seen ${e.times_seen}x · last ${fmtAge(e.last_seen)}</span>
+      </div>`).join('');
+  }catch(_){}
+}
+
 /* ---------- real team dropdowns (2026-08-09) ----------
    allTeams: {league: [{abbr, location, name}, ...]}, fetched once from
    /api/sports/teams (real ESPN data, cached server-side for 24h -- see
@@ -1628,7 +1667,7 @@ $('br-save').addEventListener('click', async () => {
   cfgTouched = 0; loadBrightness();
 });
 
-loadTicker(); loadLoc(); loadFollow(); loadFavAircraft(); loadNowPlaying(); loadNote(); loadAmbient(); loadSports(); loadNews(); loadBlog(); loadBrightness();
+loadTicker(); loadLoc(); loadFollow(); loadFavAircraft(); loadVip(); loadNowPlaying(); loadNote(); loadAmbient(); loadSports(); loadNews(); loadBlog(); loadBrightness();
 setInterval(loadBrightness, 30000);
 
 /* ---------- power + modes ---------- */
@@ -1672,6 +1711,8 @@ function syncUI(){
   // followflight (which has no home-relative concept at all — see
   // FollowFlightEngine's own docstring).
   $('favaccard').classList.toggle('hide', base !== 'flights');
+  $('vipcard').classList.toggle('hide', base !== 'flights');
+  if (base === 'flights' && Date.now() - cfgTouched > 3000) loadVip();
   $('npcard').classList.toggle('hide', base !== 'nowplaying');
   if (base === 'nowplaying' && Date.now() - cfgTouched > 3000) loadNowPlaying();
   $('notecard').classList.toggle('hide', base !== 'ownernote');

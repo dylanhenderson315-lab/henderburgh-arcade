@@ -47,6 +47,7 @@ import events_log
 import market
 import satellite
 import flights
+import vip_registry
 import sports
 import news
 import weather
@@ -1388,6 +1389,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json(cfg)
         elif path == "/api/flights/favorites":
             self._json({"favorite_aircraft": flights.load_favorite_aircraft()})
+        elif path == "/api/flights/vip":
+            # Read-only peek at vip_registry.py's self-built collection of
+            # real aircraft this device has personally confirmed flying a
+            # real VIP callsign -- confirmed genuinely missing before
+            # adding (only ever read from inside flights.py's own write
+            # path, never over HTTP). Same shape as /api/flights/favorites.
+            self._json({"vip_aircraft": vip_registry.LOG.get()})
         elif path == "/api/dnd":
             self._json(dnd.load_config())
         elif path == "/api/space/page":
