@@ -981,8 +981,23 @@ def _phase(ac, alt=None, rate=None):
 # list: it's a real, standard radio convention, not an assertion about
 # who owns a specific tail number.
 VIP_CALLSIGN_EXACT = {"AF1", "AF2", "MARINE1", "MARINE2"}
-VIP_CALLSIGN_PREFIX = ("SAM",)   # e.g. real "SAM137" -- USAF VIP lift,
-                                  # not limited to POTUS/VPOTUS
+# "SAM" -- e.g. real SAM28000/SAM29000 (the two VC-25A tail numbers,
+# flown under this callsign whenever the President is NOT aboard) and
+# SAM26000/SAM27000 (the retired VC-137Cs, still real historical/backup
+# airframes) -- confirmed real, publicly-documented Special Air Mission
+# callsigns, not limited to POTUS/VPOTUS specifically.
+# "SPAR" -- confirmed via a real, widely-reported live tracking event:
+# the USAF C-40 that carried Speaker Pelosi to Taiwan in 2022 flew
+# under the real broadcast callsign SPAR19, tracked live on
+# Flightradar24/ADS-B by the public (drew enough traffic to strain
+# Flightradar24's own service) -- direct confirmation this callsign
+# family is genuinely visible on ADS-B, not just a radio-only codeword.
+# Deliberately did NOT add "PHOENIX BANNER/SILVER/COPPER" or "EXECUTIVE
+# ONE" here despite being real documented USAF/civil VIP mission
+# codewords -- neither has a confirmed real ADS-B *broadcast callsign
+# field* sighting the way SAM/SPAR/AF1 do; they may be voice-only
+# codewords. Honest gap, not silently guessed past.
+VIP_CALLSIGN_PREFIX = ("SAM", "SPAR")
 
 
 def _vip_label(callsign):
