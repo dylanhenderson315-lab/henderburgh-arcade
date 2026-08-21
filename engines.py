@@ -2449,6 +2449,21 @@ SCOPE_R = 23
 # about a target when the beam hits it.
 SCOPE_TARGET_FLOOR = 0.38
 
+# REGULAR brightness floor (2026-08-21) -- a "notable regular" auto-flag,
+# built on the exact same registry-pattern reasoning vip_registry.py just
+# established for VIP callsigns: THE HANGAR's own real, already-tracked
+# times_seen field (hangar.py, real visit count, real 30-min-gap logic --
+# see FlightEngine.REGULAR_VISIT_THRESHOLD below) is a device personally
+# confirming a real fact and remembering it, no new store needed. Sits
+# STRICTLY BELOW NOTABLE_GLOW_FLOOR on purpose: a regular is "I recognize
+# this one," not "something is actually happening" (a heavy, a MAYDAY, an
+# aircraft actively climbing/descending low and close) -- ranking it above
+# a genuine notable-criteria aircraft would be backwards. Still strictly
+# above SCOPE_TARGET_FLOOR so a regular reads as a real, if quiet, signal
+# rather than dimming exactly like a routine aircraft the sweep hasn't
+# reached yet.
+REGULAR_GLOW_FLOOR = 0.55
+
 # NOTABLE brightness floor (2026-08-08) -- the one piece of visual
 # hierarchy this scope was missing. Before this, EVERY target dimmed the
 # same way as the sweep passed it (down to SCOPE_TARGET_FLOOR), so a
@@ -8434,6 +8449,37 @@ class FlightEngine(Browsable, BigMomentSource):
         # arbitrary one (see flights.py's own 213-aircraft sample note).
         return SCOPE_ICON_AIRLINER
 
+    # "Notable regular" auto-flag (2026-08-21) -- an aircraft THE HANGAR
+    # has genuinely recorded REGULAR_VISIT_THRESHOLD+ separate visits from
+    # (hangar.py's own record_sighting(), which only increments times_seen
+    # on a real NEW VISIT -- a gap of at least hangar.VISIT_GAP_S since
+    # last_seen, never per-poll) is treated as automatically notable, like
+    # a favorite but earned rather than manually picked. A reasoned
+    # judgment call, not a measured fact -- there is no sensor that says
+    # "this many visits makes something a regular" -- chosen the same way
+    # satellite.WINDOW_MAX_NM_DEFAULT was: high enough that a single lucky
+    # weekend of traffic doesn't qualify (5 visits is at minimum 5 separate
+    # real days, since VISIT_GAP_S is only 30 minutes but a given tail
+    # rarely returns same-day), low enough to actually earn the tag inside
+    # a Hangar collection's real observed lifetime.
+    REGULAR_VISIT_THRESHOLD = 5
+
+    def _is_regular(self, ac):
+        """True only for a real registration THE HANGAR has genuinely
+        logged REGULAR_VISIT_THRESHOLD+ times. Reads self.hangar_entries,
+        already refreshed every tick with zero new I/O (see tick()'s own
+        `self.hangar_entries = hangar.LOG.get()`) -- never a second store,
+        matching this project's standing "reuse real data already on
+        hand" discipline. No registration, or not enough real visits yet,
+        both correctly return False -- never a guess."""
+        reg = ac.get("reg")
+        if not reg:
+            return False
+        for e in self.hangar_entries:
+            if e.get("reg") == reg:
+                return (e.get("times_seen") or 0) >= self.REGULAR_VISIT_THRESHOLD
+        return False
+
     # Dead-reckoning duration cap -- 2x the real poll cadence
     # (flights.POSITION_REFRESH, ~15s). If a real poll is late/stalled,
     # extrapolation freezes at this ceiling rather than projecting an
@@ -8689,6 +8735,11 @@ class FlightEngine(Browsable, BigMomentSource):
     # about it, so "you're looking at this one right now" outranks even
     # a favorite on size.
     SCALE_ROUTINE = 1.0
+    # REGULAR (2026-08-21) -- sits between ROUTINE and NOTABLE, same
+    # reasoning as REGULAR_GLOW_FLOOR's own module-level note: a
+    # recognized repeat visitor is a real, if quiet, reason to look,
+    # ranked below genuine notable criteria.
+    SCALE_REGULAR = 1.06
     SCALE_NOTABLE = 1.12
     SCALE_WINDOW = 1.22
     SCALE_FAVORITE = 1.32
@@ -9824,7 +9875,10 @@ class FlightEngine(Browsable, BigMomentSource):
             # rather than blowing past 1.0 and clipping -- the ordering is
             # expressed by which floor is highest, not by stacking them.
             is_favorite = bool(ac.get("is_favorite"))
+            is_regular = self._is_regular(ac)
             glow = scope_glow(brg, self.sweep)
+            if is_regular:
+                glow = max(glow, REGULAR_GLOW_FLOOR)
             if ac.get("notable"):
                 glow = max(glow, NOTABLE_GLOW_FLOOR)
             if in_window:
@@ -9855,6 +9909,8 @@ class FlightEngine(Browsable, BigMomentSource):
                 icon_scale = self.SCALE_WINDOW
             elif ac.get("notable") or matched:
                 icon_scale = self.SCALE_NOTABLE
+            elif is_regular:
+                icon_scale = self.SCALE_REGULAR
             else:
                 icon_scale = self.SCALE_ROUTINE
             draw_scope_aircraft(buf, x, y, ac.get("track_deg"), kind, mark_col,
@@ -10564,8 +10620,14 @@ class FlightEngine(Browsable, BigMomentSource):
         # priority of the three -- a real, owner-chosen fact outranks a
         # route/notable status the same way it outranks them in glow/scale
         # below and in the scope's own ranking (flights.FAVORITE_BOOST).
+        # REGULAR (2026-08-21) -- lowest priority of the four, only shown
+        # when nothing else claims the slot: a recognized repeat visitor
+        # is real and worth naming, but favorite/route-status/notable are
+        # all more specific, more useful facts when any of them apply.
+        is_regular = self._is_regular(ac)
         right_tag = ("FAVORITE" if is_favorite else
-                     route_status or (note[0] if note else f"{idx + 1}/{len(aircraft)}"))
+                     route_status or (note[0] if note else
+                     ("REGULAR" if is_regular else f"{idx + 1}/{len(aircraft)}")))
         draw_header(buf, ident, self.pulse.mix(col),
                     right_tag=right_tag,
                     stale=bool(self.data.get("age") and self.data["age"] > 60))
@@ -10598,6 +10660,8 @@ class FlightEngine(Browsable, BigMomentSource):
             icon_col, icon_scale = col, 1.2
         elif note:
             icon_col, icon_scale = col, 1.1
+        elif is_regular:
+            icon_col, icon_scale = rim(col, REGULAR_GLOW_FLOOR), 1.03
         else:
             icon_col, icon_scale = rim(col, NOTABLE_GLOW_FLOOR), 1.0
         self._draw_plane_icon(buf, WIDTH // 2, 22, ac.get("track_deg"), icon_col,
