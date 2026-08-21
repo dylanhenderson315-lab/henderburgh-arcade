@@ -442,13 +442,23 @@
       <input type="text" id="home-door" placeholder="binary_sensor.front_door"></div>
     <div class="row"><label>Leak entity</label>
       <input type="text" id="home-leak" placeholder="binary_sensor.laundry_leak"></div>
+    <div class="row"><label>VIP notify service</label>
+      <input type="text" id="home-vipnotify" placeholder="mobile_app_your_iphone — empty disables"></div>
     <div class="row"><button id="home-save">Save</button>
       <span id="home-msg" class="badge"></span></div>
     <div class="hint">Rooms come from HA areas (Hallway, Kitchen, Living
       Room, Entertainment Room, 3rd Bedroom). Empty sensor ids stay off
       the glass — never a fake doorbell. Doorbell later: an HA automation
       calls script.arcade_notify with title RING and data.kind doorbell.
-      Leak is urgent. Lamp/board scripts are unchanged.</div>
+      Leak is urgent. Lamp/board scripts are unchanged.<br><br>
+      VIP notify service: the real HA `notify.` service name to push a
+      real, instant phone alert the moment flights.py's own feed
+      confirms a real Air Force One/Two, Marine One, or SAM/SPAR
+      callsign — no polling, fires from the same background thread that
+      already detects it. Reuses the same HA URL/token this Home Hub
+      already needs (set once in home_config.json, a real credential —
+      not editable from this page, same handling as the HA notify
+      token). Leave empty to disable.</div>
   </div>
 
   <div id="ambientcard" class="card hide">
@@ -1263,6 +1273,7 @@ async function loadHome(){
     if (bed && document.activeElement !== bed) bed.value = j.bedtime_hour ?? 23;
     const set = (id, v) => { const el = $(id); if (el && document.activeElement !== el) el.value = v || ''; };
     set('home-bell', j.doorbell); set('home-door', j.door); set('home-leak', j.leak);
+    set('home-vipnotify', j.vip_notify_service);
     const bits = [];
     if (j.on_count != null) bits.push(j.on_count + ' on');
     if (j.story) bits.push(j.story);
@@ -1275,7 +1286,8 @@ if ($('home-save')) $('home-save').addEventListener('click', async () => {
   const j = await (await post('/api/home', {
     bedtime_hour: parseInt($('home-bed').value, 10),
     doorbell: $('home-bell').value, door: $('home-door').value,
-    leak: $('home-leak').value
+    leak: $('home-leak').value,
+    vip_notify_service: $('home-vipnotify').value
   })).json();
   say('home-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
   loadHome();

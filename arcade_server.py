@@ -1370,6 +1370,7 @@ class Handler(BaseHTTPRequestHandler):
                 "doorbell": cfg.get("doorbell"),
                 "door": cfg.get("door"),
                 "leak": cfg.get("leak"),
+                "vip_notify_service": cfg.get("vip_notify_service"),
                 "on_count": live.get("on_count"),
                 "rooms_live": live.get("rooms"),
                 "story": live.get("story"),
@@ -1671,7 +1672,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "bedtime_hour": cfg.get("bedtime_hour"),
                             "doorbell": cfg.get("doorbell"),
                             "door": cfg.get("door"),
-                            "leak": cfg.get("leak")})
+                            "leak": cfg.get("leak"),
+                            "vip_notify_service": cfg.get("vip_notify_service")})
             except (ValueError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/notify":

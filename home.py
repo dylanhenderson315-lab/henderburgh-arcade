@@ -56,7 +56,16 @@ DEFAULTS = {
     "doorbell": None,
     "door": None,
     "leak": None,
+    # OUTBOUND push (2026-08-21) -- the real HA "notify" service to call
+    # for an urgent, immediate push to the owner's phone (e.g.
+    # "mobile_app_dylans_iphone"), reusing the SAME ha_url/ha_token this
+    # module already holds for reading states. Not a guessed default --
+    # every real install names this differently, so it stays None (push
+    # disabled) until the owner sets it from the control panel.
+    "vip_notify_service": None,
 }
+
+PUSH_TIMEOUT = 6.0
 
 _ENTITY_ROOM = (
     ("hallway", "hallway"),
@@ -119,6 +128,8 @@ def load_config():
     for k in ("doorbell", "door", "leak"):
         v = raw.get(k)
         cfg[k] = str(v).strip() or None if v else None
+    v = raw.get("vip_notify_service")
+    cfg["vip_notify_service"] = str(v).strip() or None if v else None
     return cfg
 
 
@@ -134,7 +145,7 @@ def save_config(patch):
         data = {}
     if not isinstance(patch, dict):
         raise ValueError("config must be an object")
-    for k in ("ha_url", "ha_token", "doorbell", "door", "leak"):
+    for k in ("ha_url", "ha_token", "doorbell", "door", "leak", "vip_notify_service"):
         if k in patch:
             v = patch[k]
             data[k] = (str(v).strip() or None) if v else None
@@ -152,6 +163,39 @@ def save_config(patch):
         data["exclude_prefix"] = patch["exclude_prefix"]
     CONFIG_PATH.write_text(json.dumps(data, indent=2))
     return load_config()
+
+
+def push_notification(title, message):
+    """Fire a real, immediate push to the owner's phone via HA's own
+    notify service (POST /api/services/notify/<vip_notify_service>),
+    reusing the SAME ha_url/ha_token this module already holds for
+    reading states -- a one-shot outbound call, not a poller, so calling
+    this from another module (e.g. flights.py's VIP write-path) is safe
+    without starting any background thread or touching FEED lifecycle.
+
+    Honest degrade, never raises: returns False (and does nothing) when
+    HA isn't configured, no notify service is set, or the real call
+    fails for any reason -- a failed push must never take down whatever
+    real detector triggered it (flights.py's own background poll thread,
+    in the one caller that exists so far)."""
+    cfg = load_config()
+    url, token, service = (cfg.get("ha_url"), cfg.get("ha_token"),
+                            cfg.get("vip_notify_service"))
+    if not (url and token and service):
+        return False
+    try:
+        payload = json.dumps({"title": str(title), "message": str(message)}).encode()
+        req = urllib.request.Request(
+            url.rstrip("/") + f"/api/services/notify/{service}",
+            data=payload, method="POST",
+            headers={"Authorization": "Bearer " + token,
+                     "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=PUSH_TIMEOUT):
+            pass
+        return True
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return False
 
 
 def _excluded(eid, prefixes):

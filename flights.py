@@ -46,6 +46,7 @@ import paneltext
 
 import events_log
 import hangar
+import home
 import vip_registry
 import satellite
 
@@ -1692,6 +1693,14 @@ class FlightFeed:
                     # unregistered aircraft is honestly never recorded).
                     if a.get("reg"):
                         vip_registry.LOG.record(a["reg"], label, a.get("type"))
+                    # PUSH NOTIFICATION (2026-08-21) -- fire-and-forget,
+                    # honest degrade via home.push_notification() itself
+                    # (returns False, does nothing, if HA/notify service
+                    # isn't configured). Real, instant, zero polling --
+                    # this is the SAME background poll thread that just
+                    # confirmed the real callsign, not a second cadence.
+                    reg_txt = a.get("reg") or "unknown registration"
+                    home.push_notification(f"VIP: {label}", f"{reg_txt} -- {summary}")
             self._seen_vip = now_vip
 
         with self._lock:
