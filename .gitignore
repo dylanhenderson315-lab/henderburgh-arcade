@@ -29,6 +29,12 @@ notify_config.json
 # rather than committed-until-a-key-exists.
 nowplaying_config.json
 
+# Home Hub's HA long-lived access token -- same real-credential category
+# as notify_config.json/nowplaying_config.json above. Was previously
+# tracked with an empty ha_token; untracked here the moment a real token
+# was about to be written in, same reasoning as the other two.
+home_config.json
+
 # ATC transcription log -- runtime state (real transcript text with real
 # timestamps), not source, and personal-rig-only (see atc.py/CLAUDE.md).
 atc_log.jsonl
