@@ -1733,6 +1733,7 @@ FEED = FlightFeed()
 FOLLOW_CONFIG_PATH = Path(__file__).parent / "follow_flight_config.json"
 
 TRAIL_MAX_POINTS_FOLLOW = 80   # see FollowFlightFeed.__init__'s own note
+LANDING_SOON_PCT = 0.85        # reasoned judgment call -- see the push-notify note in _refresh_once
 
 FOLLOW_REFRESH = 15.0   # flat interval, not adaptive like POSITION_REFRESH's
                         # neighbor concept -- this is a SINGLE flight lookup,
@@ -2100,6 +2101,12 @@ class FollowFlightFeed:
         # flight time at full resolution -- plenty for "watch it live";
         # capped, not thinned, matching the local trail's own discipline.
         self._trail = []            # list of real (lat, lon), oldest first
+        # One-shot "landing soon" push (2026-08-21, "keep innovating" follow-up).
+        # Fires at most once per followed flight, the same adopt-then-diff
+        # discipline as flights._detect_emergency_squawk()'s seen-set: reset
+        # whenever the callsign changes so a new flight always gets its own
+        # real notice rather than inheriting the last one's fired state.
+        self._landing_notified = False
 
     def set_followed(self, callsign):
         """Owner sets (or clears, with a falsy callsign) which flight to
@@ -2115,6 +2122,7 @@ class FollowFlightFeed:
             self._last_try = 0.0
             self._err = None
             self._trail = []
+            self._landing_notified = False
         return norm
 
     def get(self):
@@ -2163,27 +2171,7 @@ class FollowFlightFeed:
         # REAL points and a real haversine distance -- never a guessed
         # percentage. No resolvable origin+dest -> progress is None, an
         # honest gap, not a fabricated 0%.
-        ov = load_follow_route_override()
-        origin = _resolve_airport(ov.get("origin_code"), ov.get("origin_lat"), ov.get("origin_lon"))
-        if origin is None and route:
-            olat, olon = route.get("origin_lat"), route.get("origin_lon")
-            if isinstance(olat, (int, float)) and isinstance(olon, (int, float)):
-                origin = (olat, olon)
-        dest = _resolve_airport(ov.get("dest_code"), ov.get("dest_lat"), ov.get("dest_lon"))
-        if dest is None and route:
-            dlat, dlon = route.get("dest_lat"), route.get("dest_lon")
-            if isinstance(dlat, (int, float)) and isinstance(dlon, (int, float)):
-                dest = (dlat, dlon)
-        progress = None
-        if origin and dest and aircraft:
-            alat, alon = aircraft.get("lat"), aircraft.get("lon")
-            if isinstance(alat, (int, float)) and isinstance(alon, (int, float)):
-                _, total_nm = bearing_distance(origin[0], origin[1], dest[0], dest[1])
-                _, remain_nm = bearing_distance(alat, alon, dest[0], dest[1])
-                if total_nm > 0.5:   # a real, non-degenerate leg -- not a rounding puddle
-                    pct = min(1.0, max(0.0, 1.0 - (remain_nm / total_nm)))
-                    progress = {"origin": origin, "dest": dest, "pct": pct,
-                                "remaining_nm": remain_nm, "total_nm": total_nm}
+        progress = self._compute_progress(aircraft, route)
 
         return {
             "configured": callsign is not None,
@@ -2197,6 +2185,33 @@ class FollowFlightFeed:
             "airborne": airborne,
             "err": err,
         }
+
+    def _compute_progress(self, aircraft, route):
+        """Shared by get() (render-path, must never block) and
+        _refresh_once() (background-thread, where the landing-soon push
+        below is allowed to fire real network I/O) -- one real haversine
+        calc, not two copies that could drift."""
+        ov = load_follow_route_override()
+        origin = _resolve_airport(ov.get("origin_code"), ov.get("origin_lat"), ov.get("origin_lon"))
+        if origin is None and route:
+            olat, olon = route.get("origin_lat"), route.get("origin_lon")
+            if isinstance(olat, (int, float)) and isinstance(olon, (int, float)):
+                origin = (olat, olon)
+        dest = _resolve_airport(ov.get("dest_code"), ov.get("dest_lat"), ov.get("dest_lon"))
+        if dest is None and route:
+            dlat, dlon = route.get("dest_lat"), route.get("dest_lon")
+            if isinstance(dlat, (int, float)) and isinstance(dlon, (int, float)):
+                dest = (dlat, dlon)
+        if origin and dest and aircraft:
+            alat, alon = aircraft.get("lat"), aircraft.get("lon")
+            if isinstance(alat, (int, float)) and isinstance(alon, (int, float)):
+                _, total_nm = bearing_distance(origin[0], origin[1], dest[0], dest[1])
+                _, remain_nm = bearing_distance(alat, alon, dest[0], dest[1])
+                if total_nm > 0.5:   # a real, non-degenerate leg -- not a rounding puddle
+                    pct = min(1.0, max(0.0, 1.0 - (remain_nm / total_nm)))
+                    return {"origin": origin, "dest": dest, "pct": pct,
+                            "remaining_nm": remain_nm, "total_nm": total_nm}
+        return None
 
     # ---- polling -----------------------------------------------------
     def _ensure_thread(self):
@@ -2276,6 +2291,32 @@ class FollowFlightFeed:
                     self._trail.append((lat, lon))
                     if len(self._trail) > TRAIL_MAX_POINTS_FOLLOW:
                         self._trail = self._trail[-TRAIL_MAX_POINTS_FOLLOW:]
+            already_notified = self._landing_notified
+            route_for_progress = (ac or {}).get("route") if ac else None
+
+        # "LANDING SOON" push (2026-08-21) -- fires at most once per followed
+        # flight, on the SAME background thread that already does real I/O
+        # here (never from get(), which must never block the render loop).
+        # Real progress only: LANDING_SOON_PCT is a stated judgment call
+        # (roughly final-approach territory for a typical airliner descent,
+        # same "reasoned, not measured" category as WINDOW_MAX_NM_DEFAULT),
+        # never fired on a guessed position. No resolvable route/progress
+        # -> no push, an honest gap rather than a fabricated "about to land".
+        if ac is not None and not already_notified:
+            progress = self._compute_progress(ac, route_for_progress)
+            if progress is not None and progress["pct"] >= LANDING_SOON_PCT:
+                with self._lock:
+                    self._landing_notified = True
+                cs_disp = (ac.get("callsign") or callsign or "").strip() or callsign
+                reg = ac.get("reg") or cs_disp
+                remain_mi = round(progress["remaining_nm"] * 1.15078)
+                home.push_notification(
+                    "LANDING SOON",
+                    f"{reg} is {remain_mi}mi out and about to land.",
+                )
+                events_log.LOG.record(
+                    "plane",
+                    paneltext.panel_text(f"{reg} approaching landing ({remain_mi}mi out)"))
 
 
 FOLLOW_FEED = FollowFlightFeed()
