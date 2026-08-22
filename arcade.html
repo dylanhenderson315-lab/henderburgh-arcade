@@ -338,6 +338,13 @@
 
   <div id="followcard" class="card hide">
     <h2>Follow a flight — anywhere, by callsign</h2>
+    <div id="ff-tracker" class="hide">
+      <canvas id="ff-map" width="600" height="320"
+        style="width:100%;height:auto;display:block;border-radius:10px;
+               border:1px solid var(--line);background:#050608;"></canvas>
+      <div id="ff-stats" class="hint" style="margin-top:8px;
+        display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;"></div>
+    </div>
     <div class="row"><label>Famous</label>
       <select id="ff-famous"><option value="">— pick a famous plane —</option></select></div>
     <div id="ff-famnote" class="hint"></div>
@@ -1188,6 +1195,151 @@ $('ff-famous').addEventListener('change', () => {
   $('ff-famnote').textContent = p ? p.note : '';
   if (p) $('ff-callsign').value = p.id;
 });
+// ---------- Live flight-tracker map (2026-08-21) ----------
+// A real, big map on the control panel itself -- the 64x64 LED panel's
+// own world-map view (engines.FollowFlightEngine._frame_map) draws the
+// exact same real data, but at 64x32 pixels it's too small to actually
+// read. This is the SAME real data (coastline, great-circle route,
+// flown trail, live position) at a scale a person can actually watch,
+// reusing the identical equirectangular-projection math
+// (world_xy/_fit_bounds/great_circle_points in engines.py) so the two
+// views agree, just rendered with HTML canvas instead of LED pixels.
+let ffCoastline = null;
+async function ffLoadCoastline(){
+  if (ffCoastline) return ffCoastline;
+  try{
+    const j = await (await fetch('/api/flights/coastline')).json();
+    ffCoastline = j.coastline || [];
+  }catch(_){ ffCoastline = []; }
+  return ffCoastline;
+}
+function ffFitBounds(pts, aspect){
+  // Mirrors engines._fit_bounds() exactly -- same padding, same
+  // MIN_LON_SPAN floor, same antimeridian bail-out to the whole Earth --
+  // so this canvas frames the real route identically to the panel's own.
+  const WORLD = [-90, 90, -180, 180], MIN_LON_SPAN = 40;
+  if (!pts.length) return WORLD;
+  const lats = pts.map(p => p[0]), lons = pts.map(p => p[1]);
+  if (Math.max(...lons) - Math.min(...lons) > 180) return WORLD;
+  const cLat = (Math.max(...lats) + Math.min(...lats)) / 2;
+  const cLon = (Math.max(...lons) + Math.min(...lons)) / 2;
+  const span = Math.max(
+    (Math.max(...lons) - Math.min(...lons)) * 1.6,
+    (Math.max(...lats) - Math.min(...lats)) * 1.6 * aspect,
+    MIN_LON_SPAN);
+  if (span >= 360) return WORLD;
+  const latSpan = span / aspect;
+  if (latSpan >= 180) return WORLD;
+  const lo0 = Math.min(Math.max(cLon - span / 2, -180), 180 - span);
+  const la0 = Math.min(Math.max(cLat - latSpan / 2, -90), 90 - latSpan);
+  return [la0, la0 + latSpan, lo0, lo0 + span];
+}
+function ffXY(lat, lon, w, h, b){
+  const [la0, la1, lo0, lo1] = b;
+  return [(lon - lo0) / (lo1 - lo0) * w, (la1 - lat) / (la1 - la0) * h];
+}
+function ffGreatCircle(lat1, lon1, lat2, lon2, n){
+  const r = Math.PI / 180;
+  const p1 = lat1 * r, l1 = lon1 * r, p2 = lat2 * r, l2 = lon2 * r;
+  const d = 2 * Math.asin(Math.sqrt(
+    Math.sin((p2 - p1) / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin((l2 - l1) / 2) ** 2));
+  if (d < 1e-9) return [[lat1, lon1], [lat2, lon2]];
+  const sd = Math.sin(d), out = [];
+  for (let i = 0; i <= n; i++){
+    const f = i / n;
+    const a = Math.sin((1 - f) * d) / sd, bb = Math.sin(f * d) / sd;
+    const x = a * Math.cos(p1) * Math.cos(l1) + bb * Math.cos(p2) * Math.cos(l2);
+    const y = a * Math.cos(p1) * Math.sin(l1) + bb * Math.cos(p2) * Math.sin(l2);
+    const z = a * Math.sin(p1) + bb * Math.sin(p2);
+    out.push([Math.atan2(z, Math.hypot(x, y)) / r, Math.atan2(y, x) / r]);
+  }
+  return out;
+}
+function ffDrawPolyline(ctx, pts, w, h, b, color, lw){
+  ctx.strokeStyle = color; ctx.lineWidth = lw || 1.5; ctx.beginPath();
+  let started = false, prevLon = null;
+  for (const [lat, lon] of pts){
+    if (prevLon !== null && Math.abs(lon - prevLon) > 180){ started = false; }
+    const [x, y] = ffXY(lat, lon, w, h, b);
+    if (!started){ ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }
+    prevLon = lon;
+  }
+  ctx.stroke();
+}
+function ffDrawMap(j){
+  const canvas = $('ff-map');
+  if (!canvas || !ffCoastline) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const ac = j.aircraft, prog = j.progress, trail = j.trail || [];
+  const fit = [];
+  if (prog){ fit.push(prog.origin); fit.push(prog.dest); }
+  if (ac && ac.lat != null && ac.lon != null) fit.push([ac.lat, ac.lon]);
+  for (const p of trail) fit.push(p);
+  const bounds = ffFitBounds(fit, w / h);
+
+  // Coastline, dim -- same real source the LED panel's own map draws.
+  for (const seg of ffCoastline) ffDrawPolyline(ctx, seg, w, h, bounds, 'rgba(120,140,160,0.35)', 1);
+
+  // Real great-circle planned route.
+  if (prog){
+    const gc = ffGreatCircle(prog.origin[0], prog.origin[1], prog.dest[0], prog.dest[1], 48);
+    ffDrawPolyline(ctx, gc, w, h, bounds, 'rgba(232,195,106,0.55)', 2);
+  }
+  // Real flown trail -- distinct color, on top of the planned route,
+  // same "a real deviation should visibly split apart" reasoning the
+  // LED panel's own draw_world_map() already documents.
+  if (trail.length >= 2) ffDrawPolyline(ctx, trail, w, h, bounds, '#54dceb', 2.5);
+
+  // Origin (hollow ring) / destination (filled) markers.
+  if (prog){
+    const [ox, oy] = ffXY(prog.origin[0], prog.origin[1], w, h, bounds);
+    ctx.strokeStyle = '#e8c36a'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(ox, oy, 5, 0, 7); ctx.stroke();
+    const [dx, dy] = ffXY(prog.dest[0], prog.dest[1], w, h, bounds);
+    ctx.fillStyle = '#4fce6c';
+    ctx.beginPath(); ctx.arc(dx, dy, 5, 0, 7); ctx.fill();
+  }
+  // Live aircraft position, heading-oriented triangle -- the one moving,
+  // "this is happening right now" element, drawn last/on top.
+  if (ac && ac.lat != null && ac.lon != null){
+    const [ax, ay] = ffXY(ac.lat, ac.lon, w, h, bounds);
+    const hdg = (ac.track_deg != null ? ac.track_deg : 0) * Math.PI / 180;
+    ctx.save(); ctx.translate(ax, ay); ctx.rotate(hdg);
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.moveTo(0, -9); ctx.lineTo(6, 8); ctx.lineTo(-6, 8); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+}
+function ffKtToMph(kt){ return kt * 1.15078; }
+function ffCompass(deg){
+  if (deg == null) return null;
+  const dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+  return dirs[Math.round((deg % 360) / 22.5) % 16];
+}
+function ffUpdateStats(j){
+  const el = $('ff-stats');
+  const ac = j.aircraft, prog = j.progress, route = j.route;
+  const rows = [];
+  if (ac){
+    rows.push(['Registration', ac.reg || ac.ident || '—']);
+    rows.push(['Type', ac.type || '—']);
+    if (route && route.airline) rows.push(['Airline', route.airline]);
+    rows.push(['Altitude', ac.alt_ft != null ? Math.round(ac.alt_ft).toLocaleString() + ' ft' : '—']);
+    rows.push(['Speed', ac.gs_kt != null ? Math.round(ffKtToMph(ac.gs_kt)) + ' mph' : '—']);
+    rows.push(['Heading', ac.track_deg != null ? (Math.round(ac.track_deg) + '° ' + (ffCompass(ac.track_deg) || '')) : '—']);
+  }
+  if (prog){
+    rows.push(['Progress', Math.round(prog.pct * 100) + '%']);
+    rows.push(['Remaining', Math.round(prog.remaining_nm) + ' nm']);
+    if (ac && ac.gs_kt > 20){
+      const etaMin = Math.round(prog.remaining_nm / ac.gs_kt * 60);
+      rows.push(['ETA', etaMin < 60 ? (etaMin + ' min') : (Math.floor(etaMin / 60) + 'h ' + (etaMin % 60) + 'm')]);
+    }
+  }
+  el.innerHTML = rows.map(([k, v]) => `<div style="opacity:.7">${k}</div><div>${v}</div>`).join('');
+}
 async function loadFollow(){
   try{ const j = await (await fetch('/api/flights/follow')).json();
        fillFamous(j.famous);
@@ -1204,8 +1356,23 @@ async function loadFollow(){
              : (j.airborne === false
                  ? 'Not currently airborne — still watching'
                  : (j.err ? ('No signal: ' + j.err + ' — still looking')
-                          : 'Looking for this flight'))); }catch(_){}
+                          : 'Looking for this flight')));
+       const tracker = $('ff-tracker');
+       if (j.airborne === true && j.aircraft){
+         tracker.classList.remove('hide');
+         await ffLoadCoastline();
+         ffDrawMap(j);
+         ffUpdateStats(j);
+       } else {
+         tracker.classList.add('hide');
+       }
+  }catch(_){}
 }
+// Live redraw while a real flight is airborne -- 5s, matching the real
+// server-side poll cadence (FOLLOW_REFRESH=15s) closely enough that the
+// map/stats never look stale, without polling faster than the data
+// actually changes.
+setInterval(loadFollow, 5000);
 $('ff-save').addEventListener('click', async () => {
   const j = await (await post('/api/flights/follow', {callsign: $('ff-callsign').value})).json();
   say('ff-msg', j.ok === false ? (j.error || 'error') : 'following', j.ok !== false);

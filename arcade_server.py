@@ -1399,6 +1399,16 @@ class Handler(BaseHTTPRequestHandler):
             # adding (only ever read from inside flights.py's own write
             # path, never over HTTP). Same shape as /api/flights/favorites.
             self._json({"vip_aircraft": vip_registry.LOG.get()})
+        elif path == "/api/flights/coastline":
+            # Real, static, one-time-extracted coastline data (2026-08-21,
+            # for the control panel's own big live flight-tracker map --
+            # see arcade.html) -- 45 segments / 415 points, small enough to
+            # serve whole with no pagination. Same real source
+            # (flights.WORLD_COASTLINE, Natural Earth 110m, public domain)
+            # the panel's own tiny 64x32 world-map view already draws from;
+            # this just gives the BROWSER the same real data so it can draw
+            # a much bigger, more legible version of the identical map.
+            self._json({"coastline": flights.WORLD_COASTLINE})
         elif path == "/api/dnd":
             self._json(dnd.load_config())
         elif path == "/api/space/page":
