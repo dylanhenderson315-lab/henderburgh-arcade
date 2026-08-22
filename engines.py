@@ -10957,11 +10957,23 @@ class FollowFlightEngine:
     ROUTE = (255, 226, 60)
     NOT_AIRBORNE = (255, 140, 60)
 
+    # VIEW_MAP (2026-08-21, "watch it live" direct owner ask) -- up/down
+    # toggles CARD <-> a real world-map view showing the actual flown
+    # trail, live position, and origin/destination, same idiom as
+    # FlightEngine's own up/down Hangar toggle (this engine has no other
+    # claim on that axis). Reuses draw_world_map()/world_xy() verbatim --
+    # zero new drawing primitives, the exact system the local flight-path
+    # menu view already proved out.
+    VIEW_CARD = 0
+    VIEW_MAP = 1
+
     def __init__(self):
         self.score = 0
         self.data = {"configured": False, "callsign": None, "aircraft": None,
-                     "route": None, "age": None, "airborne": None, "err": None}
+                     "route": None, "route_override": None, "trail": [],
+                     "progress": None, "age": None, "airborne": None, "err": None}
         self.pulse = Pulse()
+        self.view = self.VIEW_CARD
 
     def reset(self):
         pass
@@ -10976,16 +10988,20 @@ class FollowFlightEngine:
         return 2.4 if self.has_content() else 0.5
 
     def input(self, cmd):
-        # Nothing to browse -- one flight, one card. Left/right/up/down/
-        # rotate/drop are all no-ops, same as WeatherEngine's own
-        # single-view no-input contract.
-        pass
+        # Only up/down do anything -- toggle CARD <-> MAP. Nothing to
+        # browse within either view (one flight, one position), so
+        # left/right/rotate/drop stay no-ops, same as WeatherEngine's own
+        # single-view convention for the axes it doesn't claim.
+        if cmd in ("up", "down") and self.data.get("airborne") is True:
+            self.view = self.VIEW_MAP if self.view == self.VIEW_CARD else self.VIEW_CARD
 
     def auto(self):
         pass
 
     def tick(self):
         self.data = flights.FOLLOW_FEED.get()
+        if self.data.get("airborne") is not True:
+            self.view = self.VIEW_CARD   # nothing real to map -- fall back
         ac = self.data.get("aircraft")
         self.pulse.note(ac.get("hex") if ac else None)
 
@@ -11034,13 +11050,19 @@ class FollowFlightEngine:
                 draw_text_centered(buf, 36, "FOR THIS FLIGHT", self.INK_DIM)
             return bytes(buf)
 
+        if self.view == self.VIEW_MAP:
+            return self._frame_map(ac, title)
+
         # Airborne: the real card. Vertical budget, checked to not
         # collide (hero silhouette at cy=24/scale=0.75 reaches roughly
         # y=12..31 -- see draw_hero_silhouette()'s own fixed-wing
         # geometry, _HERO_FIXED_WING's tallest kind is the airliner at
         # nose_fy=16/tail_fy=9.5 units, times scale):
         #   header 2-9 | icon 12-31 | reg 36-40 | route 44-48 |
-        #   alt/speed/hdg 53-57 | type 59-63 (HEIGHT=64, last legal row)
+        #   alt/speed/hdg 53-57 | type 58-62 | progress bar 63
+        #   (HEIGHT=64 -- the type row moved up 1px from its original
+        #   y=59 to free the real bottom-edge row for the progress bar,
+        #   2026-08-21 -- still zero overlap with the row above at 53-57)
         alt = ac.get("alt_ft")
         col = FlightEngine._alt_color(alt)
         kind = self._icon_kind(ac)
@@ -11076,6 +11098,19 @@ class FollowFlightEngine:
         hdg_txt = compass or "-"
         left = alt_txt
         right = f"{gs_txt} {hdg_txt}".strip()
+        # Real bug, found by rendering a real fast-jet case (390kt ->
+        # "449MPH SW"): the fixed WIDTH-4 budget assumed a slower
+        # aircraft's shorter mph string and never checked the two sides
+        # actually fit -- "28000FT" and "449MPH SW" together ran 62px
+        # against a 64px panel with only a 2px right margin, a real
+        # 2px COLLISION. Drop the heading suffix first (still shows the
+        # real speed, the more useful of the two), then if STILL too
+        # wide (an even faster/longer real case), let draw_text3x5's own
+        # right-anchor eat into the left side rather than silently
+        # overlapping -- checked, not assumed, via text_w() same as
+        # every other budget check in this project.
+        if 2 + text_w(left) + 2 > WIDTH - 2 - text_w(right):
+            right = gs_txt
         draw_text3x5(buf, 2, 53, left, self.INK_DIM)
         draw_text3x5(buf, WIDTH - 2 - text_w(right), 53, right, self.INK_DIM)
         vr = FlightEngine._vrate_label(ac)
@@ -11087,9 +11122,87 @@ class FollowFlightEngine:
 
         typ = (flights._type_name(ac.get("type")) or "").upper()
         airline = (route or {}).get("airline") if route else None
+        # Real bug, found by rendering a real long airline name (REPUBLIC
+        # AIRLINES): fit_text() drops whole trailing WORDS, so a combined
+        # "ERJ-175 - REPUBLIC AIRLINES" string over budget silently
+        # dropped both words of the airline and left a dangling "ERJ-175
+        # -" with nothing after the separator -- the exact bug class
+        # CLAUDE.md's own departure-board note already names (a truncator
+        # eating the wrong end of a joined string). Fixed the same way
+        # that fix did: try the full join first, and only fall back to
+        # type alone (never a stray trailing "-") when it genuinely
+        # doesn't fit -- checked via text_w(), not guessed.
         foot = " - ".join(t for t in (typ, airline) if t)
+        if foot and text_w(foot) > WIDTH - 4:
+            foot = typ
         if foot:
-            draw_text_centered(buf, 59, fit_text(foot, WIDTH - 4), (86, 94, 116))
+            draw_text_centered(buf, 58, fit_text(foot, WIDTH - 4), (86, 94, 116))
+
+        # REAL FLIGHT-COMPLETION BAR (2026-08-21, direct owner ask: "a
+        # line at bottom that... fills as she completes the flight
+        # dynamically"). One real pixel row, filled left-to-right by the
+        # real great-circle-distance progress computed in
+        # flights.FollowFlightFeed.get() -- empty at a real departure,
+        # full at a real arrival, nothing invented in between. Absent
+        # entirely (no bar drawn at all) when no real origin+destination
+        # is resolvable, an honest gap rather than a guessed 0%.
+        progress = self.data.get("progress")
+        if progress:
+            filled = int(round(progress["pct"] * WIDTH))
+            for x in range(WIDTH):
+                put_px(buf, x, HEIGHT - 1,
+                      col if x < filled else rim(col, 0.22))
+        return bytes(buf)
+
+    def _frame_map(self, ac, title):
+        """WATCH IT LIVE (2026-08-21, direct owner ask) -- the real
+        flown-path trail plus the live position on the SAME world-map
+        system the local flight-path menu view already uses
+        (draw_world_map()/world_xy()/_fit_bounds()), zero new drawing
+        primitives. Route resolution mirrors flights.FollowFlightFeed.
+        get()'s own progress calc exactly: the owner's real confirmed
+        override wins over adsbdb's per-callsign route (which can be
+        stale for a reused flight number -- see load_follow_route_
+        override()'s own docstring), falling back to adsbdb when no
+        override is set. A route with only one end resolved still draws
+        that one real marker -- draw_world_map()'s own established
+        "half a real fact beats a blank map" rule."""
+        buf = blank()
+        fill(buf, self.BG)
+        alt = ac.get("alt_ft")
+        col = FlightEngine._alt_color(alt)
+        progress = self.data.get("progress")
+        tag = f"{progress['pct'] * 100:.0f}%" if progress else None
+        draw_header(buf, title, self.pulse.mix(col), right_tag=tag)
+
+        ov = self.data.get("route_override") or {}
+        route = dict(self.data.get("route") or {})
+        o = flights._resolve_airport(ov.get("origin_code"), ov.get("origin_lat"), ov.get("origin_lon"))
+        if o:
+            route["origin_lat"], route["origin_lon"] = o
+        d = flights._resolve_airport(ov.get("dest_code"), ov.get("dest_lat"), ov.get("dest_lon"))
+        if d:
+            route["dest_lat"], route["dest_lon"] = d
+
+        trail = self.data.get("trail") or []
+        draw_world_map(buf, route, ac_lat=ac.get("lat"), ac_lon=ac.get("lon"),
+                       x0=0, y0=10, w=WIDTH, h=32, flown_trail=trail)
+
+        # Same real completion bar as the card view, reused verbatim --
+        # one consistent "this is how far along she is" signal regardless
+        # of which view is showing.
+        if progress:
+            filled = int(round(progress["pct"] * WIDTH))
+            for x in range(WIDTH):
+                put_px(buf, x, HEIGHT - 1,
+                      col if x < filled else rim(col, 0.22))
+
+        reg = ac.get("reg") or ac.get("ident") or "-"
+        gs = ac.get("gs_kt")
+        alt_txt = f"{alt:.0f}FT" if isinstance(alt, (int, float)) else "-"
+        gs_txt = f"{kt_to_mph(gs):.0f}MPH" if isinstance(gs, (int, float)) else "-"
+        cap = f"{reg} {alt_txt} {gs_txt}".strip()
+        draw_text_centered(buf, 45, fit_text(cap, WIDTH - 4), self.INK_DIM)
         return bytes(buf)
 
 

@@ -356,7 +356,22 @@
       radio form instead (three letters + number — <b>UAL123</b>, not
       <b>UA123</b>). LOOKING / NO SIGNAL / NOT AIRBORNE are three
       different real states — ambient only dwells when it's actually
-      airborne.</div>
+      airborne. On the panel, <b>UP/DOWN</b> switches between the detail
+      card and a live map with the flown path and a fill bar showing how
+      far along the flight is.</div>
+    <div class="row"><label>Departs</label>
+      <input type="text" id="ff-origin" placeholder="e.g. LGA (optional)"></div>
+    <div class="row"><label>Arrives</label>
+      <input type="text" id="ff-dest" placeholder="e.g. MYR (optional)"></div>
+    <div class="row"><button id="ff-route-save">Save route</button>
+      <span id="ff-route-msg" class="badge"></span></div>
+    <div class="hint">Only needed if the panel's own route guess looks
+      wrong — a flight number can be reused for a different city pair on
+      a different day, so the automatic lookup occasionally shows a
+      stale route. Setting these confirms the real one directly, and
+      it's what drives the live map and the completion bar. Airport
+      code only (a handful of major US hubs are recognized); leave blank
+      to keep using the automatic guess.</div>
   </div>
 
   <div id="favaccard" class="card hide">
@@ -1177,10 +1192,15 @@ async function loadFollow(){
   try{ const j = await (await fetch('/api/flights/follow')).json();
        fillFamous(j.famous);
        if (j.callsign && !$('ff-callsign').matches(':focus')) $('ff-callsign').value = j.callsign;
+       const ov = j.route_override || {};
+       if (!$('ff-origin').matches(':focus')) $('ff-origin').value = ov.origin_code || '';
+       if (!$('ff-dest').matches(':focus')) $('ff-dest').value = ov.dest_code || '';
+       const pct = j.progress ? Math.round(j.progress.pct * 100) + '% there' : '';
        $('ff-now').textContent = !j.configured ? ''
          : (j.airborne === true
              ? ('Airborne now' + (j.aircraft && j.aircraft.alt_ft != null
-                 ? ('  ·  ' + Math.round(j.aircraft.alt_ft) + 'ft') : ''))
+                 ? ('  ·  ' + Math.round(j.aircraft.alt_ft) + 'ft') : '')
+                 + (pct ? ('  ·  ' + pct) : ''))
              : (j.airborne === false
                  ? 'Not currently airborne — still watching'
                  : (j.err ? ('No signal: ' + j.err + ' — still looking')
@@ -1193,7 +1213,19 @@ $('ff-save').addEventListener('click', async () => {
 });
 $('ff-clear').addEventListener('click', async () => {
   await post('/api/flights/follow', {callsign: ''});
-  $('ff-callsign').value = ''; say('ff-msg', 'stopped'); loadFollow();
+  $('ff-callsign').value = ''; $('ff-origin').value = ''; $('ff-dest').value = '';
+  say('ff-msg', 'stopped'); loadFollow();
+});
+$('ff-route-save').addEventListener('click', async () => {
+  // Deliberately no "callsign" field here -- see arcade_server.py's own
+  // note on this endpoint: including it (even unchanged) would reset
+  // the in-progress poll/trail, which a route CONFIRMATION should never
+  // do to an already-tracking flight.
+  const j = await (await post('/api/flights/follow', {
+    origin_code: $('ff-origin').value, dest_code: $('ff-dest').value
+  })).json();
+  say('ff-route-msg', j.ok === false ? (j.error || 'error') : 'saved', j.ok !== false);
+  loadFollow();
 });
 
 async function loadNowPlaying(){

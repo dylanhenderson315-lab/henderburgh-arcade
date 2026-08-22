@@ -371,13 +371,21 @@ def drive_followflight(audit):
     and configured-and-airborne with a full real-shaped aircraft+route."""
     frames = [0]
     collisions = []
+    trail = [(40.7 - i * 0.3, -78.0 - i * 0.2) for i in range(15)]
+    progress = {"origin": (40.777245, -73.872608), "dest": (33.679699, -78.928299),
+                "pct": 0.42, "remaining_nm": 200.0, "total_nm": 345.0}
+    ov = {"origin_code": "LGA", "origin_lat": None, "origin_lon": None,
+          "dest_code": "MYR", "dest_lat": None, "dest_lon": None}
     variants = [
         {"configured": False, "callsign": None, "aircraft": None,
-         "route": None, "age": None, "airborne": None, "err": None},
+         "route": None, "route_override": None, "trail": [], "progress": None,
+         "age": None, "airborne": None, "err": None},
         {"configured": True, "callsign": "UAL123", "aircraft": None,
-         "route": None, "age": 12.0, "airborne": False, "err": None},
+         "route": None, "route_override": None, "trail": [], "progress": None,
+         "age": 12.0, "airborne": False, "err": None},
         {"configured": True, "callsign": "UAL123", "aircraft": None,
-         "route": None, "age": None, "airborne": None, "err": "HTTPError"},
+         "route": None, "route_override": None, "trail": [], "progress": None,
+         "age": None, "airborne": None, "err": "HTTPError"},
         {"configured": True, "callsign": "DAL1362", "aircraft": {
             "ident": "DAL1362", "hex": "A1B2C3", "reg": "N182DN", "type": "B739",
             "callsign": "DAL1362", "category": "A3", "alt_ft": 35000,
@@ -389,12 +397,42 @@ def drive_followflight(audit):
          "route": {"origin": "RDU", "dest": "LGA",
                    "origin_city": "RALEIGH/DURHAM", "dest_city": "NEW YORK",
                    "airline": "DELTA AIR LINES"},
+         "route_override": None, "trail": [], "progress": None,
+         "age": 3.0, "airborne": True, "err": None},
+        # Real fast-jet case (2026-08-21) -- 390kt ground speed makes
+        # "449MPH SW" wide enough to collide with "28000FT" under the old
+        # fixed budget; a real long airline name ("REPUBLIC AIRLINES")
+        # made fit_text() leave a dangling "ERJ-175 -" separator. Both
+        # real bugs, both fixed; this variant is what would have caught
+        # either one on the very first audit run.
+        {"configured": True, "callsign": "RPA4495", "aircraft": {
+            "ident": "RPA4495", "hex": "A546C9", "reg": "N439YX", "type": "E75L",
+            "callsign": "RPA4495", "category": "A3", "alt_ft": 28000,
+            "gs_kt": 390.0, "track_deg": 220.0, "lat": 37.9, "lon": -81.05,
+            "phase": "CRUISE", "vrate_fpm": 0,
+            "route": {"origin": "PHL", "dest": "DCA",
+                      "origin_city": "PHILADELPHIA", "dest_city": "WASHINGTON",
+                      "airline": "REPUBLIC AIRLINES",
+                      "origin_lat": 39.87, "origin_lon": -75.24,
+                      "dest_lat": 38.85, "dest_lon": -77.03}},
+         "route": {"origin": "PHL", "dest": "DCA",
+                   "origin_city": "PHILADELPHIA", "dest_city": "WASHINGTON",
+                   "airline": "REPUBLIC AIRLINES",
+                   "origin_lat": 39.87, "origin_lon": -75.24,
+                   "dest_lat": 38.85, "dest_lon": -77.03},
+         "route_override": ov, "trail": trail, "progress": progress,
          "age": 3.0, "airborne": True, "err": None},
     ]
     for i, data in enumerate(variants):
         eng = engines.FollowFlightEngine()
         eng.data = data
         _snap(audit, eng, "followflight variant %d" % i, frames, collisions)
+        # The real fast-jet variant is the one with a resolvable trail --
+        # also exercise the new MAP view (up/down toggle) through it, so
+        # a real map-layout regression shows up in the normal sweep too.
+        if data.get("trail"):
+            eng.view = engines.FollowFlightEngine.VIEW_MAP
+            _snap(audit, eng, "followflight variant %d map" % i, frames, collisions)
     return frames[0], collisions
 
 

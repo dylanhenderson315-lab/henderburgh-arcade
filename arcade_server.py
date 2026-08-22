@@ -1296,6 +1296,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"configured": s["configured"], "callsign": s["callsign"],
                         "airborne": s["airborne"], "age": s["age"],
                         "aircraft": s["aircraft"], "err": s["err"],
+                        "route": s["route"], "route_override": s["route_override"],
+                        "progress": s["progress"], "trail": s["trail"],
                         # Curated famous-aircraft picker (flights.FAMOUS_
                         # AIRCRAFT is the single source of truth; the HTML
                         # never hardcodes tail numbers).
@@ -1653,8 +1655,31 @@ class Handler(BaseHTTPRequestHandler):
             # AIRBORNE rather than being rejected or reformatted.
             try:
                 j = json.loads(body or b"{}")
-                cs = flights.FOLLOW_FEED.set_followed(j.get("callsign"))
-                self._json({"ok": True, "callsign": cs})
+                # Real bug caught before shipping (2026-08-21): set_followed()
+                # unconditionally resets the in-progress aircraft/trail/poll
+                # state, even to the SAME callsign -- correct for the actual
+                # "follow" button, but a real problem once the route-override
+                # card below started POSTing to this same endpoint to just
+                # CONFIRM a route, which must never reset an already-tracking
+                # flight's real accumulated trail. Only call it when the body
+                # genuinely includes a "callsign" key.
+                cs = flights.FOLLOW_FEED.get()["callsign"]
+                if "callsign" in j:
+                    cs = flights.FOLLOW_FEED.set_followed(j.get("callsign"))
+                # Real, owner-confirmed origin/destination override
+                # (2026-08-21) -- optional, only touched when the POST
+                # body actually includes one of these keys. See
+                # flights.load_follow_route_override()'s own docstring
+                # for why this exists (adsbdb's per-callsign route can be
+                # stale for a reused flight number).
+                if any(k in j for k in ("origin_code", "origin_lat", "origin_lon",
+                                        "dest_code", "dest_lat", "dest_lon")):
+                    flights.save_follow_route_override(
+                        origin_code=j.get("origin_code"), origin_lat=j.get("origin_lat"),
+                        origin_lon=j.get("origin_lon"), dest_code=j.get("dest_code"),
+                        dest_lat=j.get("dest_lat"), dest_lon=j.get("dest_lon"))
+                self._json({"ok": True, "callsign": cs,
+                            "route_override": flights.load_follow_route_override()})
             except (ValueError, AttributeError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/home/ingest":

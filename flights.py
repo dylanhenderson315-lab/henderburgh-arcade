@@ -1732,6 +1732,8 @@ FEED = FlightFeed()
 # conflate the two.
 FOLLOW_CONFIG_PATH = Path(__file__).parent / "follow_flight_config.json"
 
+TRAIL_MAX_POINTS_FOLLOW = 80   # see FollowFlightFeed.__init__'s own note
+
 FOLLOW_REFRESH = 15.0   # flat interval, not adaptive like POSITION_REFRESH's
                         # neighbor concept -- this is a SINGLE flight lookup,
                         # not an up-to-8-aircraft scope, so there is no
@@ -1791,6 +1793,109 @@ FAMOUS_AIRCRAFT = (
     ("B-17 ALUMINUM OVERCAST", "N5017N", "reg", "EAA B-17 Flying Fortress"),
     ("B-17 SENTIMENTAL JOURNEY", "N9323Z", "reg", "CAF B-17 Flying Fortress"),
 )
+
+
+# REAL, PUBLIC airport coordinates (2026-08-21, "innovate on top of it"
+# follow-up) -- a small reference table, same category and same sourcing
+# discipline as the home airport's own MYR seed above (OurAirports,
+# public domain): NOT a 12MB full airport database (CLAUDE.md's own
+# "airport arrivals -- NOT VIABLE FREE" section already rejected that
+# for a different feature, same reasoning applies here), just the major
+# US hubs an owner is likely to actually type when confirming a followed
+# flight's real origin/destination. Exists because adsbdb's per-callsign
+# route lookup is keyed on the FLIGHT NUMBER alone, not today's actual
+# schedule -- a reused flight number can return a stale route from a
+# different day/time (confirmed live: RPA4495 looked up as PHL>DCA while
+# actually flying LGA>MYR) -- so the owner directly confirming the real
+# route beats trusting that lookup. A code not in this table still works
+# via raw lat/lon (same free-form-coordinate precedent the home location
+# card already established) -- this table is a convenience, not a hard
+# requirement.
+US_AIRPORTS = {
+    "LGA": (40.777245, -73.872608), "JFK": (40.639447, -73.779317),
+    "EWR": (40.692500, -74.168667), "MYR": (33.679699, -78.928299),
+    "ATL": (33.636719, -84.428067), "ORD": (41.978603, -87.904842),
+    "DFW": (32.896828, -97.037997), "DEN": (39.856094, -104.673860),
+    "LAX": (33.942536, -118.408075), "SFO": (37.621313, -122.378955),
+    "SEA": (47.449001, -122.309306), "MIA": (25.795865, -80.287046),
+    "BOS": (42.365613, -71.009560), "PHL": (39.874400, -75.242400),
+    "CLT": (35.213800, -80.949100), "IAH": (29.984400, -95.341400),
+    "PHX": (33.434278, -112.011583), "MCO": (28.429394, -81.308994),
+    "LAS": (36.080056, -115.152222), "MSP": (44.882000, -93.221800),
+    "DTW": (42.212400, -83.353400), "FLL": (26.072600, -80.152700),
+    "BWI": (39.175400, -76.668300), "DCA": (38.852100, -77.037700),
+    "IAD": (38.944500, -77.455800), "RDU": (35.877600, -78.787500),
+    "CVG": (39.048800, -84.667800), "BNA": (36.124500, -86.678200),
+    "AUS": (30.194500, -97.669900), "SAN": (32.733600, -117.190000),
+    "TPA": (27.975500, -82.533200), "PDX": (45.588700, -122.597000),
+    "STL": (38.748700, -90.370000),
+}
+
+
+def _resolve_airport(code_or_none, lat, lon):
+    """A real (lat, lon) from either a known US_AIRPORTS code or explicit
+    raw coordinates -- code wins if both are given (a code is the more
+    legible thing an owner actually typed). None if neither resolves,
+    an honest gap, never a guessed point."""
+    if code_or_none:
+        c = str(code_or_none).strip().upper()
+        if c in US_AIRPORTS:
+            return US_AIRPORTS[c]
+    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+        return (lat, lon)
+    return None
+
+
+def load_follow_route_override():
+    """The owner's own real, directly-confirmed origin/destination for
+    the currently-followed flight, or an all-None dict if unset. Lives
+    in the same follow_flight_config.json as the callsign -- read-
+    modify-write, per this project's standing destructive-overwrite
+    lesson."""
+    path = FOLLOW_CONFIG_PATH
+    empty = {"origin_code": None, "origin_lat": None, "origin_lon": None,
+              "dest_code": None, "dest_lat": None, "dest_lon": None}
+    if not path.exists():
+        return empty
+    try:
+        data = json.loads(path.read_text()) or {}
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return empty
+    out = dict(empty)
+    for k in empty:
+        v = data.get(k)
+        if k.endswith("_code"):
+            out[k] = str(v).strip().upper() if v else None
+        elif isinstance(v, (int, float)):
+            out[k] = v
+    return out
+
+
+def save_follow_route_override(origin_code=None, origin_lat=None, origin_lon=None,
+                               dest_code=None, dest_lat=None, dest_lon=None):
+    """Read-modify-write, same shape as save_followed_flight() right
+    below. Any field left as None (the default) preserves whatever was
+    already saved -- an owner correcting just the destination must not
+    silently wipe an already-confirmed origin. Pass the string "" for a
+    code (not None) to explicitly clear one field."""
+    path = FOLLOW_CONFIG_PATH
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text()) or {}
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            data = {}
+    for k, v in (("origin_code", origin_code), ("origin_lat", origin_lat),
+                 ("origin_lon", origin_lon), ("dest_code", dest_code),
+                 ("dest_lat", dest_lat), ("dest_lon", dest_lon)):
+        if v is None:
+            continue
+        if k.endswith("_code"):
+            data[k] = str(v).strip().upper() or None
+        elif isinstance(v, (int, float)):
+            data[k] = v
+    path.write_text(json.dumps(data, indent=2))
+    return load_follow_route_override()
 
 
 def famous_aircraft():
@@ -1986,12 +2091,22 @@ class FollowFlightFeed:
         self._thread = None
         self._err = None
         self._route_cache = {}      # callsign -> route dict or None
+        # Real flown-path trail (2026-08-21, "watch it live" follow-up) --
+        # same idiom as FlightEngine's own local _trail: sampled ONLY on a
+        # genuine new poll (never per render tick, so no extrapolated/
+        # dead-reckoned point ever enters the trail), bounded so a long
+        # flight can't grow this without limit. FOLLOW_REFRESH is 15s, so
+        # TRAIL_MAX_POINTS=80 covers a real ~20 minutes of the MOST RECENT
+        # flight time at full resolution -- plenty for "watch it live";
+        # capped, not thinned, matching the local trail's own discipline.
+        self._trail = []            # list of real (lat, lon), oldest first
 
     def set_followed(self, callsign):
         """Owner sets (or clears, with a falsy callsign) which flight to
-        follow. Persists immediately and resets the cached aircraft so a
-        stale previous flight's position is never shown against a freshly
-        chosen callsign."""
+        follow. Persists immediately and resets the cached aircraft AND
+        the flown trail so a stale previous flight's position/path is
+        never shown against a freshly chosen callsign -- a new callsign
+        is a new flight, with no real history yet."""
         norm = save_followed_flight(callsign)
         with self._lock:
             self._callsign = norm
@@ -1999,6 +2114,7 @@ class FollowFlightFeed:
             self._updated = 0.0
             self._last_try = 0.0
             self._err = None
+            self._trail = []
         return norm
 
     def get(self):
@@ -2020,6 +2136,7 @@ class FollowFlightFeed:
             callsign = self._callsign
             aircraft = dict(self._aircraft) if self._aircraft else None
             updated, err = self._updated, self._err
+            trail = list(self._trail)
         self._ensure_thread()
         age = (now - updated) if updated else None
         # airborne is a real tri-state. A dead replica / exception is
@@ -2035,11 +2152,47 @@ class FollowFlightFeed:
             airborne = None
         else:
             airborne = False
+        route = (aircraft or {}).get("route") if aircraft else None
+
+        # REAL PROGRESS (2026-08-21, "fills as she completes the flight"
+        # direct owner ask) -- an owner-confirmed override (see
+        # load_follow_route_override()'s own docstring for WHY one is
+        # needed: adsbdb's per-callsign route lookup can be stale for a
+        # reused flight number) wins over adsbdb's route when set; falls
+        # back to adsbdb's route when it isn't. Either way this is two
+        # REAL points and a real haversine distance -- never a guessed
+        # percentage. No resolvable origin+dest -> progress is None, an
+        # honest gap, not a fabricated 0%.
+        ov = load_follow_route_override()
+        origin = _resolve_airport(ov.get("origin_code"), ov.get("origin_lat"), ov.get("origin_lon"))
+        if origin is None and route:
+            olat, olon = route.get("origin_lat"), route.get("origin_lon")
+            if isinstance(olat, (int, float)) and isinstance(olon, (int, float)):
+                origin = (olat, olon)
+        dest = _resolve_airport(ov.get("dest_code"), ov.get("dest_lat"), ov.get("dest_lon"))
+        if dest is None and route:
+            dlat, dlon = route.get("dest_lat"), route.get("dest_lon")
+            if isinstance(dlat, (int, float)) and isinstance(dlon, (int, float)):
+                dest = (dlat, dlon)
+        progress = None
+        if origin and dest and aircraft:
+            alat, alon = aircraft.get("lat"), aircraft.get("lon")
+            if isinstance(alat, (int, float)) and isinstance(alon, (int, float)):
+                _, total_nm = bearing_distance(origin[0], origin[1], dest[0], dest[1])
+                _, remain_nm = bearing_distance(alat, alon, dest[0], dest[1])
+                if total_nm > 0.5:   # a real, non-degenerate leg -- not a rounding puddle
+                    pct = min(1.0, max(0.0, 1.0 - (remain_nm / total_nm)))
+                    progress = {"origin": origin, "dest": dest, "pct": pct,
+                                "remaining_nm": remain_nm, "total_nm": total_nm}
+
         return {
             "configured": callsign is not None,
             "callsign": callsign,
             "aircraft": aircraft,
-            "route": (aircraft or {}).get("route") if aircraft else None,
+            "route": route,
+            "route_override": ov,
+            "trail": trail,
+            "progress": progress,
             "age": age,
             "airborne": airborne,
             "err": err,
@@ -2117,6 +2270,12 @@ class FollowFlightFeed:
             self._aircraft = ac
             self._updated = time.time()
             self._err = None
+            if ac is not None:
+                lat, lon = ac.get("lat"), ac.get("lon")
+                if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+                    self._trail.append((lat, lon))
+                    if len(self._trail) > TRAIL_MAX_POINTS_FOLLOW:
+                        self._trail = self._trail[-TRAIL_MAX_POINTS_FOLLOW:]
 
 
 FOLLOW_FEED = FollowFlightFeed()
