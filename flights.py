@@ -36,6 +36,7 @@ new callsigns just enrich over the following cycles instead.
 """
 import json
 import math
+import re
 import threading
 import time
 import urllib.error
@@ -79,12 +80,20 @@ ROUTE_URL = "https://api.adsbdb.com/v0/callsign/{callsign}"
 FOLLOW_SOURCES = (
     ("adsb.lol",
      "https://api.adsb.lol/v2/callsign/{callsign}", "ac"),
-    ("airplanes.live",
-     "https://api.airplanes.live/v2/callsign/{callsign}", "ac"),
     ("adsb.fi",
      "https://opendata.adsb.fi/api/v2/callsign/{callsign}", "aircraft"),
 )
 FOLLOW_URL = FOLLOW_SOURCES[0][1]
+# airplanes.live's /v2/callsign/{cs} was here too until 2026-08-21, when a
+# real owner report ("follow isn't working") traced to this exact source:
+# it now returns a real 403 for this project's User-Agent (confirmed live
+# -- same block FOLLOW_REG_SOURCES' own docstring below already documents
+# for its /v2/reg endpoint, just never checked against THIS endpoint until
+# now). Because _fetch_ac_list()'s rule requires EVERY source to succeed
+# before trusting a clean "not airborne" empty, one 403'd replica turned
+# two other sources' honest empty agreement into a false NO SIGNAL error.
+# Removed here for the identical reason it was already excluded from
+# FOLLOW_REG_SOURCES -- confirmed live, not assumed still working.
 
 # GLOBAL per-REGISTRATION lookup, the fallback path _fetch_follow() uses
 # when a callsign lookup comes back empty (2026-08-17). Famous aircraft
@@ -1818,15 +1827,55 @@ def load_followed_flight():
     return cs.strip().upper()
 
 
+# REAL, PUBLIC IATA (2-char) -> ICAO (3-char) airline designator prefixes
+# (2026-08-21, "make it intuitive" fix) -- the exact major US/international
+# carriers a traveler is most likely to type the ticket code for, sourced
+# from IATA's own published designator standard, same reference-data
+# category as atc.AIRLINE_ICAO (spoken name -> ICAO) already in this
+# project, just keyed by the printed 2-letter code instead of the spoken
+# name. Deliberately NOT exhaustive -- an unrecognized 2-letter prefix is
+# left exactly as typed (never guessed), same "translate only what's
+# confirmed, degrade honestly otherwise" discipline as every other
+# lookup table here.
+IATA_TO_ICAO_PREFIX = {
+    "AA": "AAL", "DL": "DAL", "UA": "UAL", "WN": "SWA", "F9": "FFT",
+    "B6": "JBU", "NK": "NKS", "AS": "ASA", "G4": "AAY", "HA": "HAL",
+    "OO": "SKW", "MQ": "ENY", "YX": "RPA", "9E": "EDV",
+    "BA": "BAW", "AF": "AFR", "LH": "DLH", "KL": "KLM", "AC": "ACA",
+    "EK": "UAE", "QR": "QTR", "TK": "THY", "VS": "VIR", "IB": "IBE",
+    "AZ": "ITY", "LX": "SWR", "SN": "BEL", "AY": "FIN", "TP": "TAP",
+}
+
+
+def _translate_iata_prefix(cs):
+    """A real ICAO-form callsign if `cs` starts with a known real IATA
+    airline prefix, else `cs` unchanged -- never a guess for an
+    unrecognized prefix. Splits the leading 2 alpha/alnum chars (IATA
+    codes are sometimes alnum, e.g. "9E") from the trailing flight
+    number; only translates when what follows genuinely looks like a
+    flight number (1+ digits), so a real ICAO-form input like "AAL123"
+    (which happens to start with letters IATA_TO_ICAO_PREFIX doesn't
+    key on) passes through untouched."""
+    m = re.match(r"^([A-Z0-9]{2})(\d{1,4})$", cs)
+    if not m:
+        return cs
+    prefix, num = m.groups()
+    icao = IATA_TO_ICAO_PREFIX.get(prefix)
+    return f"{icao}{num}" if icao else cs
+
+
 def save_followed_flight(callsign):
     """Persist (or clear, with a falsy callsign) the followed callsign.
 
     Normalizes the same way _fetch_follow() below expects to query:
-    stripped, uppercased, spaces removed (adsb.lol callsigns are the
-    ICAO flight-number format -- airline ICAO code + number, no spaces,
-    e.g. "UAL123" -- not the IATA format ("UA123") a traveler would
-    recognize; see FollowFlightFeed's own docstring for why no IATA<->
-    ICAO translation table is built here).
+    stripped, uppercased, spaces removed, THEN passed through
+    _translate_iata_prefix() so a real major-carrier IATA code (the
+    printed ticket code -- "AA123" -- a traveler would actually type) is
+    auto-converted to the real ICAO form ADS-B broadcasts ("AAL123")
+    before saving. An unrecognized prefix (a smaller carrier, a private
+    callsign, or already-ICAO input) is saved exactly as typed -- this
+    is a real, curated translation for the common case, not a guess for
+    every case; see IATA_TO_ICAO_PREFIX's own docstring for scope.
     """
     path = FOLLOW_CONFIG_PATH
     data = {}
@@ -1836,7 +1885,13 @@ def save_followed_flight(callsign):
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             data = {}
     if callsign:
-        norm = str(callsign).strip().upper().replace(" ", "")
+        # Strip spaces AND dashes -- a real observed input was saved as
+        # "AA-4495" (the owner typing a natural "AA-4495"/"AA 4495" ticket
+        # style), which the un-normalized dash then carried all the way
+        # into the real ADS-B query URL. Neither adsb.lol's callsign
+        # format nor any real airline callsign ever contains a dash.
+        norm = str(callsign).strip().upper().replace(" ", "").replace("-", "")
+        norm = _translate_iata_prefix(norm)
         if norm:
             data["callsign"] = norm
         else:

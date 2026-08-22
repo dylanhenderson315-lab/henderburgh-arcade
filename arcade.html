@@ -341,18 +341,21 @@
     <div class="row"><label>Famous</label>
       <select id="ff-famous"><option value="">— pick a famous plane —</option></select></div>
     <div id="ff-famnote" class="hint"></div>
-    <div class="row"><label>Callsign</label>
-      <input type="text" id="ff-callsign" placeholder="e.g. UAL123"></div>
+    <div class="row"><label>Flight</label>
+      <input type="text" id="ff-callsign" placeholder="e.g. AA4495 or UAL123"></div>
     <div class="row"><button id="ff-save">Follow</button>
       <button id="ff-clear">Stop</button>
       <span id="ff-msg" class="badge"></span></div>
     <div id="ff-now" class="hint"></div>
-    <div class="hint">Type the ICAO radio callsign: airline <b>three
-      letters</b> + number. <b>UAL123</b> is United. <b>UA123</b> is
-      not — that is the IATA ticket code and will read NOT AIRBORNE
-      even if the plane is up. Same trap: DAL not DL, SWA not WN,
-      AAL not AA. The phone shows LOOKING / NO SIGNAL / NOT AIRBORNE
-      as three different facts. Ambient only dwells when it is actually
+    <div class="hint">Type it however it's printed on the ticket — the
+      normal 2-letter code plus flight number (<b>AA4495</b>), spaces and
+      dashes are fine too. Major carriers (American, Delta, United,
+      Southwest, Frontier, JetBlue, Spirit, Alaska, Allegiant, Hawaiian
+      and more) are auto-converted to the real radio callsign the plane
+      actually broadcasts. A smaller/unlisted carrier needs the real
+      radio form instead (three letters + number — <b>UAL123</b>, not
+      <b>UA123</b>). LOOKING / NO SIGNAL / NOT AIRBORNE are three
+      different real states — ambient only dwells when it's actually
       airborne.</div>
   </div>
 
