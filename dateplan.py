@@ -84,12 +84,29 @@ def summary(movie=None, dinner=None, heli=False):
     return " / ".join(parts) if parts else "SHE OPENED IT"
 
 
-def record(movie=None, dinner=None, heli=False, note=None):
+def _clean_viewer(v):
+    """Trim a `?v=` value down to a tag safe for the panel font and jsonl.
+    Empty / non-str returns None so `viewer is None` is the "real Nicole
+    open" case everywhere downstream."""
+    if not isinstance(v, str):
+        return None
+    keep = "".join(c for c in v if c.isalnum() or c in " _.-")
+    keep = keep.strip()[:40]
+    return keep or None
+
+
+def record(movie=None, dinner=None, heli=False, note=None, viewer=None):
     """Append one real pick. Returns the stored row.
 
     Accepts partial submits (just a movie, just a dinner, just heli) so
     the page can send progress if he wants that later; today it sends
-    the whole thing at once from the final confirm."""
+    the whole thing at once from the final confirm.
+
+    `viewer` is the `?v=` tag from the page URL. Present means a friend
+    testing the flow: the row is marked test=True and the banner is
+    prefixed so a test pick never masquerades as her real answer. Absent
+    means the real Nicole open."""
+    v = _clean_viewer(viewer)
     m = label_movie(movie) if movie else None
     d = label_dinner(dinner) if dinner else None
     row = {
@@ -99,10 +116,18 @@ def record(movie=None, dinner=None, heli=False, note=None):
         "dinner": dinner if d else None,
         "dinner_label": d,
         "heli": bool(heli),
+        "viewer": v,
+        "test": v is not None,
     }
     if isinstance(note, str) and note.strip():
         row["note"] = note.strip()[:500]
-    row["banner"] = summary(movie, dinner, heli)
+    banner = summary(movie, dinner, heli)
+    if v:
+        # Uppercase for the panel font -- paneltext.panel_text() would
+        # do it anyway, doing it here keeps the stored banner string
+        # matching what the panel actually draws.
+        banner = ("TEST [" + v.upper() + "] ") + banner
+    row["banner"] = banner
     with _lock:
         with LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")

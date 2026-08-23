@@ -115,6 +115,17 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 .receipt b{color:var(--ink)}
 </style>
 
+<!-- Test-mode strip: appears only when the URL carries ?v=<name>. Friends
+     testing the flow see this so they know their picks are tagged in the
+     log and not going out as Nicole's real answer. The page itself stays
+     unchanged so they can judge the real copy. -->
+<div id="testbar" style="display:none;position:sticky;top:0;z-index:50;
+     background:#3a2b3a;color:#e8b04b;text-align:center;
+     font:600 12px/1 ui-sans-serif,system-ui;letter-spacing:.12em;
+     text-transform:uppercase;padding:8px;border-bottom:1px solid #5a3f5a">
+  &#128300; TEST MODE &middot; VIEWER: <span id="testWho">-</span>
+</div>
+
 <div class="wrap">
 
 <!-- 0 ------------------------------------------------------------ -->
@@ -148,7 +159,7 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
       <div class="vote">YES<br>(DID NOT READ)</div></div>
   </div>
   <p class="small" style="margin-top:14px"><b style="color:var(--gold)">Chairman's conditions:</b>
-    he lays the law. The law states you have been gone for one (1) entire week,
+    he lays the law. The law states you have been gone for two (2) entire weeks,
     that this was unacceptable, and that tonight belongs to you &mdash; the movie,
     the dinner, and every single decision in between. Motion carried 3&ndash;0.</p>
   <button class="btn" onclick="go(3)">okay. let's plan tonight.</button>
@@ -253,8 +264,8 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 <script>
 var LETTER = [
   ["Nicole.", 36],
-  ["You were gone for a week.", 22],
-  ["It was, by every available measure, a rough one — and a grown man " +
+  ["You were gone for two weeks.", 22],
+  ["They were, by every available measure, rough ones — and a grown man " +
    "you work with got drunk and called you a racist, which remains " +
    "simultaneously the funniest and worst thing to happen to anybody this year.", 17],
   ["You're home now. So here's the deal:", 20],
@@ -273,6 +284,23 @@ var HELI = [
 var heliN = 0, heliTimer = null, heliOn = false;
 
 var state = { movie:null, movieLabel:null, dinner:null, dinnerLabel:null, heli:false };
+
+// Viewer tag from ?v=<name>. Anything present flips the page into test
+// mode: the strip up top shows, and every logged pick + panel banner is
+// prefixed with the viewer name so real picks stay distinguishable from
+// friend-test picks in date_log.jsonl. No `v` = real, unadorned page.
+var VIEWER = (function(){
+  try {
+    var v = new URLSearchParams(window.location.search).get('v');
+    if (!v) return null;
+    // Same "just enough to be a name" trim -- the server also caps this.
+    return v.replace(/[^A-Za-z0-9 _.-]/g,'').slice(0,40).trim() || null;
+  } catch(e){ return null; }
+})();
+if (VIEWER) {
+  document.getElementById('testWho').textContent = VIEWER;
+  document.getElementById('testbar').style.display = 'block';
+}
 
 function go(n){
   document.querySelectorAll('.screen').forEach(function(s){ s.classList.remove('on'); });
@@ -354,7 +382,8 @@ function confirmIt(){
   fetch('/api/date/pick', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({
-      movie: state.movie, dinner: state.dinner, heli: state.heli
+      movie: state.movie, dinner: state.dinner, heli: state.heli,
+      viewer: VIEWER
     })
   }).then(function(r){ return r.json(); }).then(function(j){
     document.getElementById('sent').textContent = j && j.ok

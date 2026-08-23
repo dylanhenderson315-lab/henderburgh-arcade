@@ -1809,8 +1809,14 @@ class Handler(BaseHTTPRequestHandler):
                     dinner=j.get("dinner"),
                     heli=bool(j.get("heli")),
                     note=j.get("note"),
+                    viewer=j.get("viewer"),
                 )
-                title = paneltext.panel_text("NICOLE PICKED")
+                # Test picks (a friend opening ?v=<name>) still light up
+                # the panel -- that's how he verifies the whole path
+                # end-to-end before sending the real link -- but the
+                # banner title makes clear it isn't her.
+                title = paneltext.panel_text(
+                    "TEST PICK" if row["test"] else "NICOLE PICKED")
                 message = paneltext.panel_text(row["banner"])
                 events_log.LOG.record("date", row["banner"])
                 ok = ARCADE.trigger_notify(
