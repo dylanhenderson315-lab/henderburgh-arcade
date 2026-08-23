@@ -1,0 +1,367 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>A Proposal For Nicole</title>
+<style>
+:root{
+  --bg:#140f14; --bg2:#1d151d; --card:#241a24; --line:#3a2b3a;
+  --ink:#f6ece2; --dim:#a4909c; --gold:#e8b04b; --rose:#e2647a;
+  --shadow:0 18px 50px -20px #000;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{
+  background:radial-gradient(120% 90% at 50% 0%,var(--bg2),var(--bg));
+  color:var(--ink);min-height:100dvh;
+  font:16px/1.55 ui-serif,Georgia,"Times New Roman",serif;
+  padding:24px 18px calc(120px + env(safe-area-inset-bottom));
+  overflow-x:hidden;
+}
+.wrap{max-width:560px;margin:0 auto}
+.screen{display:none;animation:rise .55s cubic-bezier(.2,.8,.25,1) both}
+.screen.on{display:block}
+@keyframes rise{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
+@keyframes pulse{50%{transform:scale(1.04)}}
+.kicker{font:600 11px/1 ui-sans-serif,system-ui;letter-spacing:.22em;text-transform:uppercase;color:var(--gold);opacity:.85}
+h1{font-size:clamp(30px,9vw,46px);line-height:1.05;letter-spacing:-.02em;margin:14px 0}
+h2{font-size:clamp(22px,6vw,30px);line-height:1.12;margin:14px 0 10px}
+p{opacity:.94;margin:0 0 14px}
+.small{font:13px/1.5 ui-sans-serif,system-ui;color:var(--dim)}
+.center{text-align:center}
+hr{border:0;border-top:1px solid var(--line);margin:26px 0}
+
+/* ---- envelope ---- */
+#s0{text-align:center;padding-top:12vh}
+.env{
+  width:min(300px,78vw);aspect-ratio:3/2;margin:0 auto 26px;position:relative;
+  background:linear-gradient(#2b1f2b,#201720);border:1px solid var(--line);
+  border-radius:10px;box-shadow:var(--shadow);cursor:pointer;
+  display:grid;place-items:center;animation:pulse 2.6s ease-in-out infinite;
+}
+.env:before{content:"";position:absolute;inset:0;
+  background:linear-gradient(160deg,transparent 46%,#00000055 47%);border-radius:10px}
+.seal{width:64px;height:64px;border-radius:50%;background:var(--rose);
+  display:grid;place-items:center;font:700 22px ui-sans-serif,system-ui;color:#2a0e16;
+  box-shadow:0 6px 20px -6px #000;position:relative;z-index:1}
+
+/* ---- typed letter ---- */
+.line{opacity:0;transform:translateY(10px);animation:rise .7s ease both}
+
+/* ---- buttons ---- */
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+.btn{
+  display:block;width:100%;padding:15px 20px;border-radius:999px;
+  background:var(--gold);color:#231402;
+  font:700 16px ui-sans-serif,system-ui;letter-spacing:.01em;margin-top:22px;
+  box-shadow:0 10px 26px -12px var(--gold);
+}
+.btn[disabled]{opacity:.4;box-shadow:none}
+.btn.ghost{background:none;color:var(--dim);border:1px solid var(--line);box-shadow:none;font-weight:500}
+.btn:active{transform:translateY(1px)}
+
+/* ---- board of directors ---- */
+.board{display:grid;gap:10px;margin:18px 0 6px}
+.dog{display:flex;align-items:center;gap:13px;background:var(--card);
+  border:1px solid var(--line);border-radius:14px;padding:12px 14px}
+.face{width:42px;height:42px;border-radius:50%;background:#37273a;display:grid;
+  place-items:center;font-size:22px;flex:none}
+.dog b{font:600 15px ui-sans-serif,system-ui;display:block}
+.dog .role{font:11px/1.3 ui-sans-serif,system-ui;color:var(--dim);letter-spacing:.06em;text-transform:uppercase}
+.vote{margin-left:auto;font:700 11px ui-sans-serif,system-ui;letter-spacing:.1em;
+  color:#7ee0a0;text-align:right;flex:none}
+.vote.cond{color:var(--gold)}
+
+/* ---- selectable cards ---- */
+.opt{
+  width:100%;text-align:left;background:var(--card);border:1px solid var(--line);
+  border-radius:16px;padding:15px 17px;margin-bottom:10px;display:block;
+  transition:border-color .15s,transform .15s,background .15s;
+}
+.opt:active{transform:scale(.985)}
+.opt:hover{border-color:var(--gold)}
+.opt.sel{border-color:var(--gold);background:#2d2028;
+  box-shadow:0 0 0 2px var(--gold) inset, 0 0 40px -20px var(--gold)}
+.opt h3{font-size:18px;line-height:1.2;margin:0 0 4px;font-family:ui-serif,Georgia,serif}
+.opt .sub{font:13px/1.45 ui-sans-serif,system-ui;color:var(--dim)}
+.opt .price{float:right;font:700 12px ui-sans-serif,system-ui;color:var(--gold);
+  letter-spacing:.08em;text-transform:uppercase}
+
+/* ---- dinner slider tiers ---- */
+.tier{position:relative}
+.tier .bar{height:4px;background:var(--line);border-radius:2px;margin:2px 0 10px;overflow:hidden}
+.tier .fill{height:100%;background:var(--gold);width:25%;transition:width .3s}
+
+/* ---- helicopter nag ---- */
+#heli{
+  position:fixed;left:14px;right:14px;bottom:calc(14px + env(safe-area-inset-bottom));
+  max-width:532px;margin:0 auto;z-index:40;display:none;
+  background:var(--rose);color:#2a0e16;border-radius:14px;padding:12px 14px;
+  font:600 14px ui-sans-serif,system-ui;align-items:center;gap:10px;
+  box-shadow:0 14px 34px -14px #000;animation:rise .4s ease both;
+}
+#heli.on{display:flex}
+#heli span.rotor{font-size:20px;animation:spin 1.4s linear infinite;display:inline-block}
+@keyframes spin{to{transform:rotate(360deg)}}
+#heli b{flex:1;font-weight:600}
+#heli button{background:#2a0e16;color:#ffd9e0;border-radius:999px;padding:7px 13px;
+  font:700 12px ui-sans-serif,system-ui;flex:none}
+#heli .yes{background:#fff;color:#8a1c33}
+
+/* ---- final ---- */
+.final{background:var(--card);border:1px solid var(--gold);border-radius:20px;
+  padding:24px 20px;box-shadow:0 0 60px -30px var(--gold);margin-top:22px}
+.receipt{font:12px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace;
+  background:#0e0a0e;border:1px dashed var(--line);border-radius:10px;
+  padding:14px;color:var(--dim);margin:14px 0 4px;white-space:pre-wrap}
+.receipt b{color:var(--ink)}
+</style>
+
+<div class="wrap">
+
+<!-- 0 ------------------------------------------------------------ -->
+<section class="screen on" id="s0">
+  <div class="kicker">Private &middot; Do Not Forward</div>
+  <div class="env" onclick="go(1)"><div class="seal">N</div></div>
+  <p class="small">One (1) sealed proposal for <b style="color:var(--ink)">Nicole</b>.<br>Tap it.</p>
+</section>
+
+<!-- 1 ------------------------------------------------------------ -->
+<section class="screen" id="s1">
+  <div class="kicker">Welcome Home</div>
+  <div id="letter"></div>
+  <button class="btn" onclick="go(2)">okay, go on</button>
+</section>
+
+<!-- 2 board -------------------------------------------------------- -->
+<section class="screen" id="s2">
+  <div class="kicker">Minutes of the Meeting</div>
+  <h2>The Board has reviewed and approved this proposal.</h2>
+  <p class="small">Emergency session convened. Quorum reached. One member fell asleep.</p>
+  <div class="board">
+    <div class="dog"><div class="face">&#128021;</div>
+      <div><b>Toby</b><span class="role">Chairman &middot; Law Dog</span></div>
+      <div class="vote cond">APPROVED<br>W/ CONDITIONS</div></div>
+    <div class="dog"><div class="face">&#128054;</div>
+      <div><b>Luna</b><span class="role">Board Member</span></div>
+      <div class="vote">YES<br>YES YES YES</div></div>
+    <div class="dog"><div class="face">&#128021;</div>
+      <div><b>Crosby</b><span class="role">Board Member</span></div>
+      <div class="vote">YES<br>(DID NOT READ)</div></div>
+  </div>
+  <p class="small" style="margin-top:14px"><b style="color:var(--gold)">Chairman's conditions:</b>
+    he lays the law. The law states you have been gone for one (1) entire week,
+    that this was unacceptable, and that somebody owes you a movie and a dinner
+    of your choosing. Motion carried 3&ndash;0.</p>
+  <button class="btn" onclick="go(3)">okay. let's plan tonight.</button>
+</section>
+
+<!-- 3 movie -------------------------------------------------------- -->
+<section class="screen" id="s3">
+  <div class="kicker">Decision 1 of 2</div>
+  <h2>Tonight is movie night. You pick the vibe.</h2>
+  <p class="small" style="margin-bottom:18px">Not the exact title &mdash; you have better taste than me.
+    Just tell me what mood you're in and I'll cue something up.</p>
+
+  <button class="opt" data-movie="comfort" onclick="pickMovie(this)">
+    <h3>A comfort rewatch</h3>
+    <div class="sub">Something we've seen a hundred times. No thinking required.</div>
+  </button>
+  <button class="opt" data-movie="dumb" onclick="pickMovie(this)">
+    <h3>Something dumb and funny</h3>
+    <div class="sub">Zero plot. High jokes-per-minute. You laugh, I win.</div>
+  </button>
+  <button class="opt" data-movie="cry" onclick="pickMovie(this)">
+    <h3>Something that'll make me cry</h3>
+    <div class="sub">The Notebook energy. I will pretend I don't cry too.</div>
+  </button>
+  <button class="opt" data-movie="boom" onclick="pickMovie(this)">
+    <h3>Something with explosions</h3>
+    <div class="sub">A helicopter probably crashes. Not our helicopter.</div>
+  </button>
+  <button class="opt" data-movie="you" onclick="pickMovie(this)">
+    <h3>You pick. Surprise me.</h3>
+    <div class="sub">Full remote-control privileges. I'll shut up about it.</div>
+  </button>
+
+  <button class="btn" id="toDinner" disabled onclick="go(4)">next: pick dinner &rarr;</button>
+</section>
+
+<!-- 4 dinner ------------------------------------------------------- -->
+<section class="screen" id="s4">
+  <div class="kicker">Decision 2 of 2</div>
+  <h2>How bougie are we tonight?</h2>
+  <p class="small" style="margin-bottom:6px">Slide up as high as you want. There is no wrong answer.
+    (There is one right answer. It's whatever you pick.)</p>
+  <div class="tier"><div class="bar"><div class="fill" id="fill"></div></div></div>
+
+  <button class="opt" data-dinner="gas" data-level="1" onclick="pickDinner(this)">
+    <span class="price">TIER I</span>
+    <h3>Gas Station Legal Minimum</h3>
+    <div class="sub">Taquitos. A slushie. A single mystery hot dog. Full send.</div>
+  </button>
+  <button class="opt" data-dinner="takeout" data-level="2" onclick="pickDinner(this)">
+    <span class="price">TIER II</span>
+    <h3>Takeout in sweats</h3>
+    <div class="sub">The usual, delivered. No pants required. No humans required.</div>
+  </button>
+  <button class="opt" data-dinner="nice" data-level="3" onclick="pickDinner(this)">
+    <span class="price">TIER III</span>
+    <h3>A nice sit-down</h3>
+    <div class="sub">Actual restaurant. Real napkins. I put on the shirt with buttons.</div>
+  </button>
+  <button class="opt" data-dinner="boujie" data-level="4" onclick="pickDinner(this)">
+    <span class="price">TIER IV &middot; FULL BOUJIE</span>
+    <h3>Steakhouse. Wine list. The works.</h3>
+    <div class="sub">I book the reservation the moment you tap. No looking at prices. You earned it.</div>
+  </button>
+
+  <button class="btn" id="toConfirm" disabled onclick="confirmIt()">lock it in &rarr;</button>
+  <button class="btn ghost" onclick="go(3)">&larr; change the movie</button>
+</section>
+
+<!-- 5 confirm ------------------------------------------------------ -->
+<section class="screen" id="s5">
+  <div class="kicker">Confirmed</div>
+  <h1>Tonight, then.</h1>
+  <div class="receipt" id="receipt"></div>
+  <p class="small" id="sent">Telling him&hellip;</p>
+  <div class="final">
+    <p>You told me you wanted me to take care of you more. To take you out.
+      To make you feel special.</p>
+    <p>I'm not going to make a joke about that one.</p>
+    <p>I heard you. This is me starting. You picked it &mdash; I'll handle every
+      part of it. The where, the when, the booking, the dogs.
+      You don't have to think about it again.</p>
+    <p style="margin:0"><b style="color:var(--gold)">Welcome home, Nicole. I missed you.</b></p>
+  </div>
+  <button class="btn ghost" onclick="go(4)">actually, change something</button>
+</section>
+
+</div>
+
+<!-- persistent nag ------------------------------------------------ -->
+<div id="heli">
+  <span class="rotor">&#127749;</span>
+  <b id="heliTxt">psst. $30 helicopter ride?</b>
+  <button onclick="heliNo()">no</button>
+  <button class="yes" onclick="heliYes()">fine</button>
+</div>
+
+<script>
+var LETTER = [
+  ["Nicole.", 36],
+  ["You were gone for a week.", 22],
+  ["It was, by every available measure, a rough one — and a grown man " +
+   "you work with got drunk and called you a racist, which remains " +
+   "simultaneously the funniest and worst thing to happen to anybody this year.", 17],
+  ["You're home now. So here's the deal:", 20],
+  ["Tonight I'm taking you out. You get to make the two decisions that " +
+   "actually matter. I handle the rest.", 18]
+];
+
+var HELI = [
+  "psst. $30 helicopter ride?",
+  "just saying. $30. helicopter.",
+  "the helicopter is still available.",
+  "you haven't technically said no to the helicopter.",
+  "NICOLE. THIRTY DOLLARS.",
+  "fine. the helicopter waits. it always waits."
+];
+var heliN = 0, heliTimer = null, heliOn = false;
+
+var state = { movie:null, movieLabel:null, dinner:null, dinnerLabel:null, heli:false };
+
+function go(n){
+  document.querySelectorAll('.screen').forEach(function(s){ s.classList.remove('on'); });
+  document.getElementById('s'+n).classList.add('on');
+  window.scrollTo(0,0);
+  if(n===1) typeLetter();
+  if(n>=2) armHeli(n===2 ? 3500 : 5500);
+}
+
+function typeLetter(){
+  var box = document.getElementById('letter');
+  if(box.dataset.done) return;
+  box.dataset.done = "1";
+  LETTER.forEach(function(pair,i){
+    var p = document.createElement('p');
+    p.className = 'line';
+    p.style.fontSize = pair[1] + 'px';
+    p.style.lineHeight = '1.35';
+    p.style.animationDelay = (i*0.9+0.15) + 's';
+    p.textContent = pair[0];
+    box.appendChild(p);
+  });
+}
+
+function armHeli(delay){
+  if(heliTimer) clearTimeout(heliTimer);
+  if(heliOn) return;
+  heliTimer = setTimeout(function(){
+    var i = Math.min(heliN, HELI.length-1);
+    document.getElementById('heliTxt').textContent = HELI[i];
+    document.getElementById('heli').classList.add('on');
+  }, delay);
+}
+function heliNo(){
+  document.getElementById('heli').classList.remove('on');
+  heliN = Math.min(heliN+1, HELI.length-1);
+  armHeli(11000);
+}
+function heliYes(){
+  state.heli = true;
+  document.getElementById('heli').classList.remove('on');
+  if(heliTimer) clearTimeout(heliTimer);
+  heliOn = true; // stop bothering her, she said yes
+  // little celebratory flash
+  document.body.animate([{background:'#3a1c2a'},{background:''}],{duration:600});
+}
+
+function pickMovie(btn){
+  document.querySelectorAll('[data-movie]').forEach(function(b){ b.classList.remove('sel'); });
+  btn.classList.add('sel');
+  state.movie = btn.dataset.movie;
+  state.movieLabel = btn.querySelector('h3').textContent.trim();
+  document.getElementById('toDinner').disabled = false;
+}
+function pickDinner(btn){
+  document.querySelectorAll('[data-dinner]').forEach(function(b){ b.classList.remove('sel'); });
+  btn.classList.add('sel');
+  state.dinner = btn.dataset.dinner;
+  state.dinnerLabel = btn.querySelector('h3').textContent.trim();
+  var lvl = parseInt(btn.dataset.level,10) || 1;
+  document.getElementById('fill').style.width = (lvl*25) + '%';
+  document.getElementById('toConfirm').disabled = false;
+}
+
+function confirmIt(){
+  // build receipt
+  var r = document.getElementById('receipt');
+  r.innerHTML =
+    'CUSTOMER . . . . . <b>NICOLE</b>\n' +
+    'DATE . . . . . . . <b>TONIGHT</b>\n' +
+    'MOVIE VIBE . . . . <b>' + esc(state.movieLabel) + '</b>\n' +
+    'DINNER TIER  . . . <b>' + esc(state.dinnerLabel) + '</b>\n' +
+    (state.heli ? 'ADD-ON . . . . . . <b>$30 HELICOPTER RIDE</b>\n' : '') +
+    '\nTOTAL EFFORT REQUIRED FROM YOU: <b>ZERO</b>';
+  go(5);
+  document.getElementById('sent').textContent = 'Telling him…';
+  if(heliTimer) clearTimeout(heliTimer);
+  document.getElementById('heli').classList.remove('on');
+  fetch('/api/date/pick', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      movie: state.movie, dinner: state.dinner, heli: state.heli
+    })
+  }).then(function(r){ return r.json(); }).then(function(j){
+    document.getElementById('sent').textContent = j && j.ok
+      ? 'He knows. It just lit up on the panel in the house.'
+      : 'He knows. (Text him too, the house is being weird.)';
+  }).catch(function(){
+    document.getElementById('sent').textContent =
+      'He knows. (Text him too, the house is being weird.)';
+  });
+}
+
+function esc(s){ return String(s||'').replace(/[&<>]/g,function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]; }); }
+</script>

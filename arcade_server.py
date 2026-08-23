@@ -63,6 +63,7 @@ import ownernote
 import paneltext
 import transitions
 import ambient
+import dateplan
 
 PORT = 7333
 HERE = Path(__file__).parent
@@ -1217,6 +1218,13 @@ def _setup_page():
     return (HERE / "setup.html").read_bytes()
 
 
+def _date_page():
+    """Read from disk each request so copy edits show on refresh -- same
+    idiom as _page()/_remote_page()/_setup_page() above. Personal, one-off
+    page (see dateplan.py's module docstring)."""
+    return (HERE / "date.html").read_bytes()
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -1250,6 +1258,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, "text/html; charset=utf-8", _remote_page())
         elif path == "/setup":
             self._send(200, "text/html; charset=utf-8", _setup_page())
+        elif path == "/date/" + dateplan.SECRET:
+            # PERSONAL, ONE-OFF PAGE for Nicole. Behind a word only she
+            # has -- henderburgh.com may be publicly reachable, and a
+            # love letter plus a panel-notification trigger on a
+            # guessable path is not something to find out about later.
+            # Obscurity, not auth: the stakes are embarrassment, not
+            # compromise (see dateplan.py's module docstring). Any other
+            # /date/* path 404s via the fall-through below rather than
+            # hinting the real one exists.
+            self._send(200, "text/html; charset=utf-8", _date_page())
         elif path == "/api/state":
             s = ARCADE.snapshot()
             s["rgb"] = base64.b64encode(s.pop("frame")).decode()
@@ -1771,6 +1789,33 @@ class Handler(BaseHTTPRequestHandler):
                     respect_dnd=(house_kind is None))
                 self._json({"ok": ok, "priority": priority,
                             "title": title_f, "message": message_f})
+            except (ValueError, KeyError, TypeError) as e:
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/date/pick":
+            # NICOLE'S PICK (personal, one-off; see dateplan.py). Records
+            # the row to date_log.jsonl and takes over the panel with an
+            # URGENT banner so he actually sees it wherever he is in the
+            # house -- respect_dnd=False on purpose: this is the one
+            # notification tonight that should override DND, same
+            # override principle as a leak in the /api/notify handler
+            # above. Text goes through paneltext.panel_text() at the
+            # boundary (font is uppercase-only and silently drops
+            # unsupported glyphs otherwise -- see paneltext.panel_text
+            # for the fold rationale).
+            try:
+                j = json.loads(body or b"{}")
+                row = dateplan.record(
+                    movie=j.get("movie"),
+                    dinner=j.get("dinner"),
+                    heli=bool(j.get("heli")),
+                    note=j.get("note"),
+                )
+                title = paneltext.panel_text("NICOLE PICKED")
+                message = paneltext.panel_text(row["banner"])
+                events_log.LOG.record("date", row["banner"])
+                ok = ARCADE.trigger_notify(
+                    "urgent", title, message, respect_dnd=False)
+                self._json({"ok": True, "panel": ok, "row": row})
             except (ValueError, KeyError, TypeError) as e:
                 self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/test/planewatch":
