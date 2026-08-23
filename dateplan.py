@@ -44,16 +44,24 @@ MOVIES = {
     "dumb":     "SOMETHING DUMB AND FUNNY",
     "cry":      "SOMETHING THAT WILL MAKE ME CRY",
     "boom":     "SOMETHING WITH EXPLOSIONS",
-    "you":      "YOU PICK, SURPRISE ME",
+    # "you" is the SURPRISE-ME card -- she taps "let me surprise you" and
+    # this is what lands in the log/banner. Kept the id `you` for the
+    # jsonl history's sake (already-live rows carry it); the label is
+    # the user-facing surprise wording.
+    "you":      "SHE TRUSTS YOU TO PICK THE MOVIE",
 }
 
 # Dinner tiers. She picks how bougie tonight is. HELI is its own tier
 # because the running joke is worth its own tier.
 DINNERS = {
-    "gas":     "GAS STATION LEGAL MINIMUM",
-    "takeout": "TAKEOUT IN SWEATS",
-    "nice":    "A NICE SIT DOWN",
-    "boujie":  "FULL BOUJIE, REAL NAPKINS",
+    "gas":      "GAS STATION LEGAL MINIMUM",
+    "takeout":  "TAKEOUT IN SWEATS",
+    "nice":     "A NICE SIT DOWN",
+    "boujie":   "FULL BOUJIE, REAL NAPKINS",
+    # SURPRISE-ME dinner. She hands the plan to him entirely -- the
+    # panel banner says exactly that so he sees "get up, book something"
+    # not a menu tier he then has to decode.
+    "surprise": "SHE TRUSTS YOU TO PLAN DINNER, READY BY 7",
 }
 
 HELI_LABEL = "THE 30 DOLLAR HELICOPTER RIDE"

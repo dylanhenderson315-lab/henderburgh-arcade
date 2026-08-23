@@ -80,6 +80,33 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 .opt:hover{border-color:var(--gold)}
 .opt.sel{border-color:var(--gold);background:#2d2028;
   box-shadow:0 0 0 2px var(--gold) inset, 0 0 40px -20px var(--gold)}
+
+/* Gift / surprise-me card. Reads as "the special one" without shouting.
+   A subtle gold shimmer that runs once when the card enters view, so
+   she notices it's different but the page isn't crawling with animation. */
+.opt.gift{
+  border-color:var(--gold);
+  background:linear-gradient(135deg,#2a1e29 0%,#3a2626 50%,#2a1e29 100%);
+  background-size:200% 200%;
+  animation:shimmer 3.4s ease-in-out infinite;
+  position:relative;overflow:hidden;
+}
+.opt.gift .tag{
+  display:inline-block;font:700 10px/1 ui-sans-serif,system-ui;
+  letter-spacing:.18em;color:var(--gold);
+  background:#2a0e16;border:1px solid var(--gold);
+  padding:5px 8px;border-radius:999px;margin-bottom:8px;
+}
+.opt.gift h3{color:#fff}
+.opt.gift .sub{color:#e8d5c8;opacity:.95}
+.opt.gift.sel{
+  background:linear-gradient(135deg,#3d2a35,#4a2f2f);
+  box-shadow:0 0 0 2px var(--gold) inset, 0 0 60px -15px var(--gold);
+}
+@keyframes shimmer{
+  0%,100%{background-position:0% 50%}
+  50%{background-position:100% 50%}
+}
 .opt h3{font-size:18px;line-height:1.2;margin:0 0 4px;font-family:ui-serif,Georgia,serif}
 .opt .sub{font:13px/1.45 ui-sans-serif,system-ui;color:var(--dim)}
 .opt .price{float:right;font:700 12px ui-sans-serif,system-ui;color:var(--gold);
@@ -188,9 +215,10 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
     <h3>Something with explosions</h3>
     <div class="sub">A helicopter probably crashes. Not our helicopter.</div>
   </button>
-  <button class="opt" data-movie="you" onclick="pickMovie(this)">
-    <h3>You pick. Surprise me.</h3>
-    <div class="sub">Full remote-control privileges. I'll shut up about it.</div>
+  <button class="opt gift" data-movie="you" onclick="pickMovie(this)">
+    <span class="tag">&#127873; TRUST ME</span>
+    <h3>Let me surprise you.</h3>
+    <div class="sub">Close the app. I've already got one in mind that's exactly for tonight, exactly for you. You'll see when you see.</div>
   </button>
 
   <button class="btn" id="toDinner" disabled onclick="go(4)">next: pick dinner &rarr;</button>
@@ -223,6 +251,11 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
     <span class="price">TIER IV &middot; FULL BOUJIE</span>
     <h3>Steakhouse. Wine list. The works.</h3>
     <div class="sub">I book the reservation the moment you tap. No looking at prices. You earned it.</div>
+  </button>
+  <button class="opt gift" data-dinner="surprise" data-level="4" onclick="pickDinner(this)">
+    <span class="tag">&#127873; TRUST ME</span>
+    <h3>Let me surprise you here too.</h3>
+    <div class="sub">Don't tell you where, don't tell you when. Just be ready by 7. Wear something you like. That's the only thing you have to do.</div>
   </button>
 
   <button class="btn" id="toConfirm" disabled onclick="confirmIt()">lock it in &rarr;</button>
@@ -368,11 +401,19 @@ function pickDinner(btn){
 function confirmIt(){
   // build receipt
   var r = document.getElementById('receipt');
+  // Surprise picks read as mystery on the receipt, not the backend label
+  // ("SHE TRUSTS YOU TO ...") which is meant for the panel, not her.
+  var mLine = state.movie  === 'you'
+      ? '<b>&#127873; A SURPRISE. TRUSTED.</b>'
+      : '<b>' + esc(state.movieLabel) + '</b>';
+  var dLine = state.dinner === 'surprise'
+      ? '<b>&#127873; A SURPRISE. BE READY BY 7.</b>'
+      : '<b>' + esc(state.dinnerLabel) + '</b>';
   r.innerHTML =
     'CUSTOMER . . . . . <b>NICOLE</b>\n' +
     'DATE . . . . . . . <b>TONIGHT</b>\n' +
-    'MOVIE VIBE . . . . <b>' + esc(state.movieLabel) + '</b>\n' +
-    'DINNER TIER  . . . <b>' + esc(state.dinnerLabel) + '</b>\n' +
+    'MOVIE VIBE . . . . ' + mLine + '\n' +
+    'DINNER . . . . . . ' + dLine + '\n' +
     (state.heli ? 'ADD-ON . . . . . . <b>$30 HELICOPTER RIDE</b>\n' : '') +
     '\nTOTAL EFFORT REQUIRED FROM YOU: <b>ZERO</b>';
   go(5);
