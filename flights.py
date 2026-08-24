@@ -2172,6 +2172,7 @@ class FollowFlightFeed:
         # percentage. No resolvable origin+dest -> progress is None, an
         # honest gap, not a fabricated 0%.
         progress = self._compute_progress(aircraft, route)
+        ov = load_follow_route_override()
 
         return {
             "configured": callsign is not None,

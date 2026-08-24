@@ -947,7 +947,7 @@ def draw_round_ticks(buf, cx, y, current, total, on_col=(255, 200, 60),
 
 
 def draw_tennis_set_pips(buf, y, comps, best_of=None,
-                         on_col=(230, 220, 90), off_col=(50, 54, 66)):
+                         on_col=(230, 220, 90), off_col=(90, 130, 155)):
     """One pip per set, two rows (one player each).
 
     Completed sets light for the winner. The live set stays dim.
@@ -1278,10 +1278,13 @@ def draw_tennis_court_hero(buf, x0, y0, x1, y1):
         put_px(buf, x, net_y, COURT_HARD_LINE)
     # Real court sidelines -- a thin light line just inside each edge,
     # the honest minimum that reads as "a bounded court" rather than an
-    # arbitrary colored rectangle.
+    # arbitrary colored rectangle. Raised from 0.35 -- at that dimness
+    # the sideline was nearly indistinguishable from COURT_HARD itself,
+    # the same "off-state blends into its own backdrop" contrast bug
+    # already found and fixed once on the hockey rink hero.
     for y in range(y0, y1):
-        put_px(buf, x0, y, rim(COURT_HARD_LINE, 0.35))
-        put_px(buf, x1 - 1, y, rim(COURT_HARD_LINE, 0.35))
+        put_px(buf, x0, y, rim(COURT_HARD_LINE, 0.55))
+        put_px(buf, x1 - 1, y, rim(COURT_HARD_LINE, 0.55))
 
 
 def draw_outs(buf, x, y, outs, on_col=OUT_ON, off_col=OUT_OFF):
@@ -16002,8 +16005,16 @@ class SportsEngine(Browsable, BigMomentSource):
         y += 5 * scale + 2
 
         if opp:
-            vs = f"VS {opp.get('abbr') or opp.get('full') or ''}"
-            draw_text_centered(buf, y, fit_text(vs, WIDTH - 8), self.INK_DIM, x_min=3)
+            # fit_text drops whole trailing words, which turned a real
+            # opponent name into a bare dangling initial ("VS A.") --
+            # the exact fit_person()-vs-fit_text() bug this project's own
+            # CLAUDE.md already documents. Reserve room for "VS " first,
+            # then fit_person() the name into what's left so it degrades
+            # to a real surname instead of an uninformative initial.
+            prefix = "VS "
+            budget = WIDTH - 8 - text_w(prefix)
+            opp_name = fit_person(opp.get("abbr") or opp.get("full") or "", budget)
+            draw_text_centered(buf, y, prefix + opp_name, self.INK_DIM, x_min=3)
             y += 7
 
         line = self._tennis_set_line(comps[:2]) if len(comps) >= 2 else ""
