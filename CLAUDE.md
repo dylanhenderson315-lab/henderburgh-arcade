@@ -6725,3 +6725,118 @@ this project inevitably wants (a satellite pass tagging a flight
 sighting, a sports score tagging a note, etc.) -- don't reach for a
 direct cross-module import of a `FEED`-shaped class, and don't call
 `get()` from a module that has no business keeping that feed warm.
+
+## Follow-a-flight, made genuinely watchable: live web map + landing push (2026-08-21/23)
+
+Direct owner ask, watching his wife's real flight (LGA -> MYR) end to
+end: "I should be able to see literally everything... I still don't
+have the live map... I want to see her actual live." The LED panel's
+own `FollowFlightEngine.VIEW_MAP` mode (built earlier the same session)
+answers "can this project draw a map" but not "can a person actually
+watch their flight" -- 64 pixels is too small to be a real live-tracking
+surface for a human watching a specific loved one's flight.
+
+- **A real canvas map + stats panel was added directly to
+  `arcade.html`**, not the LED panel -- `#ff-tracker`, a `<canvas>` plus
+  a stats grid, refreshed every 5s via `setInterval`. The projection
+  math is a direct JS port of the exact functions `engines.py` already
+  uses for the panel's own map (`world_xy`, `_fit_bounds`,
+  `great_circle_points`) -- one system, two renderers, so the web view
+  and the LED view can never silently diverge on what a route line
+  actually looks like. New `GET /api/flights/coastline` serves the same
+  static `flights.WORLD_COASTLINE` data (45 segments/415 points) the
+  Python side already embeds.
+- **The route-override "Save route" control was deliberately changed
+  to omit `callsign` from its POST body** -- the shared `/api/flights/
+  follow` endpoint's handler only calls `set_followed()` (which resets
+  the in-progress trail/poll state) when `"callsign" in j`, so a routine
+  route confirmation can never silently wipe the real accumulated
+  trail out from under a flight already being watched.
+- **Verified**: JS/Python syntax clean, both standing audits clean,
+  live service restart healthy, and the map's actual pixel content
+  confirmed via direct canvas `getImageData()` inspection (2,355
+  non-black pixels) plus real live stats confirmed via page text
+  (a real N439YX/REPUBLIC AIRLINES flight, 74% progress, 126nm
+  remaining, 19min ETA) -- not just "it rendered without an exception."
+
+**Landing-soon push notification (2026-08-21)**, per the owner's own
+"keep innovating, keep adding screens" follow-up. Fires a real,
+one-shot HA push (`home.push_notification()`, the same infrastructure
+this project already built for VIP-aircraft sightings) when the
+followed flight's real progress crosses `LANDING_SOON_PCT` (0.85, a
+stated judgment call -- final-approach territory, same "reasoned, not
+measured" category as `WINDOW_MAX_NM_DEFAULT`).
+
+- `FollowFlightFeed._compute_progress()` was extracted out of `get()`
+  so `_refresh_once()` (the background thread, where blocking network
+  I/O for the push is safe) can reuse the identical haversine-based
+  progress calc rather than a second copy that could drift -- `get()`
+  itself must never block, so the push can only ever fire from the
+  poll thread, never the render path.
+- One-shot per followed flight (`self._landing_notified`, reset in
+  `set_followed()`) -- matches this project's standing adopt-then-diff
+  idiom for one-time detectors. No resolvable route/progress means no
+  push, an honest gap rather than a guessed "about to land." Also logs
+  a real `events_log` entry (kind `"plane"`) so the sighting survives
+  in the recent-events log even if the HA push itself fails.
+- Verified directly (not just read): a mocked near-destination case
+  fires exactly once and does not double-fire on a second poll; a
+  mocked mid-flight case correctly does not fire at all.
+
+**A real regression was introduced by this same refactor and shipped
+live for a stretch of the session, worth its own entry because of what
+it caused on real hardware.** Extracting `_compute_progress()` left
+`get()`'s return dict referencing a now-out-of-scope `ov` variable --
+a `NameError` thrown on every single call to `FollowFlightFeed.get()`.
+Caught by `render_audit.py`'s full sweep (not live testing) and fixed
+in source immediately, but **the live `com.henderburgh.arcade` service
+was not restarted after the fix** while other work continued (the
+tennis visual bugs below). The old broken code kept running and threw
+that `NameError` on every render tick for the rest of the session --
+which meant the render loop could never reach `self.panel.send(frame)`,
+so zero real frames reached the panel. WLED's own realtime timeout
+(2.5s, confirmed via `curl http://<panel-ip>/json/cfg`) kept expiring
+with no new packets arriving, so the physical panel kept falling back
+to its own locally-configured "Solid" effect -- which happened to be
+bright orange -- over and over. The owner experienced this directly as
+the panel "constantly flashing orange" and, before it was traced,
+"unable to even be on at this point." Fixed by restarting the service
+and confirming BOTH `/api/state`'s `stats.sent` actually incrementing
+with `loop_errors` flat, AND the WLED device's own `/json/info` `live`
+flag holding `true` across several consecutive polls a second apart --
+a single healthy-looking snapshot right after a restart is not
+sufficient proof. **Standing lesson, now also recorded in memory**: a
+source fix on this project is not done until the LIVE SERVICE has
+actually been restarted and confirmed running the new code against
+real stats -- a clean `import`, a clean audit sweep, and clean syntax
+all run in a fresh subprocess and prove nothing about whether the
+long-running launchd process picked up the change.
+
+## Tennis pinned view: real bugs found from live owner feedback, not taste (2026-08-23)
+
+Owner feedback ("sports is trash... make it visually better") was
+followed up by pulling an actual live frame off the panel rather than
+guessing at a fix -- the frame showed a real, still-legible-if-dim
+tennis pinned view (night dimming was active, 18% brightness, working
+as designed) with two genuine, fixable bugs underneath the dimness,
+not merely a matter of taste:
+
+- **`_frame_tennis_pinned()`'s VS line built `f"VS {name}"` and ran the
+  whole string through `fit_text()`**, which drops whole trailing words
+  -- turned a real opponent's name into a bare dangling initial
+  ("VS A."), the exact `fit_person()`-vs-`fit_text()` bug this file's
+  own CLAUDE.md already documents and had already fixed elsewhere in
+  this same file. Now reserves room for the literal `"VS "` prefix
+  first, then fits the name into what's left with `fit_person()`, so it
+  degrades to a real surname instead of an uninformative initial.
+- **`draw_tennis_set_pips()`'s `off_col` (50,54,66) was nearly
+  indistinguishable from the tennis court hero's own backdrop color
+  `COURT_HARD` (16,52,76)** -- the identical "an off-state blends into
+  its own backdrop" contrast bug this project already found and fixed
+  once on the hockey rink hero (`RINK_ICE` vs. `LIVE`), this time on a
+  different hero. `off_col` raised to (90,130,155); the court's own
+  sidelines (also barely visible at `rim(..., 0.35)`) raised to 0.55.
+- Verified: `render_audit.py` (sports + full sweep) and `fold_audit.py`
+  both clean, a direct synthetic render of the tennis pinned view
+  confirmed the surname now shows and the pip row is visible against
+  the court, real live service restart confirmed healthy.
