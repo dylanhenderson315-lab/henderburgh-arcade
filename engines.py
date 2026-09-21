@@ -221,7 +221,13 @@ _FONT3x5 = {
     "J": ("001", "001", "001", "101", "010"),
     "L": ("100", "100", "100", "100", "111"),
     "M": ("101", "111", "101", "101", "101"),
-    "N": ("101", "110", "101", "101", "101"),
+    # N was ("101","110","101","101","101"): its top two rows are identical
+    # to K's, so on the real panel NYG read "KYG", MIN read "MIK", "NOT
+    # STARTED" read "KOT STARTED", WNBA read "WKBA", NHL read "KHL" -- found
+    # 2026-09-21 by rendering a contact sheet of live sports frames. This
+    # arch shape (the same N the Tom Thumb 3x5 font uses) shares no
+    # silhouette with K; the only near neighbour is R, which has a mid bar.
+    "N": ("110", "101", "101", "101", "101"),
     "O": ("010", "101", "101", "101", "010"),
     "P": ("110", "101", "110", "100", "100"),
     "Q": ("010", "101", "101", "111", "001"),

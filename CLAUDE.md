@@ -6840,3 +6840,41 @@ not merely a matter of taste:
   both clean, a direct synthetic render of the tennis pinned view
   confirmed the surname now shows and the pip row is visible against
   the court, real live service restart confirmed healthy.
+
+## Sports pass: the font's N read as K on every sports screen (2026-09-21)
+
+Owner direction after the panel sat unplugged for ~3 weeks: sports is the
+priority and the ticker has to be the best on the market. A full
+resume-audit came first (git clean/no out-of-band changes since 09-02,
+both audits clean, every free API healthy except celestrak.org, which is
+still unreachable from this network -- `skypass` runs on its
+SatNOGS/cache fallback with only ~2 objects, so the sky dome is nearly
+empty until celestrak or another `visual`-group source is reachable).
+Then a contact sheet of REAL live sports frames (one per sport/league/
+state, ticker + detail) at full brightness -- the first time these were
+looked at side by side -- exposed a bug that had shipped on every sports
+screen since the font was written:
+
+- **`_FONT3x5["N"]` was `101/110/101/101/101`**, identical to K's top two
+  rows, so the panel actually showed "KYG" for NYG, "MIK" for MIN, "KOT
+  STARTED", "WKBA", "KHL", "KCAAM", "MEK'S SINGLES", "JOHKSO". Replaced
+  with the arch N (`110/101/101/101/101`, the shape Tom Thumb's 3x5 uses),
+  chosen by rendering six candidates on real strings; it shares no
+  silhouette with K (nearest neighbour is R, which has a mid bar).
+  Global (every mode uses this font), all improvements.
+- A hamming-distance sweep of the whole font found the remaining
+  1-pixel neighbours are only the classic digit pairs (0/8, 3/9, 5/6/9,
+  6/8) and 6/E -- inherent to 3x5, left alone.
+- Live tennis check: an in-progress WTA payload carries NO in-game point
+  score (only `linescores` games per set and a `notes` "X leads Y 1-0"
+  string) -- the long-standing "no live match to confirm point-score
+  fields" gap is now closed as "ESPN doesn't publish one here".
+- Method worth reusing: **render every sport/league/state from live data
+  onto one sheet before touching layout.** Freeze the engine
+  (`eng.panel_i = eng.panels.index(eng.PANEL_EVENTS)`, set `ucur`, call
+  `frame()` without `tick()`) or panel cycling and the detail
+  transition (which blends the previous frame) misalign the tiles.
+- Verified: both audits clean, live service restarted and confirmed
+  (`sent` incrementing, `loop_errors` 0), real sports frame rendered.
+  NFL live-game rendering still unverified against a live game (first
+  chance: Monday night 2026-09-21, NYG @ LAR).
