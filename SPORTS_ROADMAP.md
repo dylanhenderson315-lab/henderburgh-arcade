@@ -15,7 +15,12 @@ Same rules that govern the rest of the project apply here:
 
 ---
 
-## What's built as of 2026-09-25 (overnight session)
+## What.s built as of 2026-09-25 (overnight session)
+
+**NEW TIER 3 shipped tonight**
+- Real live win-probability sparkline on DETAIL views (bounded
+  40-sample deque, resets on favorite-game change)
+
 
 **NEW TIER 1 shipped tonight**
 - Score-change HERO FLASH (whole cutout box strobes bright)

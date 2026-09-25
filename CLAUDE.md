@@ -7044,3 +7044,23 @@ features + fixed 3 real bugs across sports.
 5. `launchctl kickstart -k gui/$UID/com.henderburgh.arcade`, poll
    `/api/state` twice to confirm `stats.sent` incrementing.
 6. `git checkout -- ownernote_config.json` before every commit.
+
+## Overnight TIER 3 shipped: real live win-probability sparkline (2026-09-25)
+
+`SportsEngine._wp_history` collects up to 40 real observed
+`self.data["win_prob"]` samples for the pinned favorite's own game.
+Deque samples about every 5s (100 ticks at 0.05s tick_rate); the
+underlying win_prob polls at `WINPROB_REFRESH` (20s) so the sample
+rate doesn't spam duplicates. Deque resets when the favorite game
+changes so the sparkline can't show another game's trajectory.
+
+`_draw_win_pct` extended: keeps the "WIN 63" text at bottom-left of
+DETAIL, and when 3+ real samples exist, draws a compact `draw_sparkline`
+of the real trajectory in the leader-green color, right of the text.
+Real innovation vs. any ticker on the market -- most tickers show a
+single win% number, none show the game's live-momentum trajectory in
+a tiny visual footprint.
+
+Verified with synthetic-history-injected render (10 samples rising
+then dipping) showing the correct oscillation. Real live verification
+needs a live pinned-favorite game (waiting on NFL Sunday slate).
