@@ -1056,11 +1056,22 @@ def draw_scorebug_bars(buf, y, comps, row_h=8, possession=None, name_w=30):
                     put_px(buf, 2 + dx, base_y + dy, (255, 255, 255))
         nx = 6
         seed = c.get("seed")
+        # SEED SUBTRACTS FROM NAME BUDGET (2026-09-25). Was: the seed
+        # advances nx past its glyph but never reduced the name_w budget
+        # passed to fit_person, so a real 13-char player name ("D.
+        # SHAPOVALOV") fit_person'd against the tennis-wide budget of
+        # 52px could compute to fit -- and then be drawn from nx=11,
+        # ending at x=62, past WIDTH-3=61. Real live rendering caught it
+        # as "D. SHAPOVAL" with the last two letters chopped by the
+        # panel bound. Now: the seed's actual width is subtracted from
+        # the effective name budget before fit_person runs.
+        avail_name_w = name_w
         if isinstance(seed, int) and 1 <= seed <= 99:
             # 3x5 has no '#'. Dim number on the rail is the seed.
             stag = str(seed)
             draw_text3x5(buf, nx, y + 2, stag, (28, 28, 32))
             nx += text_w(stag) + 2
+            avail_name_w -= text_w(stag) + 2
         # fit_person, not fit_text: a real second bug in the same real
         # tennis match that surfaced name_w's own fix -- "F. AUGER-
         # ALIASSIME" (19 real chars) still didn't fit even the widened
@@ -1072,7 +1083,7 @@ def draw_scorebug_bars(buf, y, comps, row_h=8, possession=None, name_w=30):
         # single-token team code (no space to split on) behaves
         # identically to fit_text here, so this is safe for every other
         # sport too, not just tennis.
-        abbr_txt = fit_person(c.get("abbr") or "", name_w, 1)
+        abbr_txt = fit_person(c.get("abbr") or "", avail_name_w, 1)
         draw_text3x5(buf, nx, y + 2, abbr_txt, ink)
         sc = c.get("score")
         sc_txt = "" if sc is None else str(sc)
@@ -15751,7 +15762,15 @@ class SportsEngine(Browsable, BigMomentSource):
 
     def _frame_universal(self):
         """One event from ANY sport, dispatched to that sport's renderer
-        when it has one, else the generic two-row fallback."""
+        when it has one, else the generic two-row fallback.
+
+        FAVORITE-IS-LIVE-ELSEWHERE badge (2026-09-25, TIER 3): when the
+        owner has a pinned favorite AND that favorite's own game is
+        LIVE right now AND the current ticker event is NOT that game,
+        overlay a small pip in a corner in the favorite's real team
+        color. Real signal ("your team is playing right now") that
+        follows the owner across the ticker rotation.
+        """
         ev = self._current_event()
         if not ev:
             return self._frame_empty("SPORTS", "NOTHING ON RIGHT NOW")
@@ -15760,8 +15779,42 @@ class SportsEngine(Browsable, BigMomentSource):
             buf = blank()
             fill(buf, self.BG)
             fn(self, buf, ev)
+            self._draw_fav_live_badge(buf, ev)
             return bytes(buf)
-        return self._frame_universal_generic()
+        buf_bytes = self._frame_universal_generic()
+        # generic returns bytes; convert to bytearray for overlay
+        fg = self.data.get("favorite_game") or {}
+        if fg.get("state") == "in" and fg.get("event_id") != ev.get("id"):
+            buf = bytearray(buf_bytes)
+            self._draw_fav_live_badge(buf, ev)
+            return bytes(buf)
+        return buf_bytes
+
+    def _draw_fav_live_badge(self, buf, ev):
+        """Small 2x2 pip in the top-left corner in the favorite team's
+        real ESPN color when a pinned favorite is LIVE elsewhere. Only
+        fires when the pinned favorite exists, its game is `state=='in'`,
+        and the current ticker event ISN'T that favorite's game -- a
+        favorite ON its own game is already the whole card.
+        """
+        fg = self.data.get("favorite_game") or {}
+        if fg.get("state") != "in":
+            return
+        if fg.get("event_id") == ev.get("id"):
+            return
+        # Real team color from the favorite's own game data.
+        fav_abbr = (self.data.get("favorite") or {}).get("team")
+        col = None
+        for c in (fg.get("competitors") or []):
+            if c.get("abbr") == fav_abbr:
+                col = c.get("color")
+                break
+        if not col:
+            return
+        # 2x2 pip in the far top-left (x=0-1, y=0-1)
+        for dy in range(2):
+            for dx in range(2):
+                put_px(buf, dx, dy, col)
 
     def _draw_league_rail(self, buf, ev):
         """Vertical position indicator down the RIGHT edge: one pip per
@@ -16263,7 +16316,15 @@ class SportsEngine(Browsable, BigMomentSource):
         (nothing drawn) when there's no momentum recorded yet or when
         the event is not live. When 2-3 pips are the same team's
         color, a real run reads at a glance across the room -- no text
-        needed. Pips are 2x2 at 3px pitch."""
+        needed. Pips are 2x2 at 3px pitch.
+
+        STREAK BADGE (2026-09-25): when all 3 pips are the SAME team
+        (a real 3-score run), the pips extend into a wider row with
+        a bright team-color highlight so a genuine hot streak visibly
+        pops from a mere alternating sequence. Only applies when we
+        have all 3 slots filled with the same team index -- the
+        honest 3-in-a-row signal, not a 2-of-3.
+        """
         if not ev.get("live"):
             return
         mom = self._momentum.get(ev.get("id"))
@@ -16273,6 +16334,20 @@ class SportsEngine(Browsable, BigMomentSource):
         if len(comps) < 2:
             return
         n = 3
+        # Detect streak: all 3 slots filled with same index
+        streak_ci = None
+        if len(mom) >= 3 and mom[-3] == mom[-2] == mom[-1]:
+            streak_ci = mom[-1]
+        if streak_ci is not None:
+            # Real 3-in-a-row: wider bar, brighter, more visible
+            col = comps[streak_ci].get("color") or self.INK_DIM
+            # Draw a bright 11px-wide bar centered
+            bar_w = 11
+            x0 = (WIDTH - bar_w) // 2
+            for dy in range(2):
+                for dx in range(bar_w):
+                    put_px(buf, x0 + dx, y + dy, col)
+            return
         w = n * 3 - 1
         x0 = (WIDTH - w) // 2
         # Right-pad the momentum list so the OLDEST pip is on the left
@@ -16323,6 +16398,38 @@ class SportsEngine(Browsable, BigMomentSource):
             else:
                 out.append(c)
         return out
+
+    def _draw_scoreline_at(self, buf, ev, y, row_h=8):
+        """DETAIL and MAIN share the same dim-loser + score-change-flash
+        overlay logic; this is the DETAIL entry point at custom y +
+        row_h. Applies:
+          - `_dim_loser_for_display`: real losing team's bar dims to
+             55% (live only, ties = both full)
+          - score-change hero flash on the strobing cutout
+        Returns the y AFTER both rows.
+        """
+        poss = (ev.get("situation") or {}).get("possession")
+        comps_display = self._dim_loser_for_display(ev)
+        end_y = draw_scorebug_bars(buf, y, comps_display, row_h=row_h,
+                                   possession=poss)
+        eid = ev.get("id")
+        comps = (ev.get("competitors") or [])[:2]
+        for ci, c in enumerate(comps):
+            pulse = self._score_pulses.get((eid, ci))
+            if not (pulse and pulse.on):
+                continue
+            sc = c.get("score")
+            if sc is None:
+                continue
+            sc_txt = str(sc)
+            box_w = text_w(sc_txt, 1) + 4
+            bx0 = WIDTH - 3 - box_w
+            row_y = y + ci * row_h
+            for by in range(row_h):
+                for bx in range(bx0, WIDTH - 3):
+                    put_px(buf, bx, row_y + by, (255, 255, 255))
+            draw_text3x5(buf, bx0 + 2, row_y + 2, sc_txt, (0, 0, 0))
+        return end_y
 
     def _draw_scoreline(self, buf, ev, y, accent):
         """MAIN uses the same scorebug as DETAIL: team-color bar, black
@@ -17884,8 +17991,15 @@ class SportsEngine(Browsable, BigMomentSource):
         if fn:
             buf = blank(); fill(buf, self.BG)
             fn(self, buf, ev)
+            self._draw_fav_live_badge(buf, ev)
             return bytes(buf)
-        return self._frame_event_detail_generic(ev)
+        buf_bytes = self._frame_event_detail_generic(ev)
+        fg = self.data.get("favorite_game") or {}
+        if fg.get("state") == "in" and fg.get("event_id") != ev.get("id"):
+            buf = bytearray(buf_bytes)
+            self._draw_fav_live_badge(buf, ev)
+            return bytes(buf)
+        return buf_bytes
 
     def _frame_event_detail_generic(self, ev):
         """EXPANDED single event -- the same visual language as GAME DAY
@@ -18170,7 +18284,7 @@ class SportsEngine(Browsable, BigMomentSource):
         half = "TOP" if top else "BOT"
         if inning:
             draw_text_centered(buf, 1, f"{half} {inning}", self.LIVE, x_min=3)
-        y = draw_scorebug_bars(buf, 7, comps, row_h=7)
+        y = self._draw_scoreline_at(buf, ev, 7, row_h=7)
 
         y += 2
         outs = ev.get("outs")
@@ -18260,7 +18374,7 @@ class SportsEngine(Browsable, BigMomentSource):
                 draw_leverage_glow(buf, 1, 1, WIDTH - 1, 6, (255, 200, 40),
                                    self.scroll * 0.35)
             draw_text_centered(buf, 1, fit_text(head, WIDTH - 8), self.LIVE, x_min=3)
-            y = draw_scorebug_bars(buf, 7, comps, row_h=8)
+            y = self._draw_scoreline_at(buf, ev, 7, row_h=8)
             clock = ev.get("clock") or ev.get("detail") or ""
             y = self._draw_mute_strip(buf, ev, y + 1)
             if clock:
@@ -18368,7 +18482,7 @@ class SportsEngine(Browsable, BigMomentSource):
         sit = ev.get("situation") or {}
         if ev["live"]:
             draw_text_centered(buf, 1, fit_text(head, WIDTH - 8), self.LIVE, x_min=3)
-            y = draw_scorebug_bars(buf, 7, comps, row_h=8)
+            y = self._draw_scoreline_at(buf, ev, 7, row_h=8)
             period, clock = ev.get("period"), ev.get("clock") or ""
             line = f"P{period} {clock}".strip() if period else clock
             y = self._draw_mute_strip(buf, ev, y + 1)
@@ -18773,8 +18887,7 @@ class SportsEngine(Browsable, BigMomentSource):
         # ---- LIVE: scorebug on empty, 4px mute strip, clock off the turf.
         sit = ev.get("situation") or {}
         draw_text_centered(buf, 1, fit_text(head, WIDTH - 8), self.LIVE, x_min=3)
-        y = draw_scorebug_bars(buf, 7, comps, row_h=8,
-                               possession=sit.get("possession"))
+        y = self._draw_scoreline_at(buf, ev, 7, row_h=8)
 
         period, clock = ev.get("period"), ev.get("clock") or ""
         line = f"{_football_period_label(period)} {clock}".strip() if period else clock
@@ -18839,7 +18952,7 @@ class SportsEngine(Browsable, BigMomentSource):
                 draw_leverage_glow(buf, 1, 1, WIDTH - 1, 6, (255, 140, 40),
                                    self.scroll * 0.35)
             draw_text_centered(buf, 1, fit_text(head, WIDTH - 8), self.LIVE, x_min=3)
-            y = draw_scorebug_bars(buf, 7, comps, row_h=8)
+            y = self._draw_scoreline_at(buf, ev, 7, row_h=8)
             period, clock = ev.get("period"), ev.get("clock") or ""
             line = f"{_basketball_period_label(period, ev.get('league','NBA'))} {clock}".strip() if period else clock
             y = self._draw_mute_strip(buf, ev, y + 1)
