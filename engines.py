@@ -228,13 +228,17 @@ _FONT3x5 = {
     # arch shape (the same N the Tom Thumb 3x5 font uses) shares no
     # silhouette with K; the only near neighbour is R, which has a mid bar.
     "N": ("110", "101", "101", "101", "101"),
+    # U was ("101","101","101","101","010"): the "narrows at bottom" tail
+    # made it read as V. Real broadcast bug: "USA" on the Presidents Cup
+    # golf leaderboard rendered "VSA" (2026-09-25 contact sheet). Real U
+    # has a flat bottom bar; V (below) has the actual pointed bottom.
     "O": ("010", "101", "101", "101", "010"),
     "P": ("110", "101", "110", "100", "100"),
     "Q": ("010", "101", "101", "111", "001"),
     "R": ("110", "101", "110", "101", "101"),
     "S": ("011", "100", "010", "001", "110"),
     "T": ("111", "010", "010", "010", "010"),
-    "U": ("101", "101", "101", "101", "010"),
+    "U": ("101", "101", "101", "101", "111"),
     "V": ("101", "101", "101", "010", "010"),
     "W": ("101", "101", "101", "111", "101"),
     "X": ("101", "101", "010", "101", "101"),
@@ -16589,7 +16593,13 @@ class SportsEngine(Browsable, BigMomentSource):
         for i, c in enumerate(comps[:rows]):
             y = 10 + i * 8
             pos_txt = str(c.get("place") or i + 1)
-            sc = c.get("score") or "-"
+            sc_raw = c.get("score")
+            # Golf score in the header can be an int (0 for "level"),
+            # a string ("-8", "E"), or None. Coerce to string once so
+            # text_w never sees an int. 2026-09-25: crash surfaced on
+            # a real live LPGA payload where the leader's score was
+            # int 0 -- text_w tried len(0) and raised TypeError.
+            sc = str(sc_raw) if sc_raw is not None and sc_raw != "" else "-"
             # Budget the name from the ACTUAL score width rather than a
             # guessed constant. The constant reserved 20px for a score
             # that is usually 11px, and cut "E. HENSELEIT" down to
@@ -16601,7 +16611,7 @@ class SportsEngine(Browsable, BigMomentSource):
             name_w = (WIDTH - 2 - text_w(sc)) - name_x - 2
             draw_text3x5(buf, name_x, y, fit_person(c.get("abbr"), name_w), self.HERO_INK)
             draw_text3x5(buf, WIDTH - 2 - text_w(sc), y,
-                         sc, self.WIN if str(sc).startswith("-") else self.INK)
+                         sc, self.WIN if sc.startswith("-") else self.INK)
 
         current, total = self._golf_round_pair(ev)
         if total:
@@ -18627,11 +18637,12 @@ class SportsEngine(Browsable, BigMomentSource):
             pos_txt = str(c.get("place") or i + 1)
             draw_text3x5(buf, 2, y, fit_text(pos_txt, 12), self.INK_DIM)
             self._draw_movement(buf, 14, y, c.get("movement"), self.WIN, self.LOSE)
-            sc = c.get("score") or "-"
+            sc_raw = c.get("score")
+            sc = str(sc_raw) if sc_raw is not None and sc_raw != "" else "-"
             name_w = (WIDTH - 2 - text_w(sc)) - 19 - 2
             draw_text3x5(buf, 19, y, fit_person(c.get("abbr"), name_w), self.HERO_INK)
             draw_text3x5(buf, WIDTH - 2 - text_w(sc), y,
-                         sc, self.WIN if str(sc).startswith("-") else self.INK)
+                         sc, self.WIN if sc.startswith("-") else self.INK)
             y += 6
 
         foot_lines = [x for x in (ev.get("venue"), ev.get("broadcast")) if x]
