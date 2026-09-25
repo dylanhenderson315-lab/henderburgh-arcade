@@ -14681,6 +14681,14 @@ class SportsEngine(Browsable, BigMomentSource):
         # are the same team's color a "run" reads at a glance.
         self._score_last = {}      # (eid, ci) -> last-seen int score (baseline)
         self._momentum = {}        # eid -> list[int] competitor indices, oldest first
+        # Win-probability history (2026-09-25) -- deque of last 32 real
+        # observed win_prob samples for the pinned favorite's own game
+        # (self.data["win_prob"] is populated only for that game). One
+        # sample per ~10 ticks (~0.5s) is enough for a shape; more
+        # frequent would repeat the same value between real polls.
+        self._wp_history = []
+        self._wp_last_sample_tick = 0
+        self._wp_event_id = None
 
     def _want_summary_ev(self, ev):
         if not ev:
@@ -15409,6 +15417,28 @@ class SportsEngine(Browsable, BigMomentSource):
         for eid in list(self._momentum.keys()):
             if eid not in live_ids:
                 del self._momentum[eid]
+
+        # WIN-PROBABILITY HISTORY sample (2026-09-25). Real: sample the
+        # current pinned favorite's win_prob about every 5s while their
+        # game is live. Reset the deque when the favorite game changes
+        # so the sparkline never shows another game's trajectory.
+        fg = self.data.get("favorite_game") or {}
+        wp = self.data.get("win_prob")
+        fg_eid = fg.get("event_id")
+        if fg_eid != self._wp_event_id:
+            self._wp_history = []
+            self._wp_event_id = fg_eid
+            self._wp_last_sample_tick = 0
+        if (isinstance(wp, (int, float)) and fg_eid
+                and fg.get("state") == "in"
+                and self.ticks - self._wp_last_sample_tick >= 100):
+            # ~5s at 0.05s tick_rate; the underlying win_prob is polled
+            # at WINPROB_REFRESH (20s) so 100-tick sample cadence just
+            # ensures we don't spam duplicates in the deque.
+            self._wp_history.append(float(wp))
+            if len(self._wp_history) > 40:
+                del self._wp_history[0]
+            self._wp_last_sample_tick = self.ticks
 
     # ---- render --------------------------------------------------------
     @staticmethod
@@ -17390,13 +17420,29 @@ class SportsEngine(Browsable, BigMomentSource):
         return y
 
     def _draw_win_pct(self, buf, ev):
-        """Pinned-favorite win% only -- same scope as baseball DETAIL."""
+        """Pinned-favorite win% + sparkline of real recent history.
+
+        Text at bottom-left ("WIN 63"), and when the engine has
+        collected 3+ real historical samples for THIS event, draw a
+        compact sparkline of that trajectory on the right side of the
+        same row. Real derived from real polled data (see tick()'s
+        _wp_history sampler) -- never fabricated, never smoothed.
+        """
         fav_game = self.data.get("favorite_game")
         wp = self.data.get("win_prob")
         if not (fav_game and fav_game.get("event_id") == ev.get("event_id")
                 and isinstance(wp, (int, float))):
             return
-        draw_text3x5(buf, 3, 59, f"WIN {int(round(wp * 100))}", self.INK_DIM)
+        # Text label on the left
+        label = f"WIN {int(round(wp * 100))}"
+        draw_text3x5(buf, 3, 59, label, self.INK_DIM)
+        # Sparkline on the right -- only if we've got real history
+        if len(self._wp_history) >= 3:
+            spark_x = 3 + text_w(label) + 3
+            spark_w = WIDTH - 3 - spark_x
+            if spark_w >= 8:
+                draw_sparkline(buf, spark_x, 59, spark_w, 5,
+                               self._wp_history, self.WIN)
 
     def _clock_is_hot(self, ev):
         """True when the clock is the one white thing -- clutch, 2:00
