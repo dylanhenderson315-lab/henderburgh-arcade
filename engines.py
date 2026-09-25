@@ -1080,6 +1080,19 @@ def draw_scorebug_bars(buf, y, comps, row_h=8, possession=None, name_w=30):
     return y
 
 
+def _football_period_label(period):
+    """Real ordinal period label for football: 1ST/2ND/3RD/4TH/OT.
+
+    Chosen over "Q1..Q4" because the 3x5 font's Q glyph has a
+    below-baseline tail that reads as a lowercase "q" at scale 2 (real
+    render test 2026-09-24). Also matches every real broadcast graphic
+    and how fans say the period out loud. OT covers period 5+ (which
+    ESPN really does return for overtimes) rather than "5TH"."""
+    if not isinstance(period, int) or period < 1:
+        return ""
+    return {1: "1ST", 2: "2ND", 3: "3RD", 4: "4TH"}.get(period, "OT")
+
+
 def draw_football_drive_strip(buf, x0, y0, x1, y1, yard_line=None,
                               redzone=False, phase=0.0):
     """Compact live field for football MAIN. Turf is set-dressing (same
@@ -16391,22 +16404,44 @@ class SportsEngine(Browsable, BigMomentSource):
         self._draw_league_rail(buf, ev)
         self._draw_scoreline(buf, ev, 11, accent)
 
-        draw_divider(buf, 36)
-        y = 39
         sit = ev.get("situation") or {}
         if ev["live"]:
             period, clock = ev.get("period"), ev.get("clock") or ""
-            line = f"Q{period} {clock}".strip() if period else clock
+            # ORDINAL, not "Q{n}", per a real render test 2026-09-24: the
+            # 3x5 Q has a tail below the O shape that at scale 2 reads
+            # as a lowercase "q" -- "Q4 6:44" showed on the panel as
+            # "q4 6:44", correct-but-wrong-feeling. "4TH 6:44" is what
+            # a broadcast prints and what a fan says out loud, and every
+            # glyph in the 3x5 font is uppercase-clean.
+            line = f"{_football_period_label(period)} {clock}".strip() if period else clock
             dd = situation_line(ev)
+            # HERO CLOCK, scale 2 (2026-09-24, direct owner priority):
+            # the empty band between the score bars (y=27) and the field
+            # strip (y=39) used to be dead space -- clock and down/dist
+            # were both scale 1, tiny, near the bottom, invisible from
+            # across the room. A live NFL frame confirmed the fact was
+            # HONEST but not READABLE. Now: quarter+clock hero at scale
+            # 2 fills the gap and reads at glance distance. Field strip
+            # keeps its identity role below. Down/dist stays scale 1 --
+            # a full "3RD & 7" is only 7 chars, but promoting it too
+            # would fight the clock for the eye.
+            hero_y = 28
+            if line and text_w(line, 2) <= WIDTH - 6:
+                draw_text_centered(buf, hero_y, line, self._clock_ink(ev), scale=2)
+            elif line:
+                draw_text_centered(buf, hero_y + 2, fit_text(line, WIDTH - 6),
+                                   self._clock_ink(ev))
+            y = 40
             y = self._draw_mute_strip(buf, ev, y)
-            if line:
-                y = draw_text_on_empty(buf, y, fit_text(line, WIDTH - 6),
-                                       self._clock_ink(ev))
             if dd:
                 y = draw_text_on_empty(buf, y, fit_text(dd, WIDTH - 6), FIELD_YARD_LINE)
             y = self._draw_timeout_pips(buf, ev, y)
             y = self._draw_last_play(buf, ev, y)
         else:
+            # Non-live (pre/post): keep the original y=39 start; there
+            # is no clock hero to slot above the divider.
+            draw_divider(buf, 36)
+            y = 39
             y = draw_text_on_empty(buf, y, fit_text(ev.get("detail") or "", WIDTH - 6),
                                    self.INK_DIM)
             if ev.get("state") == "post":
@@ -16787,15 +16822,44 @@ class SportsEngine(Browsable, BigMomentSource):
         return y
 
     def _draw_timeout_pips(self, buf, ev, y):
-        """Home/away timeout dots from real ESPN ints, or y unchanged."""
+        """Home/away timeout counts as real visual dots.
+
+        Was `draw_text3x5(buf, x, y, "T" + "." * ht, ...)` -- literally
+        the string "T..." rendered in the 3x5 font. Confirmed 2026-09-24
+        on a live NFL ATL @ GB screenshot: the two "T..." tags read as
+        broken/glitched text, not as "3 timeouts left." Real 2x2 filled
+        pips make the count instantly countable across a room, matching
+        every other real broadcast scorebug convention. Away tag on the
+        left (competitor 0), home on the right (competitor 1) -- same
+        left/away right/home convention `_draw_scoreline`'s two rows
+        already establish. Used pips = full team color; spent pips = dim
+        rim of that color, so the DIFFERENCE between "3 left" and "1
+        left" reads not just from count but from color weight."""
         sit = ev.get("situation") or {}
         ht, at = sit.get("home_timeouts"), sit.get("away_timeouts")
-        if not (isinstance(ht, int) and isinstance(at, int) and y <= HEIGHT - 6):
+        if not (isinstance(ht, int) and isinstance(at, int) and y <= HEIGHT - 3):
             return y
-        draw_text3x5(buf, 4, y, "T" + ("." * min(ht, 3)), self.INK_DIM)
-        tag = "T" + ("." * min(at, 3))
-        draw_text3x5(buf, WIDTH - 4 - text_w(tag), y, tag, self.INK_DIM)
-        return y + 6
+        comps = ev.get("competitors") or []
+        away_col = home_col = self.INK_DIM
+        for c in comps[:2]:
+            if c.get("home_away") == "away" and c.get("color"):
+                away_col = c["color"]
+            elif c.get("home_away") == "home" and c.get("color"):
+                home_col = c["color"]
+        # 2x2 pips, 3px gap between them = 5px pitch, 3 pips = 13px wide.
+        pip_w, pip_pitch, n = 2, 5, 3
+        def draw_pip_row(x0, count, col):
+            for i in range(n):
+                px = x0 + i * pip_pitch
+                filled = i < min(count, n)
+                c = col if filled else rim(col, 0.28)
+                for dy in range(pip_w):
+                    for dx in range(pip_w):
+                        put_px(buf, px + dx, y + dy, c)
+        draw_pip_row(3, at, away_col)
+        right_w = n * pip_pitch - (pip_pitch - pip_w)   # last pip is only pip_w wide
+        draw_pip_row(WIDTH - 3 - right_w, ht, home_col)
+        return y + 4
 
     def _event_line_score(self, ev):
         """Period/inning columns already in the summary worker, or None."""
@@ -18311,7 +18375,7 @@ class SportsEngine(Browsable, BigMomentSource):
                                possession=sit.get("possession"))
 
         period, clock = ev.get("period"), ev.get("clock") or ""
-        line = f"Q{period} {clock}".strip() if period else clock
+        line = f"{_football_period_label(period)} {clock}".strip() if period else clock
         dd = situation_line(ev)
         y = self._draw_mute_strip(buf, ev, y + 1)
         if line:
