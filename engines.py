@@ -1080,6 +1080,89 @@ def draw_scorebug_bars(buf, y, comps, row_h=8, possession=None, name_w=30):
     return y
 
 
+def score_kind_from_play(sport, last_play):
+    """Real scoring-play tag from a real ESPN `last_play` string.
+
+    The signal that ANY game just scored -- confirmed live: after a real
+    TD ESPN's `situation.last_play` reads e.g. "...FOR 2 YARDS,
+    TOUCHDOWN." and stays that text through the extra point / commercial
+    / next-drive setup for tens of seconds -- exactly the window a
+    scoring-play badge should be lit. When the next real play lands,
+    ESPN swaps `last_play` and this returns None again -- badge
+    disappears naturally, no timer needed, no per-play seen-set.
+
+    Real per-sport phrasings, all uppercase-clean via paneltext at the
+    I/O boundary already, all pattern-matched only on strings that
+    genuinely appeared in captured live payloads (nothing invented):
+      football -> "TD"    when "TOUCHDOWN" in text
+                  "FG"    when "FIELD GOAL IS GOOD" or "PAT IS GOOD"
+                  "SAF"   when text ends with " SAFETY."
+      baseball -> "HR"    when "HOME RUN" or "HOMERED"
+      hockey   -> "GOAL"  when text ends " GOAL." or " GOAL!"
+      soccer   -> "GOAL"  when "GOAL" is a whole word (avoids "GOAL LINE")
+
+    Basketball deliberately unhandled: NBA scores every ~30s, so any
+    "scoring-play" badge would be lit constantly and stop meaning
+    anything -- the SUSTAINED clutch treatment already covers that
+    sport's real moment (see `_board_is_clutch`).
+
+    Returns None when nothing scored or when last_play is empty -- an
+    honest "no active scoring event" rather than a guessed one.
+    """
+    if not last_play:
+        return None
+    t = last_play.upper()
+    if sport == "football":
+        if "TOUCHDOWN" in t:
+            return "TD"
+        if "FIELD GOAL IS GOOD" in t or "PAT IS GOOD" in t or "EXTRA POINT IS GOOD" in t:
+            return "FG"
+        if t.rstrip(".!?").endswith(" SAFETY"):
+            return "SAF"
+    elif sport == "baseball":
+        if "HOME RUN" in t or "HOMERED" in t:
+            return "HR"
+    elif sport == "hockey":
+        stripped = t.rstrip(".!?")
+        if stripped.endswith(" GOAL") or " GOAL " in " " + t + " ":
+            # " GOAL " word-boundary check catches "SCORED GOAL" too
+            return "GOAL"
+    elif sport == "soccer":
+        # word-boundary GOAL, avoids GOAL LINE / GOAL KICK / etc.
+        pad = " " + t + " "
+        if " GOAL " in pad or " GOAL!" in pad or "SCORED" in t:
+            return "GOAL"
+    return None
+
+
+SCORE_CHIP_COLOR = (255, 220, 80)   # bright neutral gold -- "someone just scored"
+
+
+def draw_score_chip(buf, x_right, y, kind, color=SCORE_CHIP_COLOR, phase=0.0):
+    """Sustained "scored just now" chip. Compact scale-1 pill at the
+    right edge of a row -- reads at glance distance without stealing
+    the hero clock's real estate. Slow pulse so it feels alive rather
+    than static ink.
+
+    Placed at (x_right, y) with the chip's right edge at x_right and
+    the chip growing left. Chip is text + 2px padding + 1px rim.
+    """
+    if not kind:
+        return
+    w = text_w(kind) + 4     # 2px pad each side
+    h = 7
+    x0 = x_right - w
+    if x0 < 0 or y + h > HEIGHT or y < 0:
+        return
+    pulse = 0.75 + 0.25 * math.sin(phase)
+    fill_col = rim(color, 0.85 * pulse)
+    ink = (0, 0, 0)
+    for by in range(h):
+        for bx in range(x0, x_right):
+            put_px(buf, bx, y + by, fill_col)
+    draw_text3x5(buf, x0 + 2, y + 1, kind, ink)
+
+
 def _football_period_label(period):
     """Real ordinal period label for football: 1ST/2ND/3RD/4TH/OT.
 
@@ -14526,6 +14609,13 @@ class SportsEngine(Browsable, BigMomentSource):
         # game can never show the previous game's pitcher). Filled by
         # _refresh_matchup(); see that method for the scope reasoning.
         self._matchup = {}
+        # Per-competitor score-change pulses (2026-09-24), keyed by
+        # (event_id, comp_idx). Fires when a competitor's real numeric
+        # score changes between polls -- honest event, honest team
+        # attribution. Never on first-seen (Pulse itself enforces this).
+        # Bounded implicitly: prune whenever we render, keeping only
+        # currently-live event ids.
+        self._score_pulses = {}
 
     def _want_summary_ev(self, ev):
         if not ev:
@@ -15204,6 +15294,38 @@ class SportsEngine(Browsable, BigMomentSource):
                                     if len(self.panels) > 1:
                                         self.panel_i = (self.panel_i + 1) % len(self.panels)
         self.score = len(live) or len(self.universal) or len(games)
+
+        # PER-COMPETITOR SCORE-CHANGE PULSES (2026-09-24). One shared
+        # Pulse per (event_id, comp_idx). Note() with the current score;
+        # a real change from the previous note fires the flash. First
+        # value seen never fires (Pulse guarantees this), so a game
+        # already in progress when this mode is opened doesn't
+        # spuriously flash. Prune stale keys down to only live events
+        # to keep this dict bounded (with tennis + hockey + soccer
+        # slates it can grow past 100+ entries a day).
+        live_ids = set()
+        live_events = [self.universal[i] for i in live] if live else self.universal
+        for ev in live_events:
+            eid = ev.get("id")
+            if not eid:
+                continue
+            live_ids.add(eid)
+            for ci, c in enumerate((ev.get("competitors") or [])[:2]):
+                sc = c.get("score")
+                try:
+                    key_val = int(sc) if sc is not None else None
+                except (TypeError, ValueError):
+                    key_val = None
+                if key_val is None:
+                    continue
+                k = (eid, ci)
+                if k not in self._score_pulses:
+                    self._score_pulses[k] = Pulse(ticks=18)
+                self._score_pulses[k].note(key_val)
+        # Prune keys for events no longer live/present
+        for k in list(self._score_pulses.keys()):
+            if k[0] not in live_ids:
+                del self._score_pulses[k]
 
     # ---- render --------------------------------------------------------
     @staticmethod
@@ -16065,10 +16187,31 @@ class SportsEngine(Browsable, BigMomentSource):
 
     def _draw_scoreline(self, buf, ev, y, accent):
         """MAIN uses the same scorebug as DETAIL: team-color bar, black
-        cutout name, white reserved for the score."""
+        cutout name, white reserved for the score.
+
+        Score-change pulse (2026-09-24): after the shared scorebug
+        draws, overlay a 2px bright column on the far-right edge of a
+        row whose competitor's real score just ticked up. Uses the
+        engine's own per-competitor Pulse map (see tick()), so an
+        actual score change fires a bright strobe on the right edge of
+        just THAT team's row -- honest team attribution, real change
+        signal, never on first-seen. Subtle strobe (Pulse.on blinks),
+        two columns wide, so it reads as "just happened" without
+        painting over the score number itself.
+        """
         poss = (ev.get("situation") or {}).get("possession")
-        return draw_scorebug_bars(buf, y, ev.get("competitors"), row_h=8,
-                                  possession=poss)
+        end_y = draw_scorebug_bars(buf, y, ev.get("competitors"), row_h=8,
+                                   possession=poss)
+        # Score-change strobe overlay
+        eid = ev.get("id")
+        for ci in range(min(2, len(ev.get("competitors") or []))):
+            pulse = self._score_pulses.get((eid, ci))
+            if pulse and pulse.on:
+                row_y = y + ci * 8
+                for by in range(8):
+                    for bx in range(WIDTH - 3, WIDTH - 1):
+                        put_px(buf, bx, row_y + by, (255, 255, 255))
+        return end_y
 
     def _render_baseball(self, buf, ev):
         """MLB. The live state IS the story -- "bottom 9th, 2 outs, runner
@@ -16415,18 +16558,59 @@ class SportsEngine(Browsable, BigMomentSource):
             # glyph in the 3x5 font is uppercase-clean.
             line = f"{_football_period_label(period)} {clock}".strip() if period else clock
             dd = situation_line(ev)
-            # HERO CLOCK, scale 2 (2026-09-24, direct owner priority):
-            # the empty band between the score bars (y=27) and the field
-            # strip (y=39) used to be dead space -- clock and down/dist
-            # were both scale 1, tiny, near the bottom, invisible from
-            # across the room. A live NFL frame confirmed the fact was
-            # HONEST but not READABLE. Now: quarter+clock hero at scale
-            # 2 fills the gap and reads at glance distance. Field strip
-            # keeps its identity role below. Down/dist stays scale 1 --
-            # a full "3RD & 7" is only 7 chars, but promoting it too
-            # would fight the clock for the eye.
+            # HERO SLOT (2026-09-24). Default = quarter+clock at scale 2
+            # (the empty band between the score bars at y=27 and the
+            # field strip at y=39 was dead space before). When ESPN's
+            # own `last_play` reports a real scoring play (a TD/FG/etc,
+            # detected honestly by string-match, see
+            # `score_kind_from_play`), the hero SLOT PIVOTS to the
+            # score-kind word for the natural duration of that play
+            # window -- when the next real play lands, ESPN updates
+            # last_play and the hero reverts to the clock. The clock
+            # demotes to scale 1 up-left during the score window so
+            # both facts stay on-screen; the score is just the story.
             hero_y = 28
-            if line and text_w(line, 2) <= WIDTH - 6:
+            kind = score_kind_from_play(ev.get("sport"), (sit.get("last_play") or ""))
+            # HEAT GLOW behind the hero clock in a real high-leverage
+            # state (2026-09-24). Two real signals -- both directly from
+            # ESPN's own `situation`, no derived fields, no guessing:
+            #   is_redzone: True     -> offense inside the 20, ESPN's
+            #                           own boolean, real broadcast
+            #                           convention
+            #   final 2:00 of Q2/Q4  -> the two-minute warning, real
+            #                           derivable from clock+period
+            # Skipped when a score PIVOT is already firing -- the gold
+            # score chip is louder than the glow, and stacking would
+            # muddy both. Subtle (0.18 pulse) so hero-clock text stays
+            # readable; the glow makes the moment FEEL tense without
+            # stealing the read.
+            if not kind:
+                heat = (sit.get("is_redzone") is True
+                        or (isinstance(period, int) and period in (2, 4)
+                            and self._clock_seconds(clock) is not None
+                            and self._clock_seconds(clock) <= 120))
+                if heat:
+                    draw_leverage_glow(buf, 2, hero_y - 1, WIDTH - 2, hero_y + 11,
+                                       (255, 60, 40), self.scroll * 0.3)
+            if kind:
+                # PIVOT: pulsing score-kind at scale 2 (compact code --
+                # "TD"/"FG"/"HR"/"GOAL"/"SAF") replaces the clock in the
+                # hero slot for the natural window ESPN keeps last_play
+                # on that play. The full-word version ("TOUCHDOWN.") is
+                # already scrolling in the last-play tape at the bottom
+                # -- no need to repeat it in the hero, and no need to
+                # squeeze a demoted clock somewhere (a first draft did,
+                # and a real render showed it collided with the team
+                # bar). Bright neutral gold, not team-colored, because
+                # the last_play text alone doesn't reliably attribute
+                # the play to one competitor (drives and turnovers
+                # muddy that). Clock returns as soon as ESPN swaps
+                # last_play to the next play -- context is momentary,
+                # the moment IS the moment.
+                pulse = 0.75 + 0.25 * math.sin(self.scroll * 0.4)
+                draw_text_centered(buf, hero_y, kind,
+                                   rim(SCORE_CHIP_COLOR, pulse), scale=2)
+            elif line and text_w(line, 2) <= WIDTH - 6:
                 draw_text_centered(buf, hero_y, line, self._clock_ink(ev), scale=2)
             elif line:
                 draw_text_centered(buf, hero_y + 2, fit_text(line, WIDTH - 6),
