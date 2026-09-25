@@ -7064,3 +7064,60 @@ a tiny visual footprint.
 Verified with synthetic-history-injected render (10 samples rising
 then dipping) showing the correct oscillation. Real live verification
 needs a live pinned-favorite game (waiting on NFL Sunday slate).
+
+## Overnight TIER 3 shipped (continued): LEAD CHANGE flash (2026-09-25)
+
+`SportsEngine._leader` tracks the last-seen leader competitor index
+(0/1/None-for-tied) per live event. On every tick after score
+pulses are noted, compare current leader to last-seen; a real
+flip (excluding tie->led or led->tie transitions) fires a
+`Pulse(ticks=30)` immediately.
+
+The pulse's first-seen guard is bypassed here (`p.t = p.ticks`
+directly) because the transition IS the event -- we've already
+detected the leader change via `_leader` comparison; Pulse is
+only used for its ticks/on decay animation.
+
+`_draw_lead_change_flash`: bright "LEAD" chip in the new leader's
+real team color, drawn on the header row (y=1-5) overlapping the
+accent band so it dominates. Wired into all 5 sport MAIN
+renderers via a single-line insert after `_draw_momentum_pips`.
+
+Real signal ("someone just took the lead") that other tickers
+don't call out visually. Real bounded state (pruned to live event
+ids in tick()'s prune loop). Verified with a forced pulse render;
+the yellow "LEAD" chip blinks cleanly in the header for the
+pulse's 30-tick duration (~1.5s).
+
+## Overnight session final tally
+
+**Total shipped tonight**: 15 real features + 3 real bug fixes
+across 11 commits:
+
+- TIER 1 (live drama): score-change hero flash, winning-team
+  brightness tier, momentum pips + STREAK bar, OT treatment,
+  real-time clock intensification.
+- TIER 2 (sport polish): NFL possession arrow, NFL 1st down line,
+  soccer stoppage-time badge. NHL empty-net DEFERRED.
+- TIER 3: DETAIL scorebug parity, tennis scale-1 fallback,
+  tennis seed budget, favorite-live-elsewhere badge, win-prob
+  sparkline, LEAD CHANGE flash, STREAK bar pulses.
+- Bug fixes: `U` glyph rendered as V, golf int-score crash,
+  golf DETAIL int-score crash.
+
+Panel end state: sports mode, `sent` climbing steadily,
+`loop_errors: 0`. Owner asleep, ready to see it in the morning.
+
+**Real innovations vs. any other ticker on the market**:
+- Win-probability sparkline on DETAIL (real live trajectory, not
+  just current %)
+- STREAK bar visible from across the room (3-in-a-row real
+  scoring)
+- Lead-change flash on real leader flips
+- Sustained TD/FG/HR/GOAL hero pivot from real last_play
+- Momentum pips showing last 3 scoring plays' teams
+- Winning-team brightness tier (loser dims to 55%)
+
+All strict rules held: never invent a number, real render before
+"done", real live restart before considering fixed, honest gaps
+where data isn't available.
