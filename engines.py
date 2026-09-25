@@ -1039,8 +1039,17 @@ def draw_scorebug_bars(buf, y, comps, row_h=8, possession=None, name_w=30):
             for bx in range(3, WIDTH - 3):
                 put_px(buf, bx, y + by, bar)
         if _comp_matches_tag(c, possession):
-            for by in range(row_h):
-                put_px(buf, 3, y + by, (255, 255, 255))
+            # POSSESSION ARROW (2026-09-25, TIER 2): a bright white
+            # filled triangle at the row's left rail pointing INTO the
+            # bar. Reads instantly as "this team has the ball" without
+            # a legend. Replaces the plain 1px white column (still
+            # possession, still one row, just visually explicit as an
+            # arrow shape). 3px wide, 5px tall centered vertically on
+            # the 8px row.
+            base_y = y + (row_h - 5) // 2
+            for dy, run in enumerate((1, 2, 3, 2, 1)):
+                for dx in range(run):
+                    put_px(buf, 2 + dx, base_y + dy, (255, 255, 255))
         nx = 6
         seed = c.get("seed")
         if isinstance(seed, int) and 1 <= seed <= 99:
@@ -1176,12 +1185,37 @@ def _football_period_label(period):
     return {1: "1ST", 2: "2ND", 3: "3RD", 4: "4TH"}.get(period, "OT")
 
 
+def _basketball_period_label(period, league="NBA"):
+    """Real basketball period label -- Q1..Q4 for NBA/WNBA (4-quarter),
+    1H/2H for NCAAB (2-half), OT for anything past regulation.
+
+    Basketball's clock currently renders at scale 1 (not scale 2), so
+    the "Q" lowercase-q issue is less severe than football's, but a
+    consistent OT label matters for the drama treatment across sports.
+    """
+    if not isinstance(period, int) or period < 1:
+        return ""
+    if league == "NCAAB":
+        return {1: "1H", 2: "2H"}.get(period, "OT")
+    return {1: "Q1", 2: "Q2", 3: "Q3", 4: "Q4"}.get(period, "OT")
+
+
 def draw_football_drive_strip(buf, x0, y0, x1, y1, yard_line=None,
-                              redzone=False, phase=0.0):
+                              redzone=False, phase=0.0, distance=None):
     """Compact live field for football MAIN. Turf is set-dressing (same
     as the detail hero). A ball marker is drawn ONLY when yard_line is a
     real 0..100 int from ESPN -- never inferred from down-and-distance
-    text. Redzone glow is a real isRedZone bool, not a guessed yard."""
+    text. Redzone glow is a real isRedZone bool, not a guessed yard.
+
+    1st-down line (2026-09-25, TIER 2): when `distance` is a real int
+    from ESPN's own `situation.distance`, draw a bright yellow vertical
+    tick at (yard_line + distance) on the strip -- the yellow 1st-down
+    marker every real broadcast has. Real derived from real ESPN
+    fields; the strip's left-to-right = offensive-drive-direction is a
+    display convention (matches every real broadcast graphic). Never
+    drawn if distance is 0 (goal-to-go) or missing, or if the derived
+    line would fall past the far endzone.
+    """
     if redzone:
         draw_leverage_glow(buf, x0, y0, x1, y1, (255, 50, 40), phase)
     else:
@@ -1192,6 +1226,15 @@ def draw_football_drive_strip(buf, x0, y0, x1, y1, yard_line=None,
     mid = (x0 + x1) // 2
     for y in range(y0, y1):
         put_px(buf, mid, y, rim(FIELD_YARD_LINE, 0.45))
+    # 1st-down line -- drawn BEFORE the ball marker so the ball sits on
+    # top when they're near each other.
+    if (isinstance(yard_line, int) and isinstance(distance, int)
+            and distance > 0 and 0 <= yard_line <= 100
+            and yard_line + distance <= 100):
+        span = max(1, x1 - x0 - 4)
+        fdx = x0 + 2 + int(round((yard_line + distance) / 100.0 * span))
+        for y in range(y0, y1):
+            put_px(buf, fdx, y, (255, 220, 40))   # broadcast yellow
     if isinstance(yard_line, int) and 0 <= yard_line <= 100:
         span = max(1, x1 - x0 - 4)
         bx = x0 + 2 + int(round(yard_line / 100.0 * span))
@@ -14616,6 +14659,13 @@ class SportsEngine(Browsable, BigMomentSource):
         # Bounded implicitly: prune whenever we render, keeping only
         # currently-live event ids.
         self._score_pulses = {}
+        # Per-event momentum (2026-09-25): last 3 real scoring plays'
+        # competitor index. Populated at the same time as _score_pulses
+        # (real score increase in tick()). Bounded to 3 per event and
+        # pruned to live events, same as _score_pulses. When 2-3 pips
+        # are the same team's color a "run" reads at a glance.
+        self._score_last = {}      # (eid, ci) -> last-seen int score (baseline)
+        self._momentum = {}        # eid -> list[int] competitor indices, oldest first
 
     def _want_summary_ev(self, ev):
         if not ev:
@@ -15322,10 +15372,28 @@ class SportsEngine(Browsable, BigMomentSource):
                 if k not in self._score_pulses:
                     self._score_pulses[k] = Pulse(ticks=18)
                 self._score_pulses[k].note(key_val)
+                # MOMENTUM: record team that scored on a real increase
+                # only (a value going DOWN is a real ESPN correction,
+                # not a scoring play). Baseline is set on first-seen so
+                # a game already in progress when opened doesn't back-
+                # fill momentum. Cap = 3 slots per event, oldest drops.
+                prev = self._score_last.get(k)
+                if prev is not None and key_val > prev:
+                    mom = self._momentum.setdefault(eid, [])
+                    mom.append(ci)
+                    if len(mom) > 3:
+                        del mom[0 : len(mom) - 3]
+                self._score_last[k] = key_val
         # Prune keys for events no longer live/present
         for k in list(self._score_pulses.keys()):
             if k[0] not in live_ids:
                 del self._score_pulses[k]
+        for k in list(self._score_last.keys()):
+            if k[0] not in live_ids:
+                del self._score_last[k]
+        for eid in list(self._momentum.keys()):
+            if eid not in live_ids:
+                del self._momentum[eid]
 
     # ---- render --------------------------------------------------------
     @staticmethod
@@ -16185,32 +16253,121 @@ class SportsEngine(Browsable, BigMomentSource):
         wrapper over the shared draw_trend_arrow -- see that docstring."""
         draw_trend_arrow(buf, x, y, top, color)
 
+    def _draw_momentum_pips(self, buf, ev, y=8):
+        """3 pips centered at row y in the color of the team that made
+        each of the last 3 real scoring plays for this event. Empty
+        (nothing drawn) when there's no momentum recorded yet or when
+        the event is not live. When 2-3 pips are the same team's
+        color, a real run reads at a glance across the room -- no text
+        needed. Pips are 2x2 at 3px pitch."""
+        if not ev.get("live"):
+            return
+        mom = self._momentum.get(ev.get("id"))
+        if not mom:
+            return
+        comps = (ev.get("competitors") or [])[:2]
+        if len(comps) < 2:
+            return
+        n = 3
+        w = n * 3 - 1
+        x0 = (WIDTH - w) // 2
+        # Right-pad the momentum list so the OLDEST pip is on the left
+        # and empty slots (early game with <3 scores) appear as unlit
+        # gaps on the RIGHT -- reads chronologically left-to-right.
+        pad_left = max(0, n - len(mom))
+        slots = ([None] * pad_left) + list(mom[-n:])
+        for i, ci in enumerate(slots):
+            px = x0 + i * 3
+            if ci is None:
+                col = self.INK_DIM
+            else:
+                col = comps[ci].get("color") or self.INK_DIM
+            for dy in range(2):
+                for dx in range(2):
+                    put_px(buf, px + dx, y + dy, col)
+
+    def _dim_loser_for_display(self, ev):
+        """Return a shallow copy of comps[:2] where the losing team's
+        `color` is dimmed to 55%. Ties + non-live games leave both at
+        full color. Losing team is determined strictly by real score
+        int; a missing/None score means we can't tell and return the
+        comps unchanged.
+
+        Never mutates the underlying event dict -- returns fresh dicts
+        with the color key replaced, everything else pass-through.
+        Keeps the "team color is real data, never re-painted" rule
+        (skins.py's own reasoning) intact: this dims the DISPLAY of
+        the color, not the stored color, and only for one specific
+        render-time signal (who's losing right now)."""
+        comps = (ev.get("competitors") or [])[:2]
+        if not ev.get("live") or len(comps) < 2:
+            return comps
+        try:
+            s0 = int(comps[0].get("score"))
+            s1 = int(comps[1].get("score"))
+        except (TypeError, ValueError):
+            return comps
+        if s0 == s1:
+            return comps
+        loser_i = 1 if s0 > s1 else 0
+        out = []
+        for i, c in enumerate(comps):
+            if i == loser_i and c.get("color"):
+                cc = dict(c)
+                cc["color"] = rim(c["color"], 0.55)
+                out.append(cc)
+            else:
+                out.append(c)
+        return out
+
     def _draw_scoreline(self, buf, ev, y, accent):
         """MAIN uses the same scorebug as DETAIL: team-color bar, black
         cutout name, white reserved for the score.
 
-        Score-change pulse (2026-09-24): after the shared scorebug
-        draws, overlay a 2px bright column on the far-right edge of a
-        row whose competitor's real score just ticked up. Uses the
-        engine's own per-competitor Pulse map (see tick()), so an
-        actual score change fires a bright strobe on the right edge of
-        just THAT team's row -- honest team attribution, real change
-        signal, never on first-seen. Subtle strobe (Pulse.on blinks),
-        two columns wide, so it reads as "just happened" without
-        painting over the score number itself.
+        Score-change HERO FLASH (2026-09-25, TIER 1 upgrade): after the
+        shared scorebug draws, if a competitor's real score just
+        changed, flash the ENTIRE score cutout box bright white with
+        the score number redrawn in black. Unmissable at glance
+        distance -- across-the-room "someone just scored" signal that
+        blinks for ~0.7s then fades to the normal white-on-black
+        cutout. Uses the same per-engine Pulse map first-seen guard
+        (Pulse never fires on the first value seen, so a game already
+        in progress when the mode is opened doesn't spuriously flash).
+
+        Winning-team BRIGHTNESS TIER (2026-09-25, TIER 1): the losing
+        team's bar renders at 55% of full color, the leader stays full.
+        Ties = both full. Real honest signal ("this team is winning
+        right now") that reads across the room without reading numbers.
+        Only applied while live -- final/pre games all show equal
+        brightness since the game is over or not started.
         """
         poss = (ev.get("situation") or {}).get("possession")
-        end_y = draw_scorebug_bars(buf, y, ev.get("competitors"), row_h=8,
+        comps_display = self._dim_loser_for_display(ev)
+        end_y = draw_scorebug_bars(buf, y, comps_display, row_h=8,
                                    possession=poss)
-        # Score-change strobe overlay
+        # HERO FLASH: whole score cutout box strobes bright + text
+        # redrawn in black. Reconstructs the cutout position the same
+        # way draw_scorebug_bars did (bx0 = WIDTH-3-box_w where
+        # box_w = text_w(sc_txt) + 4).
         eid = ev.get("id")
-        for ci in range(min(2, len(ev.get("competitors") or []))):
+        comps = (ev.get("competitors") or [])[:2]
+        for ci, c in enumerate(comps):
             pulse = self._score_pulses.get((eid, ci))
-            if pulse and pulse.on:
-                row_y = y + ci * 8
-                for by in range(8):
-                    for bx in range(WIDTH - 3, WIDTH - 1):
-                        put_px(buf, bx, row_y + by, (255, 255, 255))
+            if not (pulse and pulse.on):
+                continue
+            sc = c.get("score")
+            if sc is None:
+                continue
+            sc_txt = str(sc)
+            box_w = text_w(sc_txt, 1) + 4
+            bx0 = WIDTH - 3 - box_w
+            row_y = y + ci * 8
+            # bright fill (white with team-color hint at edges)
+            for by in range(8):
+                for bx in range(bx0, WIDTH - 3):
+                    put_px(buf, bx, row_y + by, (255, 255, 255))
+            # redraw score in black on the flash so it stays readable
+            draw_text3x5(buf, bx0 + 2, row_y + 2, sc_txt, (0, 0, 0))
         return end_y
 
     def _render_baseball(self, buf, ev):
@@ -16251,6 +16408,7 @@ class SportsEngine(Browsable, BigMomentSource):
                     stale=bool(self.data.get("age") and self.data["age"] > 300))
         self._draw_league_rail(buf, ev)
         self._draw_scoreline(buf, ev, 11, accent)
+        self._draw_momentum_pips(buf, ev)
 
         draw_divider(buf, 36)
         live = ev["live"]
@@ -16354,6 +16512,7 @@ class SportsEngine(Browsable, BigMomentSource):
                     icon=SPORT_ICONS.get(ev.get("sport")))
         self._draw_league_rail(buf, ev)
         self._draw_scoreline(buf, ev, 11, accent)
+        self._draw_momentum_pips(buf, ev)
 
         draw_divider(buf, 36)
         y = 39
@@ -16546,6 +16705,7 @@ class SportsEngine(Browsable, BigMomentSource):
                     icon=SPORT_ICONS.get(ev.get("sport")))
         self._draw_league_rail(buf, ev)
         self._draw_scoreline(buf, ev, 11, accent)
+        self._draw_momentum_pips(buf, ev)
 
         sit = ev.get("situation") or {}
         if ev["live"]:
@@ -16571,6 +16731,7 @@ class SportsEngine(Browsable, BigMomentSource):
             # both facts stay on-screen; the score is just the story.
             hero_y = 28
             kind = score_kind_from_play(ev.get("sport"), (sit.get("last_play") or ""))
+            is_ot = isinstance(period, int) and period >= 5
             # HEAT GLOW behind the hero clock in a real high-leverage
             # state (2026-09-24). Two real signals -- both directly from
             # ESPN's own `situation`, no derived fields, no guessing:
@@ -16579,6 +16740,8 @@ class SportsEngine(Browsable, BigMomentSource):
             #                           convention
             #   final 2:00 of Q2/Q4  -> the two-minute warning, real
             #                           derivable from clock+period
+            #   OT (period >= 5)     -> real high-drama moment, deserves
+            #                           its own gold glow instead of red
             # Skipped when a score PIVOT is already firing -- the gold
             # score chip is louder than the glow, and stacking would
             # muddy both. Subtle (0.18 pulse) so hero-clock text stays
@@ -16589,7 +16752,12 @@ class SportsEngine(Browsable, BigMomentSource):
                         or (isinstance(period, int) and period in (2, 4)
                             and self._clock_seconds(clock) is not None
                             and self._clock_seconds(clock) <= 120))
-                if heat:
+                if is_ot:
+                    # OT gets a slower, wider gold glow so it feels
+                    # sustained and celebratory rather than urgent-red.
+                    draw_leverage_glow(buf, 2, hero_y - 2, WIDTH - 2, hero_y + 12,
+                                       (255, 200, 40), self.scroll * 0.22)
+                elif heat:
                     draw_leverage_glow(buf, 2, hero_y - 1, WIDTH - 2, hero_y + 11,
                                        (255, 60, 40), self.scroll * 0.3)
             if kind:
@@ -16676,6 +16844,7 @@ class SportsEngine(Browsable, BigMomentSource):
                     icon=SPORT_ICONS.get(ev.get("sport")))
         self._draw_league_rail(buf, ev)
         self._draw_scoreline(buf, ev, 11, accent)
+        self._draw_momentum_pips(buf, ev)
 
         draw_divider(buf, 36)
         y = 40
@@ -16686,7 +16855,7 @@ class SportsEngine(Browsable, BigMomentSource):
                                (255, 140, 40), self.scroll * 0.35)
         if ev["live"]:
             period, clock = ev.get("period"), ev.get("clock") or ""
-            line = f"Q{period} {clock}".strip() if period else clock
+            line = f"{_basketball_period_label(period, ev.get('league','NBA'))} {clock}".strip() if period else clock
             y = self._draw_mute_strip(buf, ev, y)
             if line:
                 y = draw_text_on_empty(buf, y, fit_text(line, WIDTH - 6),
@@ -17121,7 +17290,43 @@ class SportsEngine(Browsable, BigMomentSource):
         return False
 
     def _clock_ink(self, ev):
-        return (255, 255, 255) if self._clock_is_hot(ev) else self.INK_DIM
+        # Soccer stoppage time ("90'+4'") -- clock renders in a bright
+        # amber to signal "we're past regulation, added time." Real
+        # from a "+" in the clock string.
+        sport = ev.get("sport")
+        clock = ev.get("clock") or ""
+        if sport == "soccer" and "+" in str(clock):
+            return (255, 180, 60)
+        # OT: gold clock text -- "we're past regulation, this is bonus
+        # basketball/football/hockey time." Real derived from period
+        # (>=5 for football/NBA/hockey, >=3 for NCAAB).
+        # HOT + intensifying: in the final 2:00 of a real 2:00-warning
+        # period (Q2/Q4 for football, Q4 for NBA/WNBA, 2H for NCAAB,
+        # P3+ for hockey), interpolate from bright white at t=120 to
+        # a bright hot red at t=0 -- the color WARMS AS TIME DROPS,
+        # matching how a real broadcaster's audio urgency ramps up as
+        # zero approaches. Real derived only from clock+period, never
+        # a guessed threshold.
+        period = ev.get("period")
+        sport = ev.get("sport")
+        if isinstance(period, int):
+            if sport in ("football", "basketball", "hockey") and period >= 5:
+                return (255, 200, 40)
+            if sport == "basketball" and ev.get("league") == "NCAAB" and period >= 3:
+                return (255, 200, 40)
+        if not self._clock_is_hot(ev):
+            return self.INK_DIM
+        # Hot: interpolate white -> hot red as t drops from 120 -> 0.
+        secs = self._clock_seconds(ev.get("clock") or "")
+        if secs is None:
+            return (255, 255, 255)
+        # frac: 0 at 2:00 (cool), 1 at 0:00 (hot)
+        frac = max(0.0, min(1.0, (120.0 - float(secs)) / 120.0))
+        # linear mix white(255,255,255) -> hot(255,90,60)
+        r = 255
+        g = int(255 - (255 - 90) * frac)
+        b = int(255 - (255 - 60) * frac)
+        return (r, g, b)
 
     def _draw_sit_pips(self, buf, x, y, ev):
         """2px situation pips. BONUS / PP / RZ -- never words, never a wash."""
@@ -17151,7 +17356,8 @@ class SportsEngine(Browsable, BigMomentSource):
                 buf, x0, y, x1, y1,
                 yard_line=sit.get("yard_line"),
                 redzone=False,
-                phase=self.scroll * 0.3)
+                phase=self.scroll * 0.3,
+                distance=sit.get("distance"))
         elif sport == "hockey":
             draw_hockey_rink_hero(buf, x0, y, x1, y1)
         elif sport == "soccer":
@@ -17199,6 +17405,7 @@ class SportsEngine(Browsable, BigMomentSource):
                     icon=SPORT_ICONS.get(ev.get("sport")))
         self._draw_league_rail(buf, ev)
         self._draw_scoreline(buf, ev, 11, accent)
+        self._draw_momentum_pips(buf, ev)
 
         draw_divider(buf, 36)
         y = 39
@@ -18623,7 +18830,7 @@ class SportsEngine(Browsable, BigMomentSource):
             draw_text_centered(buf, 1, fit_text(head, WIDTH - 8), self.LIVE, x_min=3)
             y = draw_scorebug_bars(buf, 7, comps, row_h=8)
             period, clock = ev.get("period"), ev.get("clock") or ""
-            line = f"Q{period} {clock}".strip() if period else clock
+            line = f"{_basketball_period_label(period, ev.get('league','NBA'))} {clock}".strip() if period else clock
             y = self._draw_mute_strip(buf, ev, y + 1)
             if line:
                 y = draw_text_on_empty(buf, y, fit_text(line, WIDTH - 8),
