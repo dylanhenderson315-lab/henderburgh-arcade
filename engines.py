@@ -17216,8 +17216,24 @@ class SportsEngine(Browsable, BigMomentSource):
             # fits and is unaffected; this only changes behavior for
             # sports whose `abbr` is a real name (tennis).
             name_src = c.get("abbr") or c.get("full") or ""
+            # Prefer scale=2 hero name; fall back to scale=1 when the
+            # fit at scale 2 loses characters (tennis pre-game with
+            # real long surnames -- "KENUTSOVA" gets chopped to
+            # "KENUTS" at scale 2 in the ~47px slot, which loses
+            # identity. Scale=1 reads as a real name even at smaller
+            # size). Check: if fit_person at scale 2 returned fewer
+            # chars than the input's surname AND scale=1 fits the
+            # full name, use scale=1.
+            name_scale = 2
             name = fit_person(name_src, avail, 2)
-            draw_text3x5(buf, nx, y, name, col, scale=2)
+            src_surname = name_src.split()[-1] if name_src else ""
+            if src_surname and len(name) < len(src_surname):
+                avail1 = WIDTH - 4 - nx - (text_w(sc_txt, 2) if sc_txt else 0)
+                name1 = fit_person(name_src, avail1, 1)
+                if len(name1) > len(name):
+                    name, name_scale = name1, 1
+            draw_text3x5(buf, nx, y + (3 if name_scale == 1 else 0),
+                         name, col, scale=name_scale)
             if sc_txt:
                 draw_text3x5(buf, WIDTH - 4 - text_w(sc_txt, 2), y,
                              sc_txt, (255, 255, 255), scale=2)
