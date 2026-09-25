@@ -6878,3 +6878,76 @@ screen since the font was written:
   (`sent` incrementing, `loop_errors` 0), real sports frame rendered.
   NFL live-game rendering still unverified against a live game (first
   chance: Monday night 2026-09-21, NYG @ LAR).
+
+## Football hero layout: clock hero, real countable pips, ordinal periods (2026-09-24)
+
+Owner priority for the season: "the sports ticker needs to be number one
+in market." First live NFL game rendered end-to-end (real ATL @ GB, Sunday
+2026-09-21 slate, Week 3 Falcons @ Packers, all real ESPN payloads) to
+a contact sheet at full brightness AND night-dim (18%, since the panel
+runs on `brightness.py` night-mode most of the time this is watched).
+Three real bugs surfaced, all "correct-but-not-readable" — the data was
+honest, the render was not.
+
+- **`_draw_timeout_pips` was `draw_text3x5("T" + "." * ht)`** — literal
+  "T..." rendered in the 3x5 font. On a live frame this read as
+  glitched text, not as "3 timeouts." Rewrote as filled 2x2 pips in
+  each competitor's real ESPN color (yellow for GB, red for ATL), with
+  a dim-rim version for spent pips so the difference between "3 left"
+  and "1 left" reads not just from count but from color weight.
+  Away-left/home-right matches the scoreline's own convention. Every
+  sport that already called this helper gets the win for free
+  (basketball's fouls/timeouts, hockey when a timeout field ever
+  surfaces).
+
+- **`_render_football`'s clock and down-and-distance were both scale 1,
+  buried below the field strip** — the empty band between the team
+  bars (y=27) and the field strip (y=39) was dead space, while the
+  key live facts ("4TH 6:44", "2ND & 8 AT ATL 47") were tiny at the
+  bottom. Promoted `line` (period + clock) to scale 2 at y=28 as the
+  hero readout: it fills the gap and becomes the second-most-visible
+  fact after the score, matching every real broadcast graphic.
+  Down-and-distance stays scale 1 below the field strip — a full
+  "3RD & 7 AT ATL 45" is ~14 chars and doesn't fit scale 2 anyway,
+  and promoting both would fight for the eye.
+
+- **The 3x5 font's Q glyph has a below-baseline tail** that reads as
+  a lowercase "q" at scale 2 — a real render test showed "Q4 6:44"
+  as "q4 6:44" on the panel, correct-but-wrong-feeling. Introduced
+  `_football_period_label(period)` returning "1ST"/"2ND"/"3RD"/"4TH"/"OT"
+  for periods 1-4 and 5+. Ordinals are what fans say out loud and what
+  broadcasts print, and every glyph in the ordinal set is
+  uppercase-clean in the 3x5 font. Applied to both MAIN and DETAIL
+  football renderers; the same helper naturally extends to any future
+  sport that wants a real ordinal period tag.
+
+- **`ambient_config.json` briefly showed as modified in `git status`**:
+  the owner had switched the ambient channel to `world` via the control
+  panel during the session. Left uncommitted — same category as
+  `ownernote_config.json`'s audit-run timestamp: runtime config the
+  owner controls, not source work.
+
+Real verification path used, worth reusing for every future sports
+work:
+1. Pull a real live game from `sports.FEED.get_universal()` after a
+   real wait for the poll thread.
+2. Render MAIN and DETAIL via `eng._frame_for_view()` (NOT `eng.frame()`
+   — that goes through the 14-tick iris/push transition and the first
+   call after `self.detail` changes catches the frame mid-blend, which
+   looked like a real duplicate-frame bug on my first pass — it wasn't).
+3. Save a side-by-side PNG at 5-8x zoom, and ALSO render a copy dimmed
+   to `night_brightness` (currently 0.18) so the night-mode render
+   gets eyes on it — the panel spends most of its viewed hours there.
+
+**Honest gap after this pass, worth building next**: on a real scoring
+play, `situation.last_play` carries the story ("BI.ROBINSON LEFT GUARD
+FOR 2 YARDS, TOUCHDOWN.") but it renders as the tiny scrolling
+marquee at the very bottom. A real TD is THE moment; that text
+deserves a hero moment of its own — a shared `draw_celebration` pass
+already exists (see the sports celebration section above) and
+`_detect_nfl_touchdown` already fires for the pinned favorite's game.
+The gap is that a NON-pinned game (a random Sunday slate game the
+owner isn't following) has no such celebration, and the last-play tape
+is easy to miss. Next session: consider surfacing "SCORE" as a
+sustained on-card badge for the ~30 seconds after `last_play` says
+"TOUCHDOWN"/"FIELD GOAL", regardless of whether it's a pinned favorite.
