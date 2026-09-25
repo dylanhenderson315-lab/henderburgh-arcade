@@ -6951,3 +6951,96 @@ owner isn't following) has no such celebration, and the last-play tape
 is easy to miss. Next session: consider surfacing "SCORE" as a
 sustained on-card badge for the ~30 seconds after `last_play` says
 "TOUCHDOWN"/"FIELD GOAL", regardless of whether it's a pinned favorite.
+
+## Overnight TIER 1+2 sports push (2026-09-25)
+
+Owner told me to keep working through the night, roll through the
+roadmap tiers, keep innovating, and do pass-throughs until it's
+better than anything on the market. This session shipped 11 real
+features + fixed 3 real bugs across sports.
+
+### TIER 1 (live drama)
+
+- **Score-change HERO FLASH**: whole score cutout box strobes
+  bright-white with black digits for ~0.7s when a real score changes.
+  Was a 2px right-edge strobe; now unmissable at glance distance.
+  Uses the existing per-competitor Pulse first-seen guard.
+- **Winning-team brightness tier**: losing team's bar renders at
+  55% of full color; leader stays full; ties = both full. Reads
+  across the room without reading numbers. New
+  `_dim_loser_for_display()` never mutates the source event dict.
+- **Momentum pips**: 3 pips at y=8 in the color of each of the last
+  3 real scoring plays' teams. Populated in tick() on real
+  score-INCREASE only. First-seen adopts baseline (game already
+  in progress when opened doesn't back-fill). Wired into all 5
+  shared sport MAIN renderers.
+- **STREAK badge**: when all 3 momentum slots are the same team,
+  the pips expand into a wider 11px bright bar in that team's real
+  color. Honest 3-in-a-row signal.
+- **Overtime treatment**: gold clock text and gold heat glow when
+  period >= 5 (football/NBA/hockey) or >= 3 (NCAAB). New
+  `_basketball_period_label()` returns "Q1..Q4/OT" for NBA and
+  "1H/2H/OT" for NCAAB.
+- **Real-time clock intensification**: in the final 2:00 of Q4
+  (football) or last period (basketball final), clock color
+  interpolates from white at t=120s to bright red at t=0s.
+  Broadcast urgency ramp in visual form.
+
+### TIER 2 (sport-specific polish)
+
+- **NFL possession arrow**: filled white triangle at the left rail
+  of the possessing team's row, replacing the plain 1px column.
+- **NFL 1st down line**: yellow vertical tick on the field strip at
+  `yard_line + distance`. Real ESPN fields. Never drawn on goal-to-
+  go or when it would fall past the far endzone.
+- **Soccer stoppage-time badge**: clock renders in bright amber
+  (255,180,60) when clock string contains "+" (e.g. "90'+4'").
+- **NHL empty-net indicator**: DEFERRED (no live NHL game had
+  situation populated -- can't confirm field name; project rule
+  forbids building against unconfirmed ESPN fields).
+
+### TIER 3 / critique polish
+
+- **DETAIL view scorebug PARITY**: new `_draw_scoreline_at(buf, ev,
+  y, row_h)` extension. Every DETAIL renderer's raw scorebug call
+  swaps in; dim-loser + score-change flash now apply to DETAIL too.
+- **Tennis pre-game name fallback to scale 1**: was truncating real
+  6-char surnames at scale 2 in the ~47px slot ("MEDVED", "KENUTS",
+  "TIMOFE"). Now: fit_person at scale 2 first; if fewer chars than
+  the source's surname AND scale 1 fits more, drop to scale 1.
+  Real long names render fully.
+- **Tennis LIVE seed subtracts from name budget**: was
+  drawing name past WIDTH-3 boundary because the seed advanced
+  x-cursor but not the fit_person budget. "D. SHAPOVAL(ov)" got
+  chopped by panel bound. Fixed: `avail_name_w = name_w -
+  seed_width` before fit_person.
+- **Favorite-live-elsewhere badge**: 2x2 pip in top-left corner
+  in the pinned favorite's real team color when the favorite's game
+  is `state=='in'` AND the current event isn't that game. Reminder
+  follows the owner across the ticker rotation. Applied on both
+  MAIN and DETAIL.
+
+### Real bugs found + fixed in the pass-through
+
+- **`U` glyph shaped like V**: rendered "USA" as "VSA" on the real
+  Presidents Cup golf leaderboard. Fixed to real U with flat
+  bottom bar. Affects everything.
+- **Golf sc.get("score") crash on int**: real ESPN payload has int
+  0 for "level par", `text_w(sc)` raised TypeError. Coerced to str
+  at both MAIN and DETAIL renderers.
+- **Unrestarted-fix hazard reinforced**: verified live-service
+  restart at end of session with `err: null` and `stats.sent`
+  actually incrementing. Sports mode confirmed active with real
+  frames rendering.
+
+### Standing verification path used
+
+1. `sports.FEED.get_universal()` on real live slate.
+2. `eng._frame_for_view()` (NOT `eng.frame()` -- that triggers the
+   14-tick iris transition).
+3. Side-by-side PNG at 5x zoom, both full brightness AND night dim
+   (0.18) preview.
+4. `render_audit.py sports` + `fold_audit.py` clean.
+5. `launchctl kickstart -k gui/$UID/com.henderburgh.arcade`, poll
+   `/api/state` twice to confirm `stats.sent` incrementing.
+6. `git checkout -- ownernote_config.json` before every commit.
