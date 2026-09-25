@@ -16369,9 +16369,12 @@ class SportsEngine(Browsable, BigMomentSource):
         if len(mom) >= 3 and mom[-3] == mom[-2] == mom[-1]:
             streak_ci = mom[-1]
         if streak_ci is not None:
-            # Real 3-in-a-row: wider bar, brighter, more visible
+            # Real 3-in-a-row: wider bar, brighter, PULSING to draw
+            # attention. Real signal ("this team is on fire") that
+            # deserves a bit of motion.
             col = comps[streak_ci].get("color") or self.INK_DIM
-            # Draw a bright 11px-wide bar centered
+            pulse = 0.72 + 0.28 * math.sin(self.scroll * 0.35)
+            col = rim(col, pulse)
             bar_w = 11
             x0 = (WIDTH - bar_w) // 2
             for dy in range(2):
@@ -18404,11 +18407,10 @@ class SportsEngine(Browsable, BigMomentSource):
                 fill_plate(buf, 2, y - 1, zone_x - 1, y + 6)
                 draw_text3x5(buf, 3, y, fit_text(label, col_w), self.LIVE)
 
-        fav_game = self.data.get("favorite_game")
-        wp = self.data.get("win_prob")
-        if (fav_game and fav_game.get("event_id") == ev.get("event_id")
-                and isinstance(wp, (int, float))):
-            draw_text3x5(buf, 3, 59, f"WIN {int(round(wp * 100))}", self.INK_DIM)
+        # Use the shared helper: adds the real live win-probability
+        # sparkline when history exists, on top of the same text
+        # ("WIN 63") this line used to draw directly.
+        self._draw_win_pct(buf, ev)
 
     SPORT_DETAIL_RENDERERS["baseball"] = _render_baseball_detail
 
