@@ -15,7 +15,35 @@ Same rules that govern the rest of the project apply here:
 
 ---
 
-## What's built as of 2026-09-24
+## What's built as of 2026-09-25 (overnight session)
+
+**NEW TIER 1 shipped tonight**
+- Score-change HERO FLASH (whole cutout box strobes bright)
+- Winning-team brightness tier (loser dimmed to 55%)
+- Momentum pips (last 3 real scoring plays' colors) + STREAK bar
+  when all 3 same team
+- Overtime treatment (gold clock text + gold heat glow)
+- Real-time clock intensification (white → hot red final 2:00)
+
+**NEW TIER 2 shipped tonight**
+- NFL possession arrow (filled white triangle at team rail)
+- NFL 1st down line (yellow tick on field strip at yard+distance)
+- Soccer stoppage-time badge (amber clock when "+" in clock string)
+- NHL empty-net: DEFERRED (no live game to confirm ESPN field)
+
+**NEW TIER 3 / critique polish shipped tonight**
+- DETAIL scorebug parity (dim-loser + score flash reach DETAIL too)
+- Tennis pre-game name fallback to scale 1 (real long surnames
+  now render fully instead of 6-char chops)
+- Tennis LIVE seed subtracts from name budget
+- Favorite-is-live-elsewhere badge (corner pip when your team plays
+  during other events on the ticker)
+
+**Real bugs found + fixed by overnight critique**
+- `U` glyph shaped like V (rendered USA as VSA)
+- Golf `sc.get("score")` crash when score is int 0 (level par)
+
+## What's built as of 2026-09-24 (previous session)
 
 **Legibility**
 - Hero-scale quarter+clock in the empty band above the field strip
