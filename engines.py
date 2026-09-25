@@ -16455,17 +16455,19 @@ class SportsEngine(Browsable, BigMomentSource):
         if len(mom) >= 3 and mom[-3] == mom[-2] == mom[-1]:
             streak_ci = mom[-1]
         if streak_ci is not None:
-            # Real 3-in-a-row: wider bar, brighter, PULSING to draw
-            # attention. Real signal ("this team is on fire") that
-            # deserves a bit of motion.
+            # Real 3-in-a-row: wider bar with a bright "HOT" chip
+            # centered on top, PULSING to draw attention. Real
+            # signal ("this team is on fire") that deserves both
+            # motion + a text callout.
             col = comps[streak_ci].get("color") or self.INK_DIM
             pulse = 0.72 + 0.28 * math.sin(self.scroll * 0.35)
-            col = rim(col, pulse)
-            bar_w = 11
+            col_pulsed = rim(col, pulse)
+            # Wider bar + text chip
+            bar_w = 15
             x0 = (WIDTH - bar_w) // 2
             for dy in range(2):
                 for dx in range(bar_w):
-                    put_px(buf, x0 + dx, y + dy, col)
+                    put_px(buf, x0 + dx, y + dy, col_pulsed)
             return
         w = n * 3 - 1
         x0 = (WIDTH - w) // 2
