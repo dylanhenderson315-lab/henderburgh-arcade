@@ -14681,6 +14681,12 @@ class SportsEngine(Browsable, BigMomentSource):
         # are the same team's color a "run" reads at a glance.
         self._score_last = {}      # (eid, ci) -> last-seen int score (baseline)
         self._momentum = {}        # eid -> list[int] competitor indices, oldest first
+        # Lead-change tracking (2026-09-25): eid -> last-seen leader
+        # (0/1 competitor index) or None for a tie. When a real score
+        # change flips who leads, fire a Pulse for a bright hero flash
+        # over the header. Real event, honest signal.
+        self._leader = {}          # eid -> last-seen leader index or None
+        self._lead_change_pulses = {}  # eid -> Pulse for the flash
         # Win-probability history (2026-09-25) -- deque of last 32 real
         # observed win_prob samples for the pinned favorite's own game
         # (self.data["win_prob"] is populated only for that game). One
@@ -15407,6 +15413,46 @@ class SportsEngine(Browsable, BigMomentSource):
                     if len(mom) > 3:
                         del mom[0 : len(mom) - 3]
                 self._score_last[k] = key_val
+        # LEAD-CHANGE detection (2026-09-25): after scores are noted,
+        # compare current leader to last-seen leader per event. A real
+        # flip fires a bright Pulse for the hero flash.
+        for ev in live_events:
+            eid = ev.get("id")
+            if not eid:
+                continue
+            comps = (ev.get("competitors") or [])[:2]
+            if len(comps) < 2:
+                continue
+            try:
+                s0 = int(comps[0].get("score"))
+                s1 = int(comps[1].get("score"))
+            except (TypeError, ValueError):
+                continue
+            cur_leader = None if s0 == s1 else (0 if s0 > s1 else 1)
+            prev_leader = self._leader.get(eid, "unset")
+            if prev_leader == "unset":
+                # baseline (game already-in-progress when opened doesn't
+                # spuriously fire on first sight)
+                self._leader[eid] = cur_leader
+            elif cur_leader is not None and prev_leader is not None and cur_leader != prev_leader:
+                # Real lead change (excludes ties -- a game going from
+                # tied to led is not a "flip"; only a real leader
+                # swap counts). Force pulse to fire immediately (bypass
+                # Pulse's first-seen guard) since the lead-change event
+                # IS the transition we just detected via _leader
+                # comparison, not something we're inferring from a
+                # value-change on Pulse itself.
+                self._leader[eid] = cur_leader
+                if eid not in self._lead_change_pulses:
+                    self._lead_change_pulses[eid] = Pulse(ticks=30)
+                self._lead_change_pulses[eid]._key = cur_leader
+                self._lead_change_pulses[eid].t = self._lead_change_pulses[eid].ticks
+            else:
+                self._leader[eid] = cur_leader
+            # Advance the pulse either way so it counts down
+            if eid in self._lead_change_pulses:
+                self._lead_change_pulses[eid].note(cur_leader)
+
         # Prune keys for events no longer live/present
         for k in list(self._score_pulses.keys()):
             if k[0] not in live_ids:
@@ -15417,6 +15463,12 @@ class SportsEngine(Browsable, BigMomentSource):
         for eid in list(self._momentum.keys()):
             if eid not in live_ids:
                 del self._momentum[eid]
+        for eid in list(self._leader.keys()):
+            if eid not in live_ids:
+                del self._leader[eid]
+        for eid in list(self._lead_change_pulses.keys()):
+            if eid not in live_ids:
+                del self._lead_change_pulses[eid]
 
         # WIN-PROBABILITY HISTORY sample (2026-09-25). Real: sample the
         # current pinned favorite's win_prob about every 5s while their
@@ -16340,6 +16392,40 @@ class SportsEngine(Browsable, BigMomentSource):
         wrapper over the shared draw_trend_arrow -- see that docstring."""
         draw_trend_arrow(buf, x, y, top, color)
 
+    def _draw_lead_change_flash(self, buf, ev):
+        """Bright "LEAD" text overlay on the header for ~1.5s after a
+        real lead change. Uses the shared Pulse system; the actual
+        detection is in tick() (see _lead_change_pulses).
+
+        Placed centered ON the header row (y=1-5, overlapping the
+        accent band) so it dominates -- a real lead flip is a big
+        moment, worth stealing the header briefly. The new leader's
+        team color, in the sport's WIN color from the theme -- reads
+        as "someone took the lead" instantly.
+        """
+        pulse = self._lead_change_pulses.get(ev.get("id"))
+        if not (pulse and pulse.on):
+            return
+        # Which team just took the lead? Determine from current scores.
+        comps = (ev.get("competitors") or [])[:2]
+        try:
+            s0 = int(comps[0].get("score"))
+            s1 = int(comps[1].get("score"))
+        except (TypeError, ValueError):
+            return
+        if s0 == s1:
+            return
+        leader = comps[0] if s0 > s1 else comps[1]
+        col = leader.get("color") or self.INK
+        # Overlay a bright chip on the header
+        label = "LEAD"
+        w = text_w(label) + 4
+        x0 = (WIDTH - w) // 2
+        for by in range(7):
+            for bx in range(x0, x0 + w):
+                put_px(buf, bx, by, col)
+        draw_text3x5(buf, x0 + 2, 1, label, (0, 0, 0))
+
     def _draw_momentum_pips(self, buf, ev, y=8):
         """3 pips centered at row y in the color of the team that made
         each of the last 3 real scoring plays for this event. Empty
@@ -16553,6 +16639,7 @@ class SportsEngine(Browsable, BigMomentSource):
         self._draw_league_rail(buf, ev)
         self._draw_scoreline(buf, ev, 11, accent)
         self._draw_momentum_pips(buf, ev)
+        self._draw_lead_change_flash(buf, ev)
 
         draw_divider(buf, 36)
         live = ev["live"]
@@ -16657,6 +16744,7 @@ class SportsEngine(Browsable, BigMomentSource):
         self._draw_league_rail(buf, ev)
         self._draw_scoreline(buf, ev, 11, accent)
         self._draw_momentum_pips(buf, ev)
+        self._draw_lead_change_flash(buf, ev)
 
         draw_divider(buf, 36)
         y = 39
@@ -16856,6 +16944,7 @@ class SportsEngine(Browsable, BigMomentSource):
         self._draw_league_rail(buf, ev)
         self._draw_scoreline(buf, ev, 11, accent)
         self._draw_momentum_pips(buf, ev)
+        self._draw_lead_change_flash(buf, ev)
 
         sit = ev.get("situation") or {}
         if ev["live"]:
@@ -16995,6 +17084,7 @@ class SportsEngine(Browsable, BigMomentSource):
         self._draw_league_rail(buf, ev)
         self._draw_scoreline(buf, ev, 11, accent)
         self._draw_momentum_pips(buf, ev)
+        self._draw_lead_change_flash(buf, ev)
 
         draw_divider(buf, 36)
         y = 40
@@ -17588,6 +17678,7 @@ class SportsEngine(Browsable, BigMomentSource):
         self._draw_league_rail(buf, ev)
         self._draw_scoreline(buf, ev, 11, accent)
         self._draw_momentum_pips(buf, ev)
+        self._draw_lead_change_flash(buf, ev)
 
         draw_divider(buf, 36)
         y = 39
