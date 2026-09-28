@@ -2107,6 +2107,14 @@ class FollowFlightFeed:
         # whenever the callsign changes so a new flight always gets its own
         # real notice rather than inheriting the last one's fired state.
         self._landing_notified = False
+        # One-shot "in your window RIGHT NOW" push (2026-09-28, real-world
+        # use case: friend flying out of MYR on AA5863 wanted a balcony pic.
+        # Fires once when the FOLLOWED flight's real bearing/distance from
+        # home puts it inside the configured window cone (satellite.load_window).
+        # Same one-shot discipline as landing_notified -- won't spam if the
+        # flight orbits in and out of the cone during approach; only the
+        # first genuine entry counts.
+        self._in_window_notified = False
 
     def set_followed(self, callsign):
         """Owner sets (or clears, with a falsy callsign) which flight to
@@ -2123,6 +2131,7 @@ class FollowFlightFeed:
             self._err = None
             self._trail = []
             self._landing_notified = False
+            self._in_window_notified = False
         return norm
 
     def get(self):
@@ -2293,7 +2302,47 @@ class FollowFlightFeed:
                     if len(self._trail) > TRAIL_MAX_POINTS_FOLLOW:
                         self._trail = self._trail[-TRAIL_MAX_POINTS_FOLLOW:]
             already_notified = self._landing_notified
+            already_win_notified = self._in_window_notified
             route_for_progress = (ac or {}).get("route") if ac else None
+
+        # "IN YOUR WINDOW" push (2026-09-28) -- fires at most once per
+        # followed flight when it enters the configured window cone as
+        # seen from home. Real: same bearing_distance() haversine every
+        # other in-window check uses, same satellite.in_window() cone
+        # test, same distance cap. Non-blocking honest-degrade: any
+        # missing bit (no aircraft lat/lon, no home location, no
+        # configured window) just skips -- an honest gap, not a
+        # fabricated "in your window" alert.
+        if ac is not None and not already_win_notified:
+            alat, alon = ac.get("lat"), ac.get("lon")
+            if isinstance(alat, (int, float)) and isinstance(alon, (int, float)):
+                try:
+                    loc = satellite.load_location()
+                    win = satellite.load_window()
+                    hlat, hlon = loc.get("lat"), loc.get("lon")
+                    if isinstance(hlat, (int, float)) and isinstance(hlon, (int, float)):
+                        brg, dist_nm = bearing_distance(hlat, hlon, alat, alon)
+                        max_nm = win.get("max_nm") or satellite.WINDOW_MAX_NM_DEFAULT
+                        if (dist_nm <= max_nm
+                                and satellite.in_window(brg, win["center_deg"], win["fov_deg"])):
+                            with self._lock:
+                                self._in_window_notified = True
+                            cs_disp = (ac.get("callsign") or callsign or "").strip() or callsign
+                            reg = ac.get("reg") or cs_disp
+                            typ = ac.get("type") or ""
+                            dist_mi = round(dist_nm * 1.15078)
+                            home.push_notification(
+                                "IN YOUR WINDOW",
+                                f"{reg} ({typ}) is overhead, {dist_mi}mi from home -- LOOK UP.".strip(),
+                            )
+                            events_log.LOG.record(
+                                "plane",
+                                paneltext.panel_text(
+                                    f"{reg} in window ({dist_mi}mi)"))
+                except Exception:                      # noqa: BLE001
+                    # honest degrade: never let a monitoring push break
+                    # the real polling loop
+                    pass
 
         # "LANDING SOON" push (2026-08-21) -- fires at most once per followed
         # flight, on the SAME background thread that already does real I/O
