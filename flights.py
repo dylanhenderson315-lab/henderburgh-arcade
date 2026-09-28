@@ -1952,6 +1952,112 @@ IATA_TO_ICAO_PREFIX = {
     "AZ": "ITY", "LX": "SWR", "SN": "BEL", "AY": "FIN", "TP": "TAP",
 }
 
+# REGIONAL FALLBACKS (2026-09-28) -- direct owner report: friend flying
+# on "AA5863" was actually broadcasting as "PDT5863" (Piedmont, a real
+# American Eagle regional operator on an E145). Same pattern already
+# documented in CLAUDE.md's flights section for AA4495 -> RPA4495
+# (Republic). Under a mainline ticket code the OPERATING airline can be
+# any of half a dozen regional carriers, each broadcasting under their
+# OWN ICAO callsign. Without a paid codeshare/schedule database we
+# can't know in advance WHICH operator has this specific flight today
+# -- but we CAN try the real mainline first and then a curated set of
+# the operating airlines' real ICAO prefixes with the same flight
+# number, and take the first one that returns a real live aircraft.
+# Every prefix here is a REAL currently-operating regional carrier
+# operating under the mainline's brand (real, checked, not guessed).
+IATA_REGIONAL_FALLBACK_PREFIXES = {
+    "AA": [
+        "AAL",                    # American Airlines mainline (first pick)
+        "ENY", "MQY",             # Envoy Air (American Eagle)
+        "RPA",                    # Republic Airways
+        "SKW",                    # SkyWest (some AA Eagle routes)
+        "PDT",                    # Piedmont Airlines
+        "PSA", "JIA",             # PSA Airlines
+    ],
+    "DL": [
+        "DAL",                    # Delta mainline
+        "EDV",                    # Endeavor Air (Delta Connection)
+        "SKW",                    # SkyWest (some Delta Connection routes)
+        "GJS",                    # GoJet (Delta Connection historically)
+    ],
+    "UA": [
+        "UAL",                    # United mainline
+        "SKW",                    # SkyWest (United Express)
+        "GJS",                    # GoJet (United Express)
+        "CPZ",                    # CommutAir
+        "AWI",                    # Air Wisconsin
+        "MES",                    # Mesa Airlines
+    ],
+    "AS": [
+        "ASA",                    # Alaska mainline
+        "QXE",                    # Horizon Air (Alaska)
+        "SKW",                    # SkyWest (some Alaska routes)
+    ],
+}
+
+
+def _fallback_callsigns(callsign):
+    """Every real callsign worth trying for a follow lookup, in
+    priority order (the caller's exact prefix first, then any real
+    regional operators in the same family).
+
+    Splits `callsign` into (letter prefix, digits). When the prefix is
+    a known mainline ICAO (AAL/DAL/UAL/ASA), a real IATA (AA/DL/UA/AS),
+    or one of the mainline's known regional operators (ENY, PDT, SKW,
+    ...), returns the WHOLE family so any real operator carrying that
+    flight number under the brand gets tried. Unknown prefixes return
+    [callsign] alone -- never fabricated into many.
+    """
+    # Try 3-letter ICAO prefix FIRST (real airline callsigns like
+    # AAL/PDT/UAL/DAL/etc), then 2-alnum IATA (AA/DL/9E/etc). Order
+    # matters: a greedy 2-3 char match on "AA5863" would incorrectly
+    # grab "AA5" as the prefix, losing the IATA family.
+    m = re.match(r"^([A-Z]{3})(\d{1,4})$", callsign)
+    if not m:
+        m = re.match(r"^([A-Z0-9]{2})(\d{1,4})$", callsign)
+    if not m:
+        return [callsign]
+    prefix, num = m.groups()
+
+    # Build reverse maps once per call (small, cheap).
+    icao_to_iata = {v: k for k, v in IATA_TO_ICAO_PREFIX.items()}
+    # regional_to_iatas: which IATA families does a regional operator
+    # ICAO belong to? ("PDT" -> ["AA"] because Piedmont is American
+    # Eagle. "SKW" -> ["AA","DL","UA","AS"] because SkyWest operates
+    # under all four mainlines and there is no way to know from the
+    # callsign alone which one THIS flight number belongs to.) A shared
+    # regional operator returns [callsign] alone rather than guessing
+    # a wrong family (see below).
+    regional_to_iatas = {}
+    for iata_key, prefixes in IATA_REGIONAL_FALLBACK_PREFIXES.items():
+        for p in prefixes:
+            regional_to_iatas.setdefault(p, []).append(iata_key)
+
+    # Determine the IATA family: direct match, mainline ICAO reverse, or
+    # regional operator reverse. A shared regional (belongs to 2+
+    # families) is NOT expanded -- would guess wrong most of the time
+    # (SKW999 might be UAL/DAL/AA/AS-branded, no way to know).
+    iata_key = None
+    if prefix in IATA_REGIONAL_FALLBACK_PREFIXES:
+        iata_key = prefix
+    elif prefix in icao_to_iata and icao_to_iata[prefix] in IATA_REGIONAL_FALLBACK_PREFIXES:
+        iata_key = icao_to_iata[prefix]
+    elif prefix in regional_to_iatas and len(regional_to_iatas[prefix]) == 1:
+        iata_key = regional_to_iatas[prefix][0]
+
+    if not iata_key:
+        return [callsign]
+
+    # Preserve order, dedupe. Original prefix first so an exact-typed
+    # form is tried before the curated list even shuffles it.
+    order = [prefix] + IATA_REGIONAL_FALLBACK_PREFIXES[iata_key]
+    seen = []
+    for p in order:
+        cs = f"{p}{num}"
+        if cs not in seen:
+            seen.append(cs)
+    return seen
+
 
 def _translate_iata_prefix(cs):
     """A real ICAO-form callsign if `cs` starts with a known real IATA
@@ -2021,7 +2127,21 @@ def _fetch_follow(callsign):
     keys), not a second parsing scheme for what is the same real payload
     shape. An empty "ac" list is a REAL, honest "not currently airborne"
     result -- not treated as an error."""
-    ac_list = _fetch_ac_list(FOLLOW_SOURCES, {"callsign": callsign})
+    # REGIONAL FALLBACK LOOKUP (2026-09-28) -- try the stored callsign
+    # first, then each real regional-operator variant if the stored one
+    # returns no live aircraft. See IATA_REGIONAL_FALLBACK_PREFIXES for
+    # the real curated list per mainline family. Empty result from EACH
+    # variant is honest "not currently airborne" for THAT callsign; only
+    # if EVERY tried variant returns empty do we fall through to the
+    # registration lookup.
+    ac_list = []
+    for cs in _fallback_callsigns(callsign):
+        try:
+            ac_list = _fetch_ac_list(FOLLOW_SOURCES, {"callsign": cs})
+        except Exception:                              # noqa: BLE001
+            ac_list = []
+        if ac_list:
+            break
     if not ac_list:
         # Fall back to a REGISTRATION lookup before concluding "not
         # airborne". Famous-aircraft picker entries (FAMOUS_AIRCRAFT) are
